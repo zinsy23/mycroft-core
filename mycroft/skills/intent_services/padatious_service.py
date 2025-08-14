@@ -115,6 +115,7 @@ class PadatiousService:
             return
 
         self.container = IntentContainer(intent_cache)
+        self.padatious_available = True
 
         self._bus = bus
         self.bus.on('padatious:register_intent', self.register_intent)
@@ -147,6 +148,14 @@ class PadatiousService:
                                              padatious_single_thread)
 
         self.finished_training_event.clear()
+
+        if not self.padatious_available or self.container is None:
+            LOG.info('Padatious not available, skipping training')
+            self.finished_training_event.set()
+            if not self.finished_initial_train:
+                self.bus.emit(Message('mycroft.skills.trained'))
+                self.finished_initial_train = True
+            return
 
         LOG.info('Training... (single_thread={})'.format(single_thread))
         self.container.train(single_thread=single_thread)
@@ -250,4 +259,6 @@ class PadatiousService:
         Args:
             utt (str): utterance to calculate best intent for
         """
+        if not self.padatious_available or self.container is None:
+            return None
         return self.container.calc_intent(utt)
