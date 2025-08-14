@@ -1305,6 +1305,12 @@ def handle_reconnecting():
     add_log_message("Looking for Messagebus websocket...")
 
 
+def handle_mycroft_ready(event):
+    """Handle the mycroft.ready event and display a green 'ready to roll' message"""
+    add_log_message("🎉 Mycroft is all loaded and ready to roll! 🎉", color=CLR_LOG1)
+    add_log_message("Looking for Messagebus websocket...")
+
+
 def gui_main(stdscr):
     global scr
     global bus
@@ -1328,6 +1334,7 @@ def gui_main(stdscr):
     bus.on('recognizer_loop:utterance', handle_utterance)
     bus.on('connected', handle_is_connected)
     bus.on('reconnecting', handle_reconnecting)
+    bus.on('mycroft.ready', handle_mycroft_ready)
 
     add_log_message("Establishing Mycroft Messagebus connection...")
 
