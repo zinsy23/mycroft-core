@@ -192,11 +192,23 @@ class SkillManager(Thread):
 
     def _start_settings_update(self):
         LOG.info('Start settings update')
-        self.skill_updater.post_manifest(reload_skills_manifest=True)
-        self.upload_queue.start()
-        LOG.info('All settings meta has been processed or upload has started')
-        self.settings_downloader.download()
-        LOG.info('Skill settings downloading has started')
+        
+        # Check if settings sync is disabled to avoid backend hangs
+        sync_enabled = self.config.get("server", {}).get("sync_skill_settings", False)
+        upload_enabled = self.config.get("skills", {}).get("upload_skill_manifest", False)
+        
+        if upload_enabled:
+            self.skill_updater.post_manifest(reload_skills_manifest=True)
+            self.upload_queue.start()
+            LOG.info('All settings meta has been processed or upload has started')
+        else:
+            LOG.info('Skill manifest upload disabled, skipping')
+            
+        if sync_enabled:
+            self.settings_downloader.download()
+            LOG.info('Skill settings downloading has started')
+        else:
+            LOG.info('Skill settings sync disabled, skipping download')
 
     def handle_paired(self, _):
         """Trigger upload of skills manifest after pairing."""
