@@ -99,9 +99,8 @@ def create_msm(msm_config: MsmConfig) -> MycroftSkillsManager:
             makedirs(msm_config.skills_dir)
 
         msm_skill_repo = SkillRepo(
-            msm_config.repo_cache,
-            msm_config.repo_url,
-            msm_config.repo_branch
+            url=msm_config.repo_url,
+            branch=msm_config.repo_branch
         )
         msm_instance = MycroftSkillsManager(
             platform=msm_config.platform,
