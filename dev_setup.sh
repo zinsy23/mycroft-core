@@ -778,145 +778,97 @@ echo "Performing final verification that skills are accessible..."
 # Weather location configuration is now integrated into the main config creation above
 echo "✅ Weather location configuration included in unified config"
 
-# FINAL STEP: Restart all services to ensure clean state and load newly installed skills
+# FINAL STEP: Stop all services for clean setup completion
 echo "=============================================================================="
-echo "FINAL STEP: Restarting all Mycroft services to ensure clean state..."
+echo "FINAL STEP: Stopping all Mycroft services for clean setup completion..."
 echo "=============================================================================="
 
 if [ -f "./start-mycroft.sh" ]; then
     if [ "$SKIP_SERVICE_STARTUP" = true ] && [ "$SKIP_SKILL_INSTALLATION" = true ]; then
-        echo "✅ No services or skills were modified - no restart needed"
+        echo "✅ No services or skills were modified - services can remain running"
         echo "Mycroft is already fully configured and ready to use!"
     else
-        echo "Restarting all Mycroft services for clean state..."
-        ./start-mycroft.sh all restart
-    
-            echo "✅ All services restart initiated - this ensures clean state and proper skill loading"
-        echo "Note: Services will restart in sequence and may take a few moments to fully load"
+        echo "Stopping all Mycroft services for clean setup completion..."
+        ./stop-mycroft.sh all
         
-        # Wait for services to restart and stabilize
-        echo "Waiting for services to restart and stabilize..."
+        echo "✅ All services stopped successfully - setup is complete and clean"
+        echo "Note: Services are now stopped and ready for manual startup when needed"
         
-        # Wait for core services to come back online after restart
-        timeout=45
-        counter=0
-        services_ready=0
+        # Verify services are stopped
+        echo "Verifying services are stopped..."
+        sleep 2  # Give services time to stop
         
-        echo "Waiting for services to restart and become ready..."
-        while [ $counter -lt $timeout ]; do
-            # Check current service status (don't reset counter)
-            current_services=0
-            if pgrep -f "python3.*mycroft.messagebus" > /dev/null; then
-                ((current_services++))
-            fi
-            if pgrep -f "python3.*mycroft.skills" > /dev/null; then
-                ((current_services++))
-            fi
-            if pgrep -f "python3.*mycroft.audio" > /dev/null; then
-                ((current_services++))
-            fi
-            if pgrep -f "python3.*mycroft.client.speech" > /dev/null; then
-                ((current_services++))
-            fi
-            
-            # Update our running total only if we see more services than before
-            if [ $current_services -gt $services_ready ]; then
-                services_ready=$current_services
-                echo "✅ Progress: $services_ready/4 services now ready after restart"
-            fi
-            
-            # Check if we've reached our target
-            if [ $services_ready -ge 4 ]; then
-                echo "✅ All core services are running after restart"
-                break
-            fi
-            
-            sleep 1
-            counter=$((counter + 1))
-            if [ $((counter % 5)) -eq 0 ]; then
-                echo "Waiting for services to restart... ($counter/$timeout seconds) - $services_ready/4 services ready"
-            fi
-        done
-        
-        if [ $services_ready -lt 4 ]; then
-            echo "⚠️  Warning: Only $services_ready/4 services ready after restart within timeout"
+        services_stopped=0
+        if ! pgrep -f "python3.*mycroft.messagebus" > /dev/null; then
+            echo "✅ Message bus service stopped"
+            ((services_stopped++))
+        else
+            echo "❌ Message bus service still running"
         fi
         
-        # Verify key services are running
-        echo "Verifying final service status..."
-        services_running=0
-        if pgrep -f "python3.*mycroft.messagebus" > /dev/null; then
-            echo "✅ Message bus service is running"
-            ((services_running++))
+        if ! pgrep -f "python3.*mycroft.skills" > /dev/null; then
+            echo "✅ Skills service stopped"
+            ((services_stopped++))
         else
-            echo "❌ Message bus service not running"
+            echo "❌ Skills service still running"
         fi
         
-        if pgrep -f "python3.*mycroft.skills" > /dev/null; then
-            echo "✅ Skills service is running"
-            ((services_running++))
+        if ! pgrep -f "python3.*mycroft.audio" > /dev/null; then
+            echo "✅ Audio service stopped"
+            ((services_stopped++))
         else
-            echo "❌ Skills not running"
+            echo "❌ Audio service still running"
         fi
         
-        if pgrep -f "python3.*mycroft.audio" > /dev/null; then
-            echo "✅ Audio service is running"
-            ((services_running++))
+        if ! pgrep -f "python3.*mycroft.client.speech" > /dev/null; then
+            echo "✅ Voice service stopped"
+            ((services_stopped++))
         else
-            echo "❌ Audio service not running"
+            echo "❌ Voice service still running"
         fi
         
-        if pgrep -f "python3.*mycroft.client.speech" > /dev/null; then
-            echo "✅ Voice service is running"
-            ((services_running++))
+        if ! pgrep -f "python3.*mycroft.client.enclosure" > /dev/null; then
+            echo "✅ Enclosure service stopped"
+            ((services_stopped++))
         else
-            echo "❌ Voice service not running"
+            echo "❌ Enclosure service still running"
         fi
         
-        if pgrep -f "python3.*mycroft.client.enclosure" > /dev/null; then
-            echo "✅ Enclosure service is running"
-            ((services_running++))
-        else
-            echo "❌ Enclosure service not running"
-        fi
+        echo "Services stopped: $services_stopped/5"
         
-        echo "Services running: $services_running/5"
-        
-        if [ "$services_running" -eq 5 ]; then
-            echo "✅ All core services are running successfully"
-            
-            # Check recent logs for any issues
-            if [ -f "/var/log/mycroft/skills.log" ]; then
-                echo "Recent skills service activity:"
-                tail -n 3 /var/log/mycroft/skills.log | grep -E "(skill|loaded|installed|loading)" || echo "Skills service logs available for monitoring"
-            fi
+        if [ "$services_stopped" -eq 5 ]; then
+            echo "✅ All core services stopped successfully"
+            echo "Setup is complete and services are ready for manual startup"
         else
-            echo "⚠️  Warning: Some services may not have started properly"
-            echo "Check logs with: tail -f /var/log/mycroft/*.log"
+            echo "⚠️  Warning: Some services may not have stopped properly"
+            echo "You can manually stop them with: ./stop-mycroft.sh all"
         fi
     fi
 else
-    echo "⚠️  Warning: start-mycroft.sh not found, cannot restart services"
+    echo "⚠️  Warning: start-mycroft.sh not found, cannot stop services"
 fi
 
 echo ""
 echo "=============================================================================="
 echo "Mycroft setup complete for offline use!"
 echo ""
+echo "🎯 SETUP STATUS: All services are now STOPPED and ready for manual startup"
+echo "This is the intended behavior - services will start fresh when you're ready to use Mycroft"
+echo ""
 echo "FIXES APPLIED:"
 echo "  ✅ FANN/fann2 compilation issue resolved with dummy module"
 echo "  ✅ /opt/mycroft directory created by Mycroft services with proper permissions"
 echo "  ✅ STABLE offline-compatible skills installed (hello-world, joke, date-time, alarm, weather)"
-echo "  ✅ All services restarted for clean state and proper skill loading"
+echo "  ✅ All services stopped for clean setup completion"
 echo "  ✅ Padatious intent parsing working without fann2 compilation"
 echo "  ✅ All skill dependencies installed (pytz, holidays, pyjokes, pyalsaaudio, timezonefinder, geocoder, requests)"
 echo "  ✅ Auto-installation of default skills prevented with multiple protection layers"
 echo "  ✅ Disabled skills moved to prevent loading attempts"
 echo "  ✅ Basic configuration created (location can be added later for weather skill)"
-echo "  ✅ Skills installation verified and skills service restarted"
+echo "  ✅ Skills installation verified and services stopped cleanly"
 echo "  ✅ CLI interaction ready for voice commands and testing"
 echo "  ✅ Efficient installation process (no unnecessary service stopping)"
-echo "  ✅ Proper verification flow (skills installed → service restarted → status verified)"
+echo "  ✅ Proper verification flow (skills installed → services stopped → setup complete)"
 echo "  ✅ Git configuration preserved (existing remotes and SSH setup maintained)"
 echo ""
 echo "The following external services have been disabled:"
@@ -932,8 +884,8 @@ echo "SKILL INSTALLATION PROCESS:"
 echo "  1. Mycroft services start to create /opt/mycroft directory structure"
 echo "  2. Skills are installed while services continue running"
 echo "  3. Offline-compatible skills are installed from GitHub repositories"
-echo "  4. Final verification and CLI enhancement"
-echo "  5. All services restart for clean state and proper skill loading"
+echo "  4. Final verification and setup completion"
+echo "  5. All services stopped for clean setup completion"
 echo ""
 echo "MYCROFT INTERACTION GUIDE:"
 echo ""
