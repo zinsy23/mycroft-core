@@ -471,34 +471,26 @@ def has_been_paired():
     """ Determine if this device has ever been paired with a web backend
 
     Returns:
-        bool: True if ever paired with backend (not factory reset)
+        bool: True if ever paired with backend.
     """
-    # This forces a load from the identity file in case the pairing state
-    # has recently changed
-    id = IdentityManager.load()
-    return id.uuid is not None and id.uuid != ""
+    # PATCH: Always return True since backend is no longer available
+    return True
 
 
 def is_paired(ignore_errors=True):
-    """Determine if this device is actively paired with a web backend
+    """ Determine if this device is currently paired with the backend
 
-    Determines if the installation of Mycroft has been paired by the user
-    with the backend system, and if that pairing is still active.
+    Args:
+        ignore_errors (bool): True to ignore errors and return an
+                              assumed paired status.
 
     Returns:
-        bool: True if paired with backend
+        bool: True if paired with backend.
     """
     global _paired_cache
-    if _paired_cache:
-        # NOTE: This assumes once paired, the unit remains paired.  So
-        # un-pairing must restart the system (or clear this value).
-        # The Mark 1 does perform a restart on RESET.
-        return True
-
-    api = DeviceApi()
-    _paired_cache = api.identity.uuid and check_remote_pairing(ignore_errors)
-
-    return _paired_cache
+    # PATCH: Always return True since backend is no longer available
+    _paired_cache = True
+    return True
 
 
 def check_remote_pairing(ignore_errors):
