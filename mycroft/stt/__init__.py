@@ -284,22 +284,16 @@ class YandexSTT(STT):
 
 
 def requires_pairing(func):
-    """Decorator kicking of pairing sequence if client is not allowed access.
-
-    Checks the http status of the response if an HTTP error is recieved. If
-    a 401 status is detected returns "pair my device" to trigger the pairing
-    skill.
-    """
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
         except HTTPError as e:
-            if e.response.status_code == 401:
-                LOG.warning('Access Denied at mycroft.ai')
-                # phrase to start the pairing process
-                return 'pair my device'
-            else:
-                raise
+            LOG.warning('HTTP Error accessing Mycroft services (backend unavailable): %s', e)
+            # PATCH: Return None instead of triggering pairing since backend is dead
+            return None
+        except Exception as e:
+            LOG.warning('Error accessing Mycroft services: %s', e)
+            return None
     return wrapper
 
 
