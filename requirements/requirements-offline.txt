@@ -1,0 +1,53 @@
+# Offline Mycroft Requirements
+# Modified version of requirements.txt with dependency fixes for modern systems
+
+# Core networking and communication
+requests>=2.26.0,<3.0
+gTTS>=2.2.2,<2.3.0
+tornado>=6.1,<7.0
+websocket-client>=1.2.1,<2.0
+requests-futures==0.9.5
+
+# Audio processing
+PyAudio==0.2.11
+SpeechRecognition==3.8.1
+pocketsphinx==0.1.0
+
+# System utilities
+pyserial==3.0
+psutil>=5.6.6
+python-dateutil~=2.6.0
+fasteners>=0.14.1
+PyYAML>=5.4
+pyxdg>=0.27
+
+# Image processing
+Pillow>=8.3.2
+
+# Event handling - match mycroft-messagebus-client dependency
+pyee==8.1.0
+
+# Mycroft core components
+lingua-franca>=0.4.2
+msm>=0.8.9
+# Use older messagebus client to avoid threading issues (will be patched)
+mycroft-messagebus-client==0.9.6
+adapt-parser>=0.3.0
+padaos>=0.1.9
+petact>=0.1.2
+precise-runner
+
+# Optional components (may fail on some systems)
+# padatious>=0.4.8  # Installed separately due to fann2 dependency issues
+# fann2>=1.0.7  # padatious dependency, install manually if needed
+# msk>=0.3.16
+
+# STT plugin for offline operation
+ovos-stt-plugin-fasterwhisper
+
+# Dependencies for working skills only
+# ifaddr>=0.1.0        # Was for mycroft-ip (removed)
+# holidays>=0.10       # Was for mycroft-date-time (removed)  
+# ovos-workshop>=0.0.5 # Was for OVOS skills (removed)
+# pytz>=2020.1         # Was for mycroft-date-time (removed)
+# timezonefinder>=8.0.0 # Was for mycroft-date-time (removed)
