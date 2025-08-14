@@ -177,6 +177,18 @@ def handle_open():
 
 def on_ready():
     LOG.info('Speech client is ready.')
+    
+    # Emit mycroft.ready event when speech client is ready
+    # This indicates Mycroft is fully ready to use (STT loaded, skills loaded, etc.)
+    try:
+        from mycroft.messagebus.message import Message
+        # Use the global bus variable
+        global bus
+        if bus:
+            bus.emit(Message('mycroft.ready'))
+            LOG.info('Emitted mycroft.ready event - Mycroft is all loaded and ready to roll!')
+    except Exception as e:
+        LOG.debug('Could not emit mycroft.ready event: {}'.format(e))
 
 
 def on_stopping():
