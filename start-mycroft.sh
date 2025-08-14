@@ -101,7 +101,12 @@ launch_process() {
 
     # Launch process in foreground
     echo "Starting $1"
-    python3 -m ${_module} "$@"
+    # Use virtual environment Python directly
+    if [ ! -f "/.dockerenv" ] ; then
+        "${VIRTUALENV_ROOT}/bin/python3" -m ${_module} "$@"
+    else
+        python3 -m ${_module} "$@"
+    fi
 }
 
 require_process() {
@@ -138,7 +143,12 @@ launch_background() {
     fi
 
     # Launch process in background, sending logs to standard location
-    python3 -m ${_module} "$@" >> "/var/log/mycroft/${1}.log" 2>&1 &
+    # Ensure virtual environment is activated for background processes
+    if [ ! -f "/.dockerenv" ] ; then
+        "${VIRTUALENV_ROOT}/bin/python3" -m ${_module} "$@" >> "/var/log/mycroft/${1}.log" 2>&1 &
+    else
+        python3 -m ${_module} "$@" >> "/var/log/mycroft/${1}.log" 2>&1 &
+    fi
 }
 
 launch_all() {
