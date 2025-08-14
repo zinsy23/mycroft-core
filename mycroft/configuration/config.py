@@ -224,7 +224,7 @@ class Configuration:
     __patch = {}  # Patch config that skills can update to override config
 
     @staticmethod
-    def get(configs=None, cache=True, remote=True):
+    def get(configs=None, cache=True, remote=False):
         """Get configuration
 
         Returns cached instance if available otherwise builds a new
@@ -244,7 +244,7 @@ class Configuration:
             return Configuration.load_config_stack(configs, cache, remote)
 
     @staticmethod
-    def load_config_stack(configs=None, cache=False, remote=True):
+    def load_config_stack(configs=None, cache=False, remote=False):
         """Load a stack of config dicts into a single dict
 
         Args:
