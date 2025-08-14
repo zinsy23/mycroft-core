@@ -124,29 +124,18 @@ class DevicePrimer(object):
         self.enclosure.mouth_text(dialog.get("message_loading.skills"))
 
     def _ensure_device_is_paired(self):
-        """Determine if device is paired, if not automatically start pairing.
+        """ Determine if device is paired, if not automatically start pairing.
 
-        Pairing cannot be performed if there is no connection to the back end.
-        So skip pairing if the backend is down.
+        Pairing must be completed before the device can be used.
+
+        If pairing is not completed in 10 minutes the application will exit.
         """
-        if not self.is_paired and not self.backend_down:
-            LOG.info('Device not paired, invoking the pairing skill')
-            payload = dict(utterances=["pair my device"], lang="en-us")
-            self.bus.emit(Message("recognizer_loop:utterance", payload))
+        # PATCH: Skip pairing since backend is no longer available
+        LOG.info('Skipping pairing - backend no longer available')
 
     def _update_device_attributes_on_backend(self):
-        """Communicate version information to the backend.
-
-        The backend tracks core version, enclosure version, platform build
-        and platform name for each device, if it is known.
-        """
-        if self.is_paired:
-            LOG.info('Sending updated device attributes to the backend...')
-            try:
-                api = DeviceApi()
-                api.update_version()
-            except Exception:
-                self._notify_backend_down()
+        # PATCH: Skip backend communication since it's no longer available
+        LOG.info('Skipping backend communication - backend no longer available')
 
     def _update_system(self):
         """Emit an update event that will be handled by the admin service."""
