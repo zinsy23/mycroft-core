@@ -288,40 +288,125 @@ echo "==========================================================================
 echo "Creating unified Mycroft configuration..."
 mkdir -p ~/.config/mycroft
 
-# Auto-detect external microphones (following original Mycroft philosophy of flexible device detection)
-EXTERNAL_MIC_DETECTED=""
+# COMMENTED OUT: Complex audio device detection (can be re-enabled if needed)
+# This was causing issues in some setups, but might be needed for specific hardware
+# Uncomment the section below if you need explicit audio device selection
+#
+# # Auto-detect external microphones (following original Mycroft philosophy of flexible device detection)
+# EXTERNAL_MIC_DETECTED=""
+# 
+# # Look for USB audio devices (most common external mics)
+# if [ -z "$EXTERNAL_MIC_DETECTED" ]; then
+#     EXTERNAL_MIC_DETECTED=$(arecord -l 2>/dev/null | grep -i "usb" | head -1 | cut -d: -f1 | grep -o "card [0-9]*" | cut -d" " -f2)
+#     [ ! -z "$EXTERNAL_MIC_DETECTED" ] && echo "Detected USB audio device on card $EXTERNAL_MIC_DETECTED"
+# fi
+# 
+# # Look for known microphone brands/patterns (like original Mycroft's regex approach)
+# if [ -z "$EXTERNAL_MIC_DETECTED" ]; then
+#     EXTERNAL_MIC_DETECTED=$(arecord -l 2>/dev/null | grep -iE "(blue|yeti|samson|rode|shure|audio-technica|webcam|c920|headset|microphone|mic)" | head -1 | cut -d: -f1 | grep -o "card [0-9]*" | cut -d" " -f2)
+#     [ ! -z "$EXTERNAL_MIC_DETECTED" ] && echo "Detected branded audio device on card $EXTERNAL_MIC_DETECTED"
+# fi
+# 
+# # Fallback: avoid card 0 (usually built-in) and prefer the highest numbered card (likely external)
+# if [ -z "$EXTERNAL_MIC_DETECTED" ]; then
+#     EXTERNAL_MIC_DETECTED=$(arecord -l 2>/dev/null | grep -v "card 0:" | tail -1 | cut -d: -f1 | grep -o "card [0-9]*" | cut -d" " -f2)
+#     [ ! -z "$EXTERNAL_MIC_DETECTED" ] && echo "Using highest-numbered audio device (card $EXTERNAL_MIC_DETECTED) as likely external mic"
+# fi
+# 
+# USB_MIC="$EXTERNAL_MIC_DETECTED"
+# 
+# # Create unified configuration with all settings (location is optional for weather skill)
+# if [ ! -z "$USB_MIC" ]; then
+#     # Get device name for the USB microphone
+#     USB_MIC_NAME=$(arecord -l 2>/dev/null | grep "card $USB_MIC:" | cut -d[ -f2 | cut -d] -f1)
+#     echo "Found external microphone: $USB_MIC_NAME on card $USB_MIC"
+#     
+#     # Create unified config with microphone and optional location for weather skill
+#     cat > ~/.config/mycroft/mycroft.conf << EOF
+# {
+#   "listener": {
+#     "device_name": "$USB_MIC_NAME",
+#     "sample_rate": 16000
+#   },
+#   "stt": {
+#     "module": "ovos-stt-plugin-fasterwhisper",
+#     "ovos-stt-plugin-fasterwhisper": {
+#       "model": "base.en",
+#       "use_cuda": false,
+#       "language": "en"
+#     }
+#   },
+#   "tts": {
+#     "module": "espeak"
+#   },
+#   "skills": {
+#     "upload_skill_manifest": false,
+#     "auto_update": false,
+#     "installer": {
+#       "disabled": true
+#     },
+#     "blacklisted_skills": [],
+#     "priority_skills": []
+#   },
+#   "server": {
+#     "sync_skill_settings": false
+#   },
+#   "data_dir": "/opt/mycroft",
+#   "skills_dir": "/opt/mycroft/skills"
+# }
+# EOF
+#     echo "✅ Created unified configuration with microphone (location can be added later for weather skill)"
+# else
+#     echo "No external microphone detected, using default audio settings"
+#     # Create unified config without specific device
+#     cat > ~/.config/mycroft/mycroft.conf << EOF
+# {
+#   "stt": {
+#     "module": "ovos-stt-plugin-fasterwhisper",
+#     "ovos-stt-plugin-fasterwhisper": {
+#       "model": "base.en",
+#       "use_cuda": false,
+#       "language": "en"
+#     }
+#   },
+#   "tts": {
+#     "module": "espeak"
+#   },
+#   "skills": {
+#     "upload_skill_manifest": false,
+#     "auto_update": false,
+#     "installer": {
+#       "disabled": true
+#     },
+#     "blacklisted_skills": [],
+#     "priority_skills": []
+#   },
+#   "server": {
+#     "sync_skill_settings": false
+#   },
+#   "data_dir": "/opt/mycroft",
+#   "skills_dir": "/opt/mycroft/skills"
+# }
+# EOF
+#     echo "✅ Created unified configuration (location can be added later for weather skill)"
+# fi
 
-# Look for USB audio devices (most common external mics)
-if [ -z "$EXTERNAL_MIC_DETECTED" ]; then
-    EXTERNAL_MIC_DETECTED=$(arecord -l 2>/dev/null | grep -i "usb" | head -1 | cut -d: -f1 | grep -o "card [0-9]*" | cut -d" " -f2)
-    [ ! -z "$EXTERNAL_MIC_DETECTED" ] && echo "Detected USB audio device on card $EXTERNAL_MIC_DETECTED"
-fi
-
-# Look for known microphone brands/patterns (like original Mycroft's regex approach)
-if [ -z "$EXTERNAL_MIC_DETECTED" ]; then
-    EXTERNAL_MIC_DETECTED=$(arecord -l 2>/dev/null | grep -iE "(blue|yeti|samson|rode|shure|audio-technica|webcam|c920|headset|microphone|mic)" | head -1 | cut -d: -f1 | grep -o "card [0-9]*" | cut -d" " -f2)
-    [ ! -z "$EXTERNAL_MIC_DETECTED" ] && echo "Detected branded audio device on card $EXTERNAL_MIC_DETECTED"
-fi
-
-# Fallback: avoid card 0 (usually built-in) and prefer the highest numbered card (likely external)
-if [ -z "$EXTERNAL_MIC_DETECTED" ]; then
-    EXTERNAL_MIC_DETECTED=$(arecord -l 2>/dev/null | grep -v "card 0:" | tail -1 | cut -d: -f1 | grep -o "card [0-9]*" | cut -d" " -f2)
-    [ ! -z "$EXTERNAL_MIC_DETECTED" ] && echo "Using highest-numbered audio device (card $EXTERNAL_MIC_DETECTED) as likely external mic"
-fi
-
-USB_MIC="$EXTERNAL_MIC_DETECTED"
-
-# Create unified configuration with all settings (location is optional for weather skill)
-if [ ! -z "$USB_MIC" ]; then
-    # Get device name for the USB microphone
-    USB_MIC_NAME=$(arecord -l 2>/dev/null | grep "card $USB_MIC:" | cut -d[ -f2 | cut -d] -f1)
-    echo "Found external microphone: $USB_MIC_NAME on card $USB_MIC"
-    
-    # Create unified config with microphone and optional location for weather skill
-    cat > ~/.config/mycroft/mycroft.conf << EOF
+# Create configuration similar to the working old setup approach
+# This is simpler and more reliable than complex device detection
+echo "Creating Mycroft configuration (simplified approach like old working setup)..."
+cat > ~/.config/mycroft/mycroft.conf << 'EOF'
 {
+  "max_allowed_core_version": 21.2,
+  "hotwords": {
+    "hey mycroft": {
+      "module": "precise",
+      "phonemes": "HH EY . M AY K R AO F T",
+      "threshold": 1e-90,
+      "lang": "en-us"
+    }
+  },
   "listener": {
-    "device_name": "$USB_MIC_NAME",
+    "wake_word": "hey mycroft",
     "sample_rate": 16000
   },
   "stt": {
@@ -351,51 +436,18 @@ if [ ! -z "$USB_MIC" ]; then
   "skills_dir": "/opt/mycroft/skills"
 }
 EOF
-    echo "✅ Created unified configuration with microphone (location can be added later for weather skill)"
-else
-    echo "No external microphone detected, using default audio settings"
-    # Create unified config without specific device
-    cat > ~/.config/mycroft/mycroft.conf << EOF
-{
-  "stt": {
-    "module": "ovos-stt-plugin-fasterwhisper",
-    "ovos-stt-plugin-fasterwhisper": {
-      "model": "base.en",
-      "use_cuda": false,
-      "language": "en"
-    }
-  },
-  "tts": {
-    "module": "espeak"
-  },
-  "skills": {
-    "upload_skill_manifest": false,
-    "auto_update": false,
-    "installer": {
-      "disabled": true
-    },
-    "blacklisted_skills": [],
-    "priority_skills": []
-  },
-  "server": {
-    "sync_skill_settings": false
-  },
-  "data_dir": "/opt/mycroft",
-  "skills_dir": "/opt/mycroft/skills"
-}
-EOF
-    echo "✅ Created unified configuration (location can be added later for weather skill)"
-fi
 
+echo "✅ Created simplified Mycroft configuration (like old working setup)"
+echo "✅ Includes max_allowed_core_version: 21.2 (critical for compatibility)"
+echo "✅ Sets up default 'hey mycroft' wake word with Precise"
+echo "✅ Uses simplified audio approach (no complex device detection)"
 echo ""
-echo "Note: Location configuration is optional and only needed for the weather skill."
-echo "To add location later, edit ~/.config/mycroft/mycroft.conf and add:"
-echo '  "location": {'
-echo '    "city": { "name": "Your City", "state": { "name": "Your State" } },'
-echo '    "coordinate": { "latitude": XX.XXXX, "longitude": -XX.XXXX }'
-echo '  },'
-echo '  "system_unit": "imperial"'
+echo "Note: This configuration follows the simpler approach that worked in your old setup."
+echo "If you need custom wake words or audio devices, you can edit ~/.config/mycroft/mycroft.conf"
+echo "Location configuration can be added later for the weather skill if needed."
 echo ""
+echo "🔧 TROUBLESHOOTING: If audio doesn't work, the complex device detection code above"
+echo "   is commented out and can be re-enabled by uncommenting those lines."
 
 echo "=============================================================================="
 echo "PHASE 2: Installing and configuring offline-compatible skills..."
