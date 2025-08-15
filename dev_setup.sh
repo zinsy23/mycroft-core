@@ -609,101 +609,39 @@ echo "Performing final verification that skills are accessible..."
 # Weather location configuration is now integrated into the main config creation above
 echo "✅ Weather location configuration included in unified config"
 
-# FINAL STEP: Stop all services for clean setup completion
+# FINAL STEP: Setup complete
 echo "=============================================================================="
-echo "FINAL STEP: Stopping all Mycroft services for clean setup completion..."
+echo "🎉 SETUP COMPLETE! Mycroft is ready for offline use."
 echo "=============================================================================="
 
-if [ -f "./start-mycroft.sh" ]; then
-    echo "Stopping all Mycroft services for clean setup completion..."
-    ./stop-mycroft.sh all
-    
-    echo "✅ All services stopped successfully - setup is complete and clean"
-    echo "Note: Services are now stopped and ready for manual startup when needed"
-    
-    # Verify services are stopped
-    echo "Verifying services are stopped..."
-    sleep 2  # Give services time to stop
-    
-    services_stopped=0
-    if ! pgrep -f "python3.*mycroft.messagebus" > /dev/null; then
-        echo "✅ Message bus service stopped"
-        ((services_stopped++))
-    else
-        echo "❌ Message bus service still running"
-    fi
-    
-    if ! pgrep -f "python3.*mycroft.skills" > /dev/null; then
-        echo "✅ Skills service stopped"
-        ((services_stopped++))
-    else
-        echo "❌ Skills service still running"
-    fi
-    
-    if ! pgrep -f "python3.*mycroft.audio" > /dev/null; then
-        echo "✅ Audio service stopped"
-        ((services_stopped++))
-    else
-        echo "❌ Audio service still running"
-    fi
-    
-    if ! pgrep -f "python3.*mycroft.client.speech" > /dev/null; then
-        echo "✅ Voice service stopped"
-        ((services_stopped++))
-    else
-        echo "❌ Voice service still running"
-    fi
-    
-    if ! pgrep -f "python3.*mycroft.client.enclosure" > /dev/null; then
-        echo "✅ Enclosure service stopped"
-        ((services_stopped++))
-    else
-        echo "❌ Enclosure service still running"
-    fi
-    
-    echo "Services stopped: $services_stopped/5"
-    
-    if [ "$services_stopped" -eq 5 ]; then
-        echo "✅ All core services stopped successfully"
-        echo "Setup is complete and services are ready for manual startup"
-    else
-        echo "⚠️  Warning: Some services may not have stopped properly"
-        echo "You can manually stop them with: ./stop-mycroft.sh all"
-    fi
-else
-    echo "⚠️  Warning: start-mycroft.sh not found, cannot stop services"
-fi
+echo "🎯 SETUP STATUS: All components installed and configured successfully"
+echo "Services are ready to start when you're ready to use Mycroft"
+echo ""
 
-echo ""
-echo "=============================================================================="
-echo "Mycroft setup complete for offline use!"
-echo ""
-echo "🎯 SETUP STATUS: All services are now STOPPED and ready for manual startup"
-echo "This is the intended behavior - services will start fresh when you're ready to use Mycroft"
-echo ""
 echo "FIXES APPLIED:"
 echo "  ✅ FANN/fann2 compilation issue resolved with dummy module"
 echo "  ✅ /opt/mycroft directory created manually with proper permissions (like old script)"
 echo "  ✅ STABLE offline-compatible skills installed (hello-world, joke, date-time, alarm, weather)"
-echo "  ✅ All services stopped for clean setup completion"
 echo "  ✅ Padatious intent parsing working without fann2 compilation"
 echo "  ✅ All skill dependencies installed (pytz, holidays, pyjokes, pyalsaaudio, timezonefinder, geocoder, requests)"
 echo "  ✅ Auto-installation of default skills prevented with multiple protection layers"
 echo "  ✅ Disabled skills moved to prevent loading attempts"
 echo "  ✅ Basic configuration created (location can be added later for weather skill)"
-echo "  ✅ Skills installation verified and services stopped cleanly"
+echo "  ✅ Skills installation verified and setup completed cleanly"
 echo "  ✅ CLI interaction ready for voice commands and testing"
 echo "  ✅ Simplified setup process (no unnecessary service startup during setup)"
 echo "  ✅ Manual directory creation (reliable, immediate, like old script)"
-echo "  ✅ Proper verification flow (directories created → skills installed → services stopped → setup complete)"
+echo "  ✅ Proper verification flow (directories created → skills installed → setup complete)"
 echo "  ✅ Git configuration preserved (existing remotes and SSH setup maintained)"
 echo ""
+
 echo "The following external services have been disabled:"
 echo "  - Device pairing (backend unavailable)"
 echo "  - Skill updates (using local skills only)"
 echo "  - Mimic2 TTS (will fall back to local Mimic)"
 echo "  - Wake word training uploads"
 echo ""
+
 echo "STT is configured to use FasterWhisper locally."
 echo "TTS is configured to use eSpeak."
 echo "=============================================================================="
