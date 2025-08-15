@@ -398,10 +398,10 @@ echo '  "system_unit": "imperial"'
 echo ""
 
 echo "=============================================================================="
-echo "PHASE 2: Installing skills while services continue running..."
+echo "PHASE 2: Installing and configuring offline-compatible skills..."
 echo "=============================================================================="
 
-# Install skills while services continue running (no stopping needed)
+# Install and configure offline-compatible skills
 echo "Installing offline-compatible skills..."
 
 # Check if skills already exist
