@@ -152,7 +152,7 @@ function checkmimic() {
 # pythoning!
 function checkPIP() {
     REQUIREMENTS_FILE="${MYCROFT_HOME}/requirements/requirements.txt"
-    VENV_ACTIVATE_SCRIPT="${MYCROFT_HOME}/venv-activate.sh"
+    VENV_ACTIVATE_SCRIPT="${MYCROFT_HOME}/.venv/bin/activate"
     mlog "Python checks"
     mlog " - Verifying $REQUIREMENTS_FILE:"
     if [[ -f "$VENV_ACTIVATE_SCRIPT" ]] ; then
