@@ -27,12 +27,213 @@ pip install --upgrade pip wheel
 
 # Install system dependencies first
 echo "Installing system dependencies..."
-sudo apt-get update
-sudo apt-get install -y python3-dev build-essential portaudio19-dev libyaml-dev espeak espeak-data swig libfann-dev jq
+
+# Detect operating system for cross-platform compatibility
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS=$ID
+    OS_LIKE=$ID_LIKE
+else
+    OS="unknown"
+    OS_LIKE="unknown"
+fi
+
+echo "Detected OS: $OS (like: $OS_LIKE)"
+
+# Install dependencies based on distribution
+if [[ "$OS" == "debian" || "$OS" == "ubuntu" || "$OS_LIKE" == *"debian"* ]]; then
+    echo "Installing Debian/Ubuntu dependencies..."
+    sudo apt-get update
+    sudo apt-get install -y \
+        git python3 python3-dev python3-setuptools python3-pip \
+        build-essential libtool libffi-dev libssl-dev \
+        autoconf automake bison swig libglib2.0-dev \
+        portaudio19-dev mpg123 screen flac curl \
+        libicu-dev pkg-config libjpeg-dev libfann-dev \
+        pulseaudio pulseaudio-utils espeak espeak-data \
+        libyaml-dev jq
+
+elif [[ "$OS" == "fedora" || "$OS_LIKE" == *"rhel"* || "$OS_LIKE" == *"fedora"* ]]; then
+    echo "Installing Fedora/RHEL/CentOS dependencies..."
+    if command -v dnf &> /dev/null; then
+        sudo dnf install -y \
+            git python3 python3-devel python3-pip python3-setuptools \
+            python3-virtualenv pygobject3-devel libtool libffi-devel \
+            openssl-devel autoconf bison swig glib2-devel \
+            portaudio-devel mpg123 mpg123-plugins-pulseaudio \
+            screen curl pkgconfig libicu-devel automake \
+            libjpeg-turbo-devel fann-devel gcc-c++ \
+            redhat-rpm-config jq make pulseaudio-utils
+    elif command -v yum &> /dev/null; then
+        sudo yum install -y \
+            cmake gcc-c++ git python3-devel libtool libffi-devel \
+            openssl-devel autoconf automake bison swig \
+            portaudio-devel mpg123 flac curl libicu-devel \
+            libjpeg-devel fann-devel pulseaudio
+    fi
+
+elif [[ "$OS" == "arch" || "$OS_LIKE" == *"arch"* ]]; then
+    echo "Installing Arch Linux dependencies..."
+    sudo pacman -S --needed --noconfirm \
+        git python python-pip python-setuptools python-virtualenv \
+        python-gobject libffi swig portaudio mpg123 screen \
+        flac curl icu libjpeg-turbo base-devel jq pulseaudio
+
+elif [[ "$OS" == "opensuse" || "$OS_LIKE" == *"suse"* ]]; then
+    echo "Installing OpenSUSE dependencies..."
+    sudo zypper install -y \
+        git python3 python3-devel libtool libffi-devel \
+        libopenssl-devel autoconf automake bison swig \
+        portaudio-devel mpg123 flac curl libicu-devel \
+        pkg-config libjpeg-devel libfann-devel python3-curses \
+        pulseaudio
+    sudo zypper install -y -t pattern devel_C_C++
+
+else
+    echo "⚠️  Unknown distribution: $OS"
+    echo "Attempting to install common dependencies..."
+    sudo apt-get update || sudo yum update || sudo pacman -Sy || true
+    sudo apt-get install -y \
+        git python3 python3-dev build-essential \
+        portaudio19-dev libyaml-dev espeak espeak-data \
+        swig libfann-dev jq || echo "Some packages may have failed"
+fi
+
+echo "✅ System dependencies installed for $OS"
 
 # Install requirements using our offline requirements file
 echo "Installing Mycroft requirements for offline operation..."
-pip install -r requirements/requirements-offline.txt
+
+# Check Python version and handle PyAudio compilation issues
+PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+PYTHON_MAJOR=$(python3 -c "import sys; print(sys.version_info.major)")
+PYTHON_MINOR=$(python3 -c "import sys; print(sys.version_info.minor)")
+echo "Detected Python version: $PYTHON_VERSION"
+
+# PyAudio often fails to compile on Python 3.11+ - try system package first
+if [[ "$PYTHON_MAJOR" -eq 3 && "$PYTHON_MINOR" -ge 11 ]]; then
+    echo "Python $PYTHON_VERSION detected (3.11+) - PyAudio compilation may fail"
+    echo "Attempting to install system PyAudio package first..."
+    
+    if [[ "$OS" == "debian" || "$OS" == "ubuntu" || "$OS_LIKE" == *"debian"* ]]; then
+        # Try to install system PyAudio for this Python version
+        PYTHON_DEV_PKG="python$PYTHON_VERSION-dev"
+        echo "Installing $PYTHON_DEV_PKG for PyAudio compilation..."
+        sudo apt-get install -y "$PYTHON_DEV_PKG" || echo "⚠️  $PYTHON_DEV_PKG not available"
+        
+        # Try system PyAudio package
+        sudo apt-get install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available"
+    elif [[ "$OS" == "fedora" || "$OS_LIKE" == *"rhel"* || "$OS_LIKE" == *"fedora"* ]]; then
+        sudo dnf install -y "python$PYTHON_VERSION-devel" || echo "⚠️  Python $PYTHON_VERSION devel not available"
+        sudo dnf install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available"
+    elif [[ "$OS" == "arch" || "$OS_LIKE" == *"arch"* ]]; then
+        sudo pacman -S --needed --noconfirm "python$PYTHON_VERSION" || echo "⚠️  Python $PYTHON_VERSION not available"
+        sudo pacman -S --needed --noconfirm python-pyaudio || echo "⚠️  python-pyaudio not available"
+    fi
+    
+    echo "Note: If PyAudio compilation fails, the script will continue with other packages"
+    echo "You may need to install PyAudio manually or use system packages"
+    
+    # Provide guidance for Ubuntu users (optional, not automatic)
+    if [[ "$OS" == "ubuntu" ]]; then
+        echo ""
+        echo "💡 UBUNTU USERS: If you need a specific Python version (like 3.11), you can:"
+        echo "   sudo add-apt-repository ppa:deadsnakes/ppa -y"
+        echo "   sudo apt update"
+        echo "   sudo apt install python3.11 python3.11-venv python3.11-dev"
+        echo "   Then recreate your virtual environment with: python3.11 -m venv .venv"
+        echo "   This is optional and only needed for specific Python version requirements"
+    fi
+fi
+
+# Function to detect PyAudio build failures and offer recovery
+detect_and_recover_pyaudio() {
+    local failed_packages=()
+    local recovery_applied=false
+    
+    echo "Installing Python requirements with failure detection..."
+    
+    # Try to install requirements and capture failures
+    if ! pip install -r requirements/requirements-offline.txt 2>&1 | tee /tmp/pip_install.log; then
+        echo ""
+        echo "⚠️  Some packages failed to install. Analyzing failures..."
+        
+        # Check for PyAudio compilation failures
+        if grep -q "error: command.*gcc.*failed" /tmp/pip_install.log || \
+           grep -q "Failed building wheel for PyAudio" /tmp/pip_install.log || \
+           grep -q "error: subprocess-exited-with-error" /tmp/pip_install.log; then
+            
+            echo "🔍 Detected PyAudio compilation failure!"
+            
+            # Check if this is Ubuntu and DeadSnakes PPA could help
+            if [[ "$OS" == "ubuntu" && "$PYTHON_MAJOR" -eq 3 && "$PYTHON_MINOR" -ge 11 ]]; then
+                echo ""
+                echo "💡 I can help fix this! The DeadSnakes PPA provides Python $PYTHON_VERSION packages"
+                echo "   that should resolve the PyAudio compilation issue."
+                echo ""
+                echo "This will:"
+                echo "  1. Add the DeadSnakes PPA repository"
+                echo "  2. Install Python $PYTHON_VERSION development packages"
+                echo "  3. Re-run the failed pip installation"
+                echo ""
+                echo "⚠️  Note: This adds a third-party repository to your system."
+                echo ""
+                read -p "Would you like me to apply this fix? [Y/n] (default: yes): " -r response
+                
+                if [[ -z "$response" || "$response" =~ ^[Yy]$ ]]; then
+                    echo "✅ Applying DeadSnakes PPA fix..."
+                    
+                    # Add DeadSnakes PPA
+                    echo "Adding DeadSnakes PPA..."
+                    sudo add-apt-repository ppa:deadsnakes/ppa -y
+                    sudo apt update
+                    
+                    # Install Python version-specific packages
+                    echo "Installing Python $PYTHON_VERSION development packages..."
+                    sudo apt install -y "python$PYTHON_VERSION-dev" "python$PYTHON_VERSION-venv"
+                    
+                    # Recreate virtual environment with new Python version
+                    echo "Recreating virtual environment with Python $PYTHON_VERSION..."
+                    deactivate 2>/dev/null || true
+                    rm -rf .venv
+                    "python$PYTHON_VERSION" -m venv .venv
+                    source .venv/bin/activate
+                    
+                    # Re-run the failed installation
+                    echo "Re-running pip installation with fixed Python environment..."
+                    recovery_applied=true
+                    
+                    # Re-run the installation
+                    if pip install -r requirements/requirements-offline.txt; then
+                        echo "✅ Recovery successful! All packages installed."
+                        return 0
+                    else
+                        echo "⚠️  Recovery attempted but some packages still failed."
+                        echo "   You may need to install remaining packages manually."
+                        return 1
+                    fi
+                else
+                    echo "❌ Recovery declined. Continuing with manual installation..."
+                    return 1
+                fi
+            else
+                echo "⚠️  PyAudio compilation failed but no automatic recovery available for this system."
+                echo "   You may need to install PyAudio manually or use system packages."
+                return 1
+            fi
+        else
+            echo "⚠️  Installation failed but not due to PyAudio compilation issues."
+            echo "   Check the error log above for details."
+            return 1
+        fi
+    else
+        echo "✅ All packages installed successfully!"
+        return 0
+    fi
+}
+
+# Run the installation with recovery
+detect_and_recover_pyaudio
 
 # Fix threading issues with Python 3.11+ by ensuring compatible messagebus client
 echo "Fixing threading compatibility issues..."
