@@ -18,7 +18,7 @@ SOURCE="${BASH_SOURCE[0]}"
 DIR="$( dirname "$SOURCE" )"
 
 # Enter the Mycroft venv
-source "$DIR/../venv-activate.sh" -q
+source "$DIR/../.venv/bin/activate" -q
 
 function count-files() {
     # shellcheck disable=SC2012

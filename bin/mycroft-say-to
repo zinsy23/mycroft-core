@@ -19,7 +19,7 @@ cd -P "$( dirname "$SOURCE" )" || exit
 DIR="$( pwd )"
 
 # Enter the Mycroft venv
-source "$DIR/../venv-activate.sh" -q
+source "$DIR/../.venv/bin/activate" -q
 
 # Sets var 1 to stdin if no args were given
 set -- "${1:-$(</dev/stdin)}" "${@:2}"

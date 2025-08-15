@@ -182,7 +182,7 @@ function edit_config() {
 
 function signal_reload_config() {
     # Enter the Mycroft venv
-    source "$DIR/../venv-activate.sh" -q
+    source "$DIR/../.venv/bin/activate"
 
     # Post a messagebus notification to reload the config file
     python -m mycroft.messagebus.send "configuration.updated"  "{}" > /dev/null
@@ -203,7 +203,7 @@ function get_config() {
     fi
 
     # Load all the configuration(s)
-    json_config=$( source "$DIR/../venv-activate.sh" -q && python -c "import json; from mycroft.configuration import Configuration; print(json.dumps(Configuration.get()))" )
+    json_config=$( source "$DIR/../.venv/bin/activate" && python -c "import json; from mycroft.configuration import Configuration; print(json.dumps(Configuration.get()))" )
 
     # Read the given variable from the mix
     echo "${json_config}" | jq -r "${value}"

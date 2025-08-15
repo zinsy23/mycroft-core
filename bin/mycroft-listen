@@ -19,7 +19,7 @@ cd -P "$( dirname "$SOURCE" )" || exit
 DIR="$( pwd )"
 
 # Enter the Mycroft venv
-source "$DIR/../venv-activate.sh" -q
+source "$DIR/../.venv/bin/activate" -q
 
 # Send a message to be spoken
 python -m mycroft.messagebus.send "mycroft.mic.listen"
