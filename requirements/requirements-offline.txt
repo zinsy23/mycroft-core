@@ -37,9 +37,12 @@ padaos>=0.1.9
 petact>=0.1.2
 precise-runner
 
+# Intent parsing (padatious) - critical for skills
+padatious>=0.4.8
+xxhash  # Required dependency for padatious
+
 # Optional components (may fail on some systems)
-# padatious>=0.4.8  # Installed separately due to fann2 dependency issues
-# fann2>=1.0.7  # padatious dependency, install manually if needed
+# fann2>=1.0.7  # padatious dependency, will be handled with dummy module
 # msk>=0.3.16
 
 # STT plugin for offline operation
