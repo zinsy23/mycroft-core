@@ -41,6 +41,11 @@ precise-runner
 # padatious>=0.4.8  # Installed separately due to fann2 dependency issues
 # xxhash  # Required dependency for padatious, installed separately
 
+# Wake word detection (Precise) - requires TensorFlow
+tensorflow==2.12.0  # Compatible version for Precise wake word engine with Python 3.11
+precise-runner  # Already present, but needs TensorFlow dependency
+mycroft-precise  # Provides TensorFlow engine and training tools for Precise
+
 # Optional components (may fail on some systems)
 # fann2>=1.0.7  # padatious dependency, will be handled with dummy module
 # msk>=0.3.16
