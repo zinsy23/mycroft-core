@@ -25,12 +25,10 @@ source .venv/bin/activate
 # Upgrade pip
 pip install --upgrade pip wheel
 
-# Install requirements with fixes for dependency conflicts
-echo "Installing requirements..."
-
 # Install system dependencies first
+echo "Installing system dependencies..."
 sudo apt-get update
-sudo apt-get install -y python3-dev build-essential portaudio19-dev libyaml-dev espeak espeak-data swig libfann-dev
+sudo apt-get install -y python3-dev build-essential portaudio19-dev libyaml-dev espeak espeak-data swig libfann-dev jq
 
 # Install requirements using our offline requirements file
 echo "Installing Mycroft requirements for offline operation..."
@@ -199,6 +197,41 @@ pip install -r requirements/extra-stt.txt || echo "Some STT extras failed, conti
 echo "Installing FasterWhisper STT plugin..."
 pip install ovos-stt-plugin-fasterwhisper
 
+# CRITICAL: Add mycroft-core to the virtual environment path
+# This is equivalent to typing 'add2virtualenv $TOP' and is essential for module imports
+echo "Setting up virtual environment paths for Mycroft modules..."
+PYTHON=$(python -c "import sys;print('python{}.{}'.format(sys.version_info[0], sys.version_info[1]))")
+VENV_PATH_FILE=".venv/lib/$PYTHON/site-packages/_virtualenv_path_extensions.pth"
+
+if [[ ! -f $VENV_PATH_FILE ]] ; then
+    echo 'import sys; sys.__plen = len(sys.path)' > "$VENV_PATH_FILE"
+    echo "import sys; new=sys.path[sys.__plen:]; del sys.path[sys.__plen:]; p=getattr(sys,'__egginsert',0); sys.path[p:p]=new; sys.__egginsert = p+len(new)" >> "$VENV_PATH_FILE"
+    echo "$(pwd)" >> "$VENV_PATH_FILE"
+    echo "✅ Virtual environment path file created"
+else
+    echo "✅ Virtual environment path file already exists"
+fi
+
+# Test that Mycroft modules are now accessible
+echo "Testing Mycroft module accessibility..."
+if python -c "import mycroft; print('✅ Mycroft modules accessible')" 2>/dev/null; then
+    echo "✅ Virtual environment path setup successful"
+else
+    echo "⚠️  Warning: Mycroft modules may not be fully accessible"
+fi
+
+# Create required system directories and set permissions
+echo "Setting up system directories and permissions..."
+sudo mkdir -p /var/log/mycroft
+sudo chown -R $USER:$USER /var/log/mycroft
+
+# Set executable permissions for Mycroft scripts
+echo "Setting executable permissions for Mycroft scripts..."
+chmod +x start-mycroft.sh
+chmod +x stop-mycroft.sh
+chmod +x bin/mycroft-*
+chmod +x scripts/*.sh
+
 # Install common skill dependencies  
 echo "Installing common skill dependencies..."
 pip install pyjokes==0.6.0 pytz holidays
@@ -222,231 +255,29 @@ md5sum requirements/requirements-offline.txt requirements/extra-audiobackend.txt
 # Note: Git configuration not needed for public repos - user's existing config preserved
 echo "✅ Git configuration preserved - existing remotes and SSH setup maintained"
 
-# PHASE 1: CHECK IF /opt/mycroft ALREADY EXISTS
+# PHASE 1: CREATE /opt/mycroft DIRECTORY STRUCTURE (like old script)
 echo "=============================================================================="
-echo "PHASE 1: Checking if /opt/mycroft directory already exists..."
+echo "PHASE 1: Creating /opt/mycroft directory structure..."
 
-if [ -d "/opt/mycroft/skills" ]; then
-    echo "✅ /opt/mycroft/skills directory already exists - skipping service startup phase"
-    echo "Directory permissions: $(ls -ld /opt/mycroft/skills)"
-    SKIP_SERVICE_STARTUP=true
+# Create /opt/mycroft/skills directory manually (reliable, immediate)
+echo "Creating /opt/mycroft/skills directory..."
+sudo mkdir -p /opt/mycroft/skills
+sudo chown -R "$USER":"$(id -gn)" /opt/mycroft
+echo "✅ /opt/mycroft/skills directory created with proper permissions"
+
+# Create skills symlink for convenience (like old script)
+if [[ ! -d skills ]] ; then
+    ln -sf /opt/mycroft/skills skills
+    echo "✅ Created skills symlink for convenience"
 else
-    echo "❌ /opt/mycroft/skills directory not found - need to start services to create it"
-    SKIP_SERVICE_STARTUP=false
-    
-    echo "Starting Mycroft services (all) to create /opt/mycroft directory structure..."
-./start-mycroft.sh all
-
-# Wait for services to start and check their status
-echo "Waiting for Mycroft services to start..."
-timeout=30
-counter=0
-services_started=0
-
-while [ $counter -lt $timeout ]; do
-    # Check current service status (don't reset counter)
-    current_services=0
-    if pgrep -f "python3.*mycroft.messagebus" > /dev/null; then
-        ((current_services++))
-    fi
-    if pgrep -f "python3.*mycroft.skills" > /dev/null; then
-        ((current_services++))
-    fi
-    if pgrep -f "python3.*mycroft.audio" > /dev/null; then
-        ((current_services++))
-    fi
-    
-    # Update our running total only if we see more services than before
-    if [ $current_services -gt $services_started ]; then
-        services_started=$current_services
-        echo "✅ Progress: $services_started/3 core services now running"
-    fi
-    
-    # Check if we've reached our target
-    if [ $services_started -ge 3 ]; then
-        echo "✅ All core services started successfully"
-        break
-    fi
-    
-    sleep 1
-    counter=$((counter + 1))
-    if [ $((counter % 5)) -eq 0 ]; then
-        echo "Waiting for services... ($counter/$timeout seconds) - $services_started/3 core services running"
-    fi
-done
-
-if [ $services_started -lt 3 ]; then
-    echo "⚠️  Warning: Only $services_started/3 core services started within timeout"
+    echo "✅ Skills symlink already exists"
 fi
 
-# Check what services actually started
-echo "Checking which services started successfully..."
-if pgrep -f "python3.*mycroft.messagebus" > /dev/null; then
-    echo "✅ Message bus service is running"
-else
-    echo "❌ Message bus service failed to start"
-fi
-
-if pgrep -f "python3.*mycroft.skills" > /dev/null; then
-    echo "✅ Skills service is running"
-else
-    echo "❌ Skills service failed to start"
-fi
-
-if pgrep -f "python3.*mycroft.audio" > /dev/null; then
-    echo "✅ Audio service is running"
-else
-    echo "❌ Audio service failed to start"
-fi
-
-if pgrep -f "python3.*mycroft.client.speech" > /dev/null; then
-    echo "✅ Voice service is running"
-else
-    echo "❌ Voice service failed to start"
-fi
-
-if pgrep -f "python3.*mycroft.client.enclosure" > /dev/null; then
-    echo "✅ Enclosure service is running"
-else
-    echo "❌ Enclosure service failed to start"
-fi
-
-# Wait for /opt/mycroft/skills directory to be created by Mycroft services
-echo "Waiting for Mycroft services to create /opt/mycroft directory structure..."
-timeout=60
-counter=0
-
-while [ ! -d "/opt/mycroft/skills" ] && [ $counter -lt $timeout ]; do
-    sleep 1
-    counter=$((counter + 1))
-    if [ $((counter % 5)) -eq 0 ]; then
-        echo "Waiting for directory creation... ($counter/$timeout seconds)"
-        # Check if services are still running while waiting
-        if ! pgrep -f "python3.*mycroft.skills" > /dev/null; then
-            echo "⚠️  Skills service stopped while waiting for directory creation"
-            break
-        fi
-    fi
-done
-
-if [ -d "/opt/mycroft/skills" ]; then
-    echo "✅ /opt/mycroft/skills directory created successfully"
-else
-    echo "❌ Timeout waiting for directory creation - services may have failed"
-fi
-    
-    # Ensure enclosure service is running before skills finish training
-echo "Verifying enclosure service is running..."
-if ! pgrep -f "python3.*mycroft.client.enclosure" > /dev/null; then
-    echo "⚠️  Enclosure service not running, starting it manually..."
-    ./start-mycroft.sh enclosure
-    
-    # Wait for enclosure service to start
-    echo "Waiting for enclosure service to start..."
-    timeout=20
-    counter=0
-    while ! pgrep -f "python3.*mycroft.client.enclosure" > /dev/null && [ $counter -lt $timeout ]; do
-        sleep 1
-        counter=$((counter + 1))
-        echo "Waiting for enclosure service... ($counter/$timeout seconds)"
-    done
-    
-    # Verify it actually started
-    if pgrep -f "python3.*mycroft.client.enclosure" > /dev/null; then
-        echo "✅ Enclosure service started successfully"
-    else
-        echo "❌ CRITICAL: Enclosure service failed to start!"
-        echo "This will prevent the 'ready to roll' message from appearing in CLI"
-        echo "Check enclosure service logs: tail -f /var/log/mycroft/enclosure.log"
-    fi
-else
-    echo "✅ Enclosure service is running"
-fi
-
-# Wait for enclosure service to fully connect to message bus
-echo "Waiting for enclosure service to fully connect to message bus..."
-timeout=15
-counter=0
-
-while [ $counter -lt $timeout ]; do
-    # Check if enclosure service is still running
-    if ! pgrep -f "python3.*mycroft.client.enclosure" > /dev/null; then
-        echo "❌ Enclosure service stopped unexpectedly"
-        break
-    fi
-    
-    # Check if we can see any activity in enclosure logs (optional check)
-    if [ -f "/var/log/mycroft/enclosure.log" ]; then
-        if tail -n 10 /var/log/mycroft/enclosure.log 2>/dev/null | grep -q "Connected\|ready\|started"; then
-            echo "✅ Enclosure service appears to be fully connected"
-            break
-        fi
-    fi
-    
-    sleep 1
-    counter=$((counter + 1))
-    if [ $((counter % 3)) -eq 0 ]; then
-        echo "Waiting for enclosure connection... ($counter/$timeout seconds)"
-    fi
-done
-
-# Double-check enclosure service is still running
-if pgrep -f "python3.*mycroft.client.enclosure" > /dev/null; then
-    echo "✅ Enclosure service confirmed running and ready to receive events"
-else
-    echo "❌ CRITICAL: Enclosure service is not running - 'ready to roll' will not work!"
-fi
-fi
-
-# Verify /opt/mycroft/skills directory was created by Mycroft services
-echo "Verifying directory creation..."
-if [ -d "/opt/mycroft/skills" ]; then
-    echo "✅ /opt/mycroft/skills directory created by Mycroft services"
-    echo "Directory permissions: $(ls -ld /opt/mycroft/skills)"
-else
-    echo "❌ /opt/mycroft/skills directory not created by Mycroft services"
-    echo "Trying to create it manually..."
-    sudo mkdir -p /opt/mycroft/skills
-    sudo chown -R "$USER":"$(id -gn)" /opt/mycroft
-    echo "✅ Created /opt/mycroft/skills manually"
-fi
-
-# Wait for any additional directory setup and skills service to be ready
-echo "Waiting for skills service to be fully ready..."
-timeout=20
-counter=0
-
-while [ $counter -lt $timeout ]; do
-    # Check if skills service is still running
-    if ! pgrep -f "python3.*mycroft.skills" > /dev/null; then
-        echo "❌ Skills service stopped unexpectedly"
-        break
-    fi
-    
-    # Check if skills service appears ready by looking for specific log messages
-    if [ -f "/var/log/mycroft/skills.log" ]; then
-        if tail -n 20 /var/log/mycroft/skills.log 2>/dev/null | grep -q "ready\|Ready\|READY\|initialized\|Initialized\|started\|Started"; then
-            echo "✅ Skills service appears to be fully ready"
-            break
-        fi
-    fi
-    
-    # Alternative: check if the skills directory has been populated with any content
-    if [ -d "/opt/mycroft/skills" ] && [ "$(ls -A /opt/mycroft/skills 2>/dev/null | wc -l)" -gt 0 ]; then
-        echo "✅ Skills service has started populating skills directory"
-        break
-    fi
-    
-    sleep 1
-    counter=$((counter + 1))
-    if [ $((counter % 5)) -eq 0 ]; then
-        echo "Waiting for skills service readiness... ($counter/$timeout seconds)"
-    fi
-done
-
-if [ $counter -eq $timeout ]; then
-    echo "⚠️  Timeout waiting for skills service readiness, proceeding anyway"
-fi
+# Set proper permissions for the skills directory
+echo "Setting final permissions for skills directory..."
+chmod -R 755 /opt/mycroft/skills
+chown -R "$USER":"$(id -gn)" /opt/mycroft/skills
+echo "✅ Directory permissions set correctly"
 
 # NOW CREATE CONFIGURATION AFTER DIRECTORY EXISTS
 echo "=============================================================================="
@@ -784,65 +615,60 @@ echo "FINAL STEP: Stopping all Mycroft services for clean setup completion..."
 echo "=============================================================================="
 
 if [ -f "./start-mycroft.sh" ]; then
-    if [ "$SKIP_SERVICE_STARTUP" = true ] && [ "$SKIP_SKILL_INSTALLATION" = true ]; then
-        echo "✅ No services or skills were modified - services can remain running"
-        echo "Mycroft is already fully configured and ready to use!"
+    echo "Stopping all Mycroft services for clean setup completion..."
+    ./stop-mycroft.sh all
+    
+    echo "✅ All services stopped successfully - setup is complete and clean"
+    echo "Note: Services are now stopped and ready for manual startup when needed"
+    
+    # Verify services are stopped
+    echo "Verifying services are stopped..."
+    sleep 2  # Give services time to stop
+    
+    services_stopped=0
+    if ! pgrep -f "python3.*mycroft.messagebus" > /dev/null; then
+        echo "✅ Message bus service stopped"
+        ((services_stopped++))
     else
-        echo "Stopping all Mycroft services for clean setup completion..."
-        ./stop-mycroft.sh all
-        
-        echo "✅ All services stopped successfully - setup is complete and clean"
-        echo "Note: Services are now stopped and ready for manual startup when needed"
-        
-        # Verify services are stopped
-        echo "Verifying services are stopped..."
-        sleep 2  # Give services time to stop
-        
-        services_stopped=0
-        if ! pgrep -f "python3.*mycroft.messagebus" > /dev/null; then
-            echo "✅ Message bus service stopped"
-            ((services_stopped++))
-        else
-            echo "❌ Message bus service still running"
-        fi
-        
-        if ! pgrep -f "python3.*mycroft.skills" > /dev/null; then
-            echo "✅ Skills service stopped"
-            ((services_stopped++))
-        else
-            echo "❌ Skills service still running"
-        fi
-        
-        if ! pgrep -f "python3.*mycroft.audio" > /dev/null; then
-            echo "✅ Audio service stopped"
-            ((services_stopped++))
-        else
-            echo "❌ Audio service still running"
-        fi
-        
-        if ! pgrep -f "python3.*mycroft.client.speech" > /dev/null; then
-            echo "✅ Voice service stopped"
-            ((services_stopped++))
-        else
-            echo "❌ Voice service still running"
-        fi
-        
-        if ! pgrep -f "python3.*mycroft.client.enclosure" > /dev/null; then
-            echo "✅ Enclosure service stopped"
-            ((services_stopped++))
-        else
-            echo "❌ Enclosure service still running"
-        fi
-        
-        echo "Services stopped: $services_stopped/5"
-        
-        if [ "$services_stopped" -eq 5 ]; then
-            echo "✅ All core services stopped successfully"
-            echo "Setup is complete and services are ready for manual startup"
-        else
-            echo "⚠️  Warning: Some services may not have stopped properly"
-            echo "You can manually stop them with: ./stop-mycroft.sh all"
-        fi
+        echo "❌ Message bus service still running"
+    fi
+    
+    if ! pgrep -f "python3.*mycroft.skills" > /dev/null; then
+        echo "✅ Skills service stopped"
+        ((services_stopped++))
+    else
+        echo "❌ Skills service still running"
+    fi
+    
+    if ! pgrep -f "python3.*mycroft.audio" > /dev/null; then
+        echo "✅ Audio service stopped"
+        ((services_stopped++))
+    else
+        echo "❌ Audio service still running"
+    fi
+    
+    if ! pgrep -f "python3.*mycroft.client.speech" > /dev/null; then
+        echo "✅ Voice service stopped"
+        ((services_stopped++))
+    else
+        echo "❌ Voice service still running"
+    fi
+    
+    if ! pgrep -f "python3.*mycroft.client.enclosure" > /dev/null; then
+        echo "✅ Enclosure service stopped"
+        ((services_stopped++))
+    else
+        echo "❌ Enclosure service still running"
+    fi
+    
+    echo "Services stopped: $services_stopped/5"
+    
+    if [ "$services_stopped" -eq 5 ]; then
+        echo "✅ All core services stopped successfully"
+        echo "Setup is complete and services are ready for manual startup"
+    else
+        echo "⚠️  Warning: Some services may not have stopped properly"
+        echo "You can manually stop them with: ./stop-mycroft.sh all"
     fi
 else
     echo "⚠️  Warning: start-mycroft.sh not found, cannot stop services"
@@ -857,7 +683,7 @@ echo "This is the intended behavior - services will start fresh when you're read
 echo ""
 echo "FIXES APPLIED:"
 echo "  ✅ FANN/fann2 compilation issue resolved with dummy module"
-echo "  ✅ /opt/mycroft directory created by Mycroft services with proper permissions"
+echo "  ✅ /opt/mycroft directory created manually with proper permissions (like old script)"
 echo "  ✅ STABLE offline-compatible skills installed (hello-world, joke, date-time, alarm, weather)"
 echo "  ✅ All services stopped for clean setup completion"
 echo "  ✅ Padatious intent parsing working without fann2 compilation"
@@ -867,8 +693,9 @@ echo "  ✅ Disabled skills moved to prevent loading attempts"
 echo "  ✅ Basic configuration created (location can be added later for weather skill)"
 echo "  ✅ Skills installation verified and services stopped cleanly"
 echo "  ✅ CLI interaction ready for voice commands and testing"
-echo "  ✅ Efficient installation process (no unnecessary service stopping)"
-echo "  ✅ Proper verification flow (skills installed → services stopped → setup complete)"
+echo "  ✅ Simplified setup process (no unnecessary service startup during setup)"
+echo "  ✅ Manual directory creation (reliable, immediate, like old script)"
+echo "  ✅ Proper verification flow (directories created → skills installed → services stopped → setup complete)"
 echo "  ✅ Git configuration preserved (existing remotes and SSH setup maintained)"
 echo ""
 echo "The following external services have been disabled:"
@@ -879,17 +706,11 @@ echo "  - Wake word training uploads"
 echo ""
 echo "STT is configured to use FasterWhisper locally."
 echo "TTS is configured to use eSpeak."
+echo "=============================================================================="
+echo "PHASE 4: OPTIONAL - Test Mycroft services (recommended)"
+echo "=============================================================================="
+echo "To test that everything is working correctly, you can now start Mycroft:"
 echo ""
-echo "SKILL INSTALLATION PROCESS:"
-echo "  1. Mycroft services start to create /opt/mycroft directory structure"
-echo "  2. Skills are installed while services continue running"
-echo "  3. Offline-compatible skills are installed from GitHub repositories"
-echo "  4. Final verification and setup completion"
-echo "  5. All services stopped for clean setup completion"
-echo ""
-echo "MYCROFT INTERACTION GUIDE:"
-echo ""
-echo "STARTING MYCROFT:"
 echo "  ./start-mycroft.sh all          - Start all services (background)"
 echo "  ./start-mycroft.sh debug        - Start all services + CLI (interactive)"
 echo "  ./start-mycroft.sh cli          - Start CLI only (requires services running)"
@@ -909,11 +730,9 @@ echo "  ./start-mycroft.sh voice         - Start voice capture only"
 echo "  ./stop-mycroft.sh                - Stop all services"
 echo "  ./stop-mycroft.sh skills         - Stop specific service"
 echo ""
-echo "TROUBLESHOOTING:"
-echo "  tail -f /var/log/mycroft/*.log  - Monitor all service logs"
-echo "  tail -f /var/log/mycroft/skills.log - Monitor skills service specifically"
-echo "  ./start-mycroft.sh audiotest     - Test audio system"
-echo "  ./start-mycroft.sh wakewordtest  - Test wake word detection"
+echo "The setup is complete, but testing services ensures everything works properly."
+echo "You can start services anytime with: ./start-mycroft.sh all"
 echo ""
-echo "You can start Mycroft with: ./start-mycroft.sh all"
+echo "=============================================================================="
+echo "🎉 SETUP COMPLETE! Mycroft is ready for offline use."
 echo "=============================================================================="
