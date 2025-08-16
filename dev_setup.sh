@@ -13,6 +13,57 @@ TOP=$(pwd -L)
 
 echo "Setting up Mycroft for offline/local use..."
 
+# Function to verify Python version stability before venv creation
+verify_python_version_stability() {
+    local python_cmd="$1"
+    local min_minor_version="${2:-2}"  # Default to 3.11.2+ for stability
+    
+    echo "Verifying Python version stability for: $python_cmd"
+    
+    if ! command -v "$python_cmd" &> /dev/null; then
+        echo "❌ Python command not found: $python_cmd"
+        return 1
+    fi
+    
+    local version_output
+    version_output=$("$python_cmd" --version 2>&1)
+    
+    if [[ $? -ne 0 ]]; then
+        echo "❌ Failed to get version from: $python_cmd"
+        return 1
+    fi
+    
+    # Extract version (e.g., "3.11.0" from "Python 3.11.0")
+    local version
+    version=$(echo "$version_output" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -1)
+    
+    if [[ -z "$version" ]]; then
+        echo "❌ Could not parse version from: $version_output"
+        return 1
+    fi
+    
+    echo "Detected Python version: $version"
+    
+    # Parse major.minor.patch
+    local major minor patch
+    IFS='.' read -r major minor patch <<< "$version"
+    
+    # Check if this is Python 3.11 and if patch version is too early
+    if [[ "$major" -eq 3 && "$minor" -eq 11 ]]; then
+        if [[ "$patch" -lt "$min_minor_version" ]]; then
+            echo "⚠️  Early Python 3.11 version detected ($version) - patch version $patch < $min_minor_version"
+            echo "   This version may cause pip installation issues"
+            return 1
+        else
+            echo "✅ Python 3.11 version $version is stable (3.11.$min_minor_version+)"
+            return 0
+        fi
+    else
+        echo "ℹ️  Python version $version (not 3.11) - stability check not applicable"
+        return 0
+    fi
+}
+
 # Function to detect OS and package manager
 detect_os_and_package_manager() {
     echo "Detecting operating system and package manager..."
@@ -190,18 +241,12 @@ select_best_python() {
 
 # Function to offer DeadSnakes PPA installation upfront
 offer_deadsnakes_ppa_upfront() {
-    if [[ "$OS_NAME" == "ubuntu" ]]; then
-        echo ""
-        echo "💡 UBUNTU USERS: Python 3.11+ is recommended for optimal Mycroft performance"
-        echo "   The DeadSnakes PPA provides Python 3.11, 3.12, and 3.13 packages"
-        echo "   This will be installed before we scan for available Python versions"
-        echo ""
-        
-        read -p "Would you like to install Python 3.11+ via DeadSnakes PPA? (y/N): " -n 1 -r
-        echo
-        
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            echo "Installing Python 3.11+ via DeadSnakes PPA..."
+    if [[ "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"ubuntu"* ]]; then
+        if [[ "$INSTALL_DEADSNAKES" == true ]]; then
+            echo ""
+            echo "🐍 Installing Python 3.11+ via DeadSnakes PPA (as requested in setup)..."
+            echo "This will provide Python 3.11, 3.12, and 3.13 packages for optimal Mycroft performance"
+            echo ""
             
             # Add DeadSnakes PPA
             if sudo add-apt-repository ppa:deadsnakes/ppa -y; then
@@ -235,7 +280,7 @@ offer_deadsnakes_ppa_upfront() {
                 return 1
             fi
         else
-            echo "Continuing with system Python versions..."
+            echo "ℹ️  DeadSnakes PPA installation skipped (as requested in setup)"
             DEADSNAKES_INSTALLED=false
             return 1
         fi
@@ -323,14 +368,43 @@ setup_virtual_environment() {
     # Detect OS and package manager
     detect_os_and_package_manager
     
-    # Offer DeadSnakes PPA upgrade upfront for Ubuntu users
-    offer_deadsnakes_ppa_upfront
+    # Note: DeadSnakes PPA installation is handled in system dependencies section
+    # based on user choice from Phase 0
     
     # Find available Python versions (now including DeadSnakes if installed)
     find_available_python_versions
     
     # Select best Python version
     select_best_python
+    
+    # Verify Python version stability before venv creation
+    echo "Verifying Python version stability before virtual environment creation..."
+    if ! verify_python_version_stability "$PYTHON_CMD" 2; then
+        echo "⚠️  Python version stability check failed!"
+        
+        # If this is Python 3.11 and DeadSnakes was requested, try to upgrade
+        if [[ "$PYTHON_VERSION" == "3.11" && "$INSTALL_DEADSNAKES" == true ]]; then
+            echo "Attempting to upgrade Python 3.11 to stable version..."
+            
+            # Upgrade Python 3.11 packages to stable versions
+            sudo apt update
+            sudo apt upgrade python3.11 python3.11-venv python3.11-dev python3.11-minimal libpython3.11-minimal libpython3.11-stdlib -y
+            sudo apt --fix-broken install -y
+            
+            # Re-check version stability
+            echo "Re-checking Python version stability after upgrade..."
+            if ! verify_python_version_stability "$PYTHON_CMD" 2; then
+                echo "❌ CRITICAL: Python 3.11 still unstable after upgrade attempt"
+                echo "This may cause pip installation issues. Proceeding with caution..."
+            else
+                echo "✅ Python version stability verified after upgrade"
+            fi
+        else
+            echo "⚠️  Proceeding with potentially unstable Python version - pip issues may occur"
+        fi
+    else
+        echo "✅ Python version stability verified"
+    fi
     
     # Clean up any failed attempts
     cleanup_failed_venv
@@ -431,6 +505,59 @@ case "$PACKAGE_MANAGER" in
             libicu-dev pkg-config libjpeg-dev libfann-dev \
             pulseaudio pulseaudio-utils espeak espeak-data \
             libyaml-dev jq
+        
+        # Install Python 3.11 if DeadSnakes PPA was requested
+        if [[ "$INSTALL_DEADSNAKES" == true ]]; then
+            echo "Installing Python 3.11 via DeadSnakes PPA (as requested)..."
+            
+            # Add DeadSnakes PPA first
+            echo "Adding DeadSnakes PPA..."
+            sudo add-apt-repository ppa:deadsnakes/ppa -y
+            sudo apt update
+            
+            # Install Python 3.11 packages
+            sudo apt-get install -y python3.11 python3.11-dev python3.11-venv
+            echo "✅ Python 3.11 installed via DeadSnakes PPA"
+            
+            # Check if we got an early/RC version that could cause pip issues
+            echo "Verifying Python 3.11 version stability..."
+            PYTHON311_VERSION=$(python3.11 --version 2>/dev/null | grep -o '3\.11\.[0-9]*' | head -1)
+            
+            if [[ -n "$PYTHON311_VERSION" ]]; then
+                echo "Detected Python 3.11 version: $PYTHON311_VERSION"
+                
+                # Check if this is an early/RC version (3.11.0, 3.11.1, etc.)
+                PYTHON311_MINOR=$(echo "$PYTHON311_VERSION" | cut -d. -f3)
+                if [[ "$PYTHON311_MINOR" -lt 2 ]]; then
+                    echo "⚠️  Early Python 3.11 version detected ($PYTHON311_VERSION) - this may cause pip issues"
+                    echo "Upgrading to stable version via DeadSnakes PPA..."
+                    
+                    # Upgrade Python 3.11 packages to stable versions
+                    echo "Upgrading Python 3.11 packages to stable versions..."
+                    sudo apt update
+                    sudo apt upgrade python3.11 python3.11-venv python3.11-dev python3.11-minimal libpython3.11-minimal libpython3.11-stdlib -y
+                    
+                    # Fix any broken dependencies
+                    echo "Fixing any broken dependencies..."
+                    sudo apt --fix-broken install -y
+                    
+                    # Verify the upgrade worked
+                    PYTHON311_VERSION_NEW=$(python3.11 --version 2>/dev/null | grep -o '3\.11\.[0-9]*' | head -1)
+                    PYTHON311_MINOR_NEW=$(echo "$PYTHON311_VERSION_NEW" | cut -d. -f3)
+                    
+                    if [[ "$PYTHON311_MINOR_NEW" -ge 2 ]]; then
+                        echo "✅ Python 3.11 upgraded to stable version: $PYTHON311_VERSION_NEW"
+                    else
+                        echo "⚠️  Warning: Python 3.11 still on early version: $PYTHON311_VERSION_NEW"
+                        echo "   This may cause pip installation issues later"
+                    fi
+                else
+                    echo "✅ Python 3.11 version $PYTHON311_VERSION is stable (3.11.2+)"
+                fi
+            else
+                echo "⚠️  Warning: Could not determine Python 3.11 version"
+            fi
+        fi
         ;;
 esac
 
@@ -569,6 +696,30 @@ detect_and_recover_pyaudio() {
 
 # Run the installation with recovery
 detect_and_recover_pyaudio
+
+# Conditional installation based on user choices
+echo ""
+echo "Installing conditional packages based on your setup choices..."
+
+# Install TensorFlow if custom wake words are enabled
+if [[ "$INSTALL_TENSORFLOW" == true ]]; then
+    echo "Installing TensorFlow for custom wake word training..."
+    pip install tensorflow==2.12.0
+    pip install mycroft-precise
+    echo "✅ TensorFlow and mycroft-precise installed for custom wake words"
+else
+    echo "ℹ️  Skipping TensorFlow - using default wake word only"
+fi
+
+# Install GPIO libraries if Raspberry Pi GPIO support is enabled
+if [[ "$INSTALL_GPIO" == true ]]; then
+    echo "Installing GPIO libraries for Raspberry Pi hardware integration..."
+    pip install RPi.GPIO
+    pip install rpi-lgpio
+    echo "✅ GPIO libraries installed: RPi.GPIO and rpi-lgpio"
+else
+    echo "ℹ️  Skipping GPIO libraries - hardware integration disabled"
+fi
 
 # Fix threading issues with Python 3.11+ by ensuring compatible messagebus client
 echo "Fixing threading compatibility issues..."
@@ -791,7 +942,106 @@ md5sum requirements/requirements-offline.txt requirements/extra-audiobackend.txt
 # Note: Git configuration not needed for public repos - user's existing config preserved
 echo "✅ Git configuration preserved - existing remotes and SSH setup maintained"
 
-# PHASE 1: CREATE /opt/mycroft DIRECTORY STRUCTURE (like old script)
+# PHASE 0: Interactive Setup Questions
+echo "=============================================================================="
+echo "PHASE 0: Setup Configuration Questions"
+echo "=============================================================================="
+
+# Question 1: Custom Wake Word Support (TensorFlow)
+echo ""
+echo "🎤 CUSTOM WAKE WORD SUPPORT:"
+echo "TensorFlow is required if you plan to train custom wake word models."
+echo "The default 'hey mycroft' wake word works without TensorFlow."
+echo ""
+echo "Do you plan to train custom wake word models? (This requires TensorFlow ~500MB)"
+read -p "Install TensorFlow for custom wake words? [y/N] (default: no): " -r custom_wake_words
+CUSTOM_WAKE_WORDS=${custom_wake_words:-N}
+
+if [[ "$CUSTOM_WAKE_WORDS" =~ ^[Yy]$ ]]; then
+    echo "✅ Will install TensorFlow for custom wake word training"
+    INSTALL_TENSORFLOW=true
+else
+    echo "✅ Skipping TensorFlow - using default wake word only"
+    INSTALL_TENSORFLOW=false
+fi
+
+# Question 2: GPIO Support (Raspberry Pi)
+echo ""
+if [[ "$OS_NAME" == "raspbian" || "$OS_LIKE" == *"debian"* ]] && [[ "$(uname -m)" =~ ^(arm|aarch64)$ ]]; then
+    # Enhanced Raspberry Pi detection - check multiple reliable indicators
+    RPI_DETECTED=false
+    
+    # Method 1: Check /etc/os-release for Raspberry Pi OS or Raspbian
+    if [[ -f "/etc/os-release" ]] && grep -q "Raspberry Pi OS\|raspbian\|raspberrypi" /etc/os-release; then
+        RPI_DETECTED=true
+    fi
+    
+    # Method 2: Check for Raspberry Pi specific hardware files (most reliable)
+    if [[ -f "/proc/device-tree/model" ]] && grep -q "Raspberry Pi" /proc/device-tree/model; then
+        RPI_DETECTED=true
+    fi
+    
+    # Method 3: Check for Raspberry Pi specific directories
+    if [[ -d "/opt/vc" ]] || [[ -d "/usr/local/lib/python*/dist-packages/RPi" ]]; then
+        RPI_DETECTED=true
+    fi
+    
+    if [[ "$RPI_DETECTED" == true ]]; then
+        echo "🔄 GPIO SUPPORT (Raspberry Pi detected via hardware/system indicators):"
+        echo "GPIO libraries are needed for hardware integration (buttons, LEDs, sensors)."
+        echo "This includes RPi.GPIO and rpi-lgpio for advanced push button logic."
+        echo ""
+        read -p "Install GPIO support libraries? [Y/n] (default: yes): " -r gpio_support
+        GPIO_SUPPORT=${gpio_support:-Y}
+        
+        if [[ "$GPIO_SUPPORT" =~ ^[Yy]$ ]]; then
+            echo "✅ Will install GPIO libraries for Raspberry Pi hardware integration"
+            INSTALL_GPIO=true
+        else
+            echo "✅ Skipping GPIO libraries - hardware integration disabled"
+            INSTALL_GPIO=false
+        fi
+    else
+        echo "ℹ️  GPIO support not applicable for this system (Debian-based ARM but not Raspberry Pi)"
+        INSTALL_GPIO=false
+    fi
+else
+    echo "ℹ️  GPIO support not applicable for this system (not Raspberry Pi)"
+    INSTALL_GPIO=false
+fi
+
+# Question 3: Python Version (DeadSnakes PPA for Ubuntu users)
+echo ""
+if [[ "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"ubuntu"* ]]; then
+    echo "🐍 PYTHON VERSION OPTIMIZATION (Ubuntu detected):"
+    echo "The DeadSnakes PPA provides Python 3.11+ which works better with Mycroft."
+    echo "This can resolve virtual environment and dependency issues."
+    echo ""
+    echo "⚠️  Note: This adds a third-party repository to your system."
+    echo ""
+    read -p "Install Python 3.11+ via DeadSnakes PPA? [Y/n] (default: yes): " -r deadsnakes_ppa
+    DEADSNAKES_PPA=${deadsnakes_ppa:-Y}
+    
+    if [[ "$DEADSNAKES_PPA" =~ ^[Yy]$ ]]; then
+        echo "✅ Will install Python 3.11+ via DeadSnakes PPA"
+        INSTALL_DEADSNAKES=true
+    else
+        echo "✅ Skipping DeadSnakes PPA - using system Python version"
+        INSTALL_DEADSNAKES=false
+    fi
+else
+    echo "ℹ️  DeadSnakes PPA not applicable for this system (not Ubuntu)"
+    INSTALL_DEADSNAKES=false
+fi
+
+echo ""
+echo "Setup configuration complete:"
+echo "  - Custom wake words: $([ "$INSTALL_TENSORFLOW" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
+echo "  - GPIO support: $([ "$INSTALL_GPIO" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
+echo "  - Python 3.11+ (DeadSnakes): $([ "$INSTALL_DEADSNAKES" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
+echo ""
+
+# PHASE 1: CHECK IF /opt/mycroft ALREADY EXISTS
 echo "=============================================================================="
 echo "PHASE 1: Creating /opt/mycroft directory structure..."
 
