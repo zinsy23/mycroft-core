@@ -13,11 +13,366 @@ TOP=$(pwd -L)
 
 echo "Setting up Mycroft for offline/local use..."
 
-# Create virtual environment
-if [ ! -d ".venv" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv .venv
-fi
+# Function to detect OS and package manager
+detect_os_and_package_manager() {
+    echo "Detecting operating system and package manager..."
+    
+    # Detect OS
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS_NAME="$ID"
+        OS_LIKE="$ID_LIKE"
+        OS_VERSION="$VERSION_ID"
+        echo "Detected OS: $OS_NAME $OS_VERSION (like: $OS_LIKE)"
+    else
+        echo "⚠️  Warning: Could not detect OS, assuming Ubuntu/Debian"
+        OS_NAME="ubuntu"
+        OS_LIKE="debian"
+    fi
+    
+    # Detect package manager
+    if command -v apt-get >/dev/null 2>&1; then
+        PACKAGE_MANAGER="apt"
+        echo "Detected package manager: apt (Debian/Ubuntu)"
+    elif command -v yum >/dev/null 2>&1; then
+        PACKAGE_MANAGER="yum"
+        echo "Detected package manager: yum (RHEL/CentOS)"
+    elif command -v dnf >/dev/null 2>&1; then
+        PACKAGE_MANAGER="dnf"
+        echo "Detected package manager: dnf (Fedora/RHEL)"
+    elif command -v pacman >/dev/null 2>&1; then
+        PACKAGE_MANAGER="pacman"
+        echo "Detected package manager: pacman (Arch)"
+    elif command -v zypper >/dev/null 2>&1; then
+        PACKAGE_MANAGER="zypper"
+        echo "Detected package manager: zypper (openSUSE)"
+    else
+        echo "⚠️  Warning: Could not detect package manager, assuming apt"
+        PACKAGE_MANAGER="apt"
+    fi
+}
+
+# Function to find available Python versions dynamically
+find_available_python_versions() {
+    echo "Scanning for available Python versions dynamically..."
+    
+    AVAILABLE_PYTHONS=()
+    
+    # Method 1: Check common Python binary locations
+    PYTHON_PATHS=(
+        "/usr/bin/python*"
+        "/usr/local/bin/python*"
+        "/opt/python*/bin/python*"
+        "$HOME/.local/bin/python*"
+    )
+    
+    for pattern in "${PYTHON_PATHS[@]}"; do
+        for python_path in $pattern; do
+            if [ -f "$python_path" ] && [ -x "$python_path" ]; then
+                # Extract version from path or binary
+                python_name=$(basename "$python_path")
+                if [[ "$python_name" =~ ^python3\.([0-9]+)$ ]]; then
+                    version="3.${BASH_REMATCH[1]}"
+                    if [[ ! " ${AVAILABLE_PYTHONS[*]} " =~ " ${version} " ]]; then
+                        AVAILABLE_PYTHONS+=("$version")
+                        echo "  ✅ Found Python $version at $python_path"
+                    fi
+                elif [[ "$python_name" == "python3" ]]; then
+                    # Get actual version from python3 binary
+                    actual_version=$("$python_path" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "unknown")
+                    if [[ "$actual_version" != "unknown" ]]; then
+                        if [[ ! " ${AVAILABLE_PYTHONS[*]} " =~ " ${actual_version} " ]]; then
+                            AVAILABLE_PYTHONS+=("$actual_version")
+                            echo "  ✅ Found python3 (version $actual_version) at $python_path"
+                        fi
+                    fi
+                fi
+            fi
+        done
+    done
+    
+    # Method 2: Check PATH for python commands
+    for cmd in python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3.7 python3; do
+        if command -v "$cmd" >/dev/null 2>&1; then
+            if [[ "$cmd" == "python3" ]]; then
+                # Get actual version from python3
+                actual_version=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "unknown")
+                if [[ "$actual_version" != "unknown" ]]; then
+                    if [[ ! " ${AVAILABLE_PYTHONS[*]} " =~ " ${actual_version} " ]]; then
+                        AVAILABLE_PYTHONS+=("$actual_version")
+                        echo "  ✅ Found $cmd (version $actual_version) in PATH"
+                    fi
+                fi
+            else
+                # Extract version from command name
+                version=$(echo "$cmd" | sed 's/python3\.//')
+                version="3.$version"
+                if [[ ! " ${AVAILABLE_PYTHONS[*]} " =~ " ${version} " ]]; then
+                    AVAILABLE_PYTHONS+=("$version")
+                    echo "  ✅ Found $cmd (version $version) in PATH"
+                fi
+            fi
+        fi
+    done
+    
+    # Method 3: Check alternatives system (Debian/Ubuntu)
+    if command -v update-alternatives >/dev/null 2>&1; then
+        echo "  Checking Python alternatives system..."
+        alternatives_output=$(update-alternatives --list python3 2>/dev/null || echo "")
+        if [ ! -z "$alternatives_output" ]; then
+            while IFS= read -r alt_path; do
+                if [ -f "$alt_path" ] && [ -x "$alt_path" ]; then
+                    actual_version=$("$alt_path" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "unknown")
+                    if [[ "$actual_version" != "unknown" ]]; then
+                        if [[ ! " ${AVAILABLE_PYTHONS[*]} " =~ " ${actual_version} " ]]; then
+                            AVAILABLE_PYTHONS+=("$actual_version")
+                            echo "  ✅ Found Python $actual_version via alternatives at $alt_path"
+                        fi
+                    fi
+                fi
+            done <<< "$alternatives_output"
+        fi
+    fi
+    
+    # Sort versions numerically (newest first)
+    IFS=$'\n' AVAILABLE_PYTHONS=($(sort -V -r <<<"${AVAILABLE_PYTHONS[*]}"))
+    unset IFS
+    
+    if [ ${#AVAILABLE_PYTHONS[@]} -eq 0 ]; then
+        echo "❌ Error: No Python 3.x found on system"
+        exit 1
+    fi
+    
+    echo "Available Python versions (sorted): ${AVAILABLE_PYTHONS[*]}"
+}
+
+# Function to select best Python version for Mycroft
+select_best_python() {
+    echo "Selecting best Python version for Mycroft..."
+    
+    # Work with what's actually available instead of hard-coded priorities
+    for version in "${AVAILABLE_PYTHONS[@]}"; do
+        # Extract major.minor for comparison
+        major=$(echo "$version" | cut -d. -f1)
+        minor=$(echo "$version" | cut -d. -f2)
+        
+        if [[ "$major" -eq 3 ]]; then
+            if [[ "$minor" -ge 11 ]]; then
+                PYTHON_CMD="python$version"
+                PYTHON_VERSION="$version"
+                echo "✅ Selected Python $version (optimal for Mycroft - 3.11+)"
+                return 0
+            elif [[ "$minor" -eq 10 ]]; then
+                PYTHON_CMD="python$version"
+                PYTHON_VERSION="$version"
+                echo "⚠️  Selected Python $version (acceptable, but 3.11+ recommended)"
+                return 0
+            elif [[ "$minor" -ge 7 ]]; then
+                PYTHON_CMD="python$version"
+                PYTHON_VERSION="$version"
+                echo "⚠️  Selected Python $version (older version, may have compatibility issues)"
+                return 0
+            fi
+        fi
+    done
+    
+    # Fallback to generic python3 if no specific version found
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON_CMD="python3"
+        PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "unknown")
+        echo "⚠️  Fallback to python3 (version $PYTHON_VERSION)"
+        return 0
+    fi
+    
+    echo "❌ Error: No suitable Python version found"
+    exit 1
+}
+
+# Function to offer DeadSnakes PPA installation upfront
+offer_deadsnakes_ppa_upfront() {
+    if [[ "$OS_NAME" == "ubuntu" ]]; then
+        echo ""
+        echo "💡 UBUNTU USERS: Python 3.11+ is recommended for optimal Mycroft performance"
+        echo "   The DeadSnakes PPA provides Python 3.11, 3.12, and 3.13 packages"
+        echo "   This will be installed before we scan for available Python versions"
+        echo ""
+        
+        read -p "Would you like to install Python 3.11+ via DeadSnakes PPA? (y/N): " -n 1 -r
+        echo
+        
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo "Installing Python 3.11+ via DeadSnakes PPA..."
+            
+            # Add DeadSnakes PPA
+            if sudo add-apt-repository ppa:deadsnakes/ppa -y; then
+                echo "✅ DeadSnakes PPA added successfully"
+                
+                # Update package lists
+                if sudo apt update; then
+                    echo "✅ Package lists updated"
+                    
+                    # Install Python 3.11 and venv
+                    if sudo apt install -y python3.11 python3.11-venv; then
+                        echo "✅ Python 3.11 installed successfully"
+                        DEADSNAKES_INSTALLED=true
+                        return 0
+                    else
+                        echo "❌ Failed to install Python 3.11"
+                        echo "Continuing with system Python versions..."
+                        DEADSNAKES_INSTALLED=false
+                        return 1
+                    fi
+                else
+                    echo "❌ Failed to update package lists"
+                    echo "Continuing with system Python versions..."
+                    DEADSNAKES_INSTALLED=false
+                    return 1
+                fi
+            else
+                echo "❌ Failed to add DeadSnakes PPA"
+                echo "Continuing with system Python versions..."
+                DEADSNAKES_INSTALLED=false
+                return 1
+            fi
+        else
+            echo "Continuing with system Python versions..."
+            DEADSNAKES_INSTALLED=false
+            return 1
+        fi
+    else
+        DEADSNAKES_INSTALLED=false
+        return 1
+    fi
+}
+
+# Function to install minimal virtual environment dependencies
+install_venv_dependencies() {
+    echo "Installing virtual environment dependencies..."
+    
+    case "$PACKAGE_MANAGER" in
+        "yum"|"dnf")
+            echo "Installing RHEL/CentOS/Fedora dependencies..."
+            sudo $PACKAGE_MANAGER install -y python3-venv
+            ;;
+        "pacman")
+            echo "Installing Arch dependencies..."
+            sudo pacman -S --noconfirm python-virtualenv
+            ;;
+        "zypper")
+            echo "Installing openSUSE dependencies..."
+            sudo zypper install -y python3-venv
+            ;;
+        *)
+            # Default to apt (Debian/Ubuntu) for any unrecognized package manager
+            echo "Installing Debian/Ubuntu dependencies (default fallback)..."
+            sudo apt-get update
+            sudo apt-get install -y python3-venv
+            ;;
+    esac
+}
+
+# Function to clean up failed virtual environment attempts
+cleanup_failed_venv() {
+    if [ -d ".venv" ]; then
+        echo "Checking virtual environment structure..."
+        
+        # Check if .venv has proper structure
+        if [ ! -d ".venv/bin" ] || [ ! -f ".venv/bin/activate" ]; then
+            echo "⚠️  Detected malformed virtual environment (missing bin/activate)"
+            echo "Expected structure: .venv/bin/activate"
+            echo "Found structure: $(ls -la .venv/)"
+            echo "Removing broken .venv directory completely..."
+            rm -rf .venv
+            echo "✅ Cleaned up broken virtual environment"
+        else
+            echo "✅ Virtual environment structure verified (bin/activate found)"
+        fi
+    fi
+}
+
+# Function to create virtual environment with fallback
+create_virtual_environment() {
+    echo "Creating virtual environment with Python $PYTHON_VERSION..."
+    
+    # First attempt: Use selected Python version
+    if $PYTHON_CMD -m venv .venv; then
+        echo "✅ Virtual environment created successfully with $PYTHON_CMD"
+        return 0
+    else
+        echo "⚠️  Failed to create virtual environment with $PYTHON_CMD"
+        
+        # Second attempt: Try python3 -m venv
+        if python3 -m venv .venv; then
+            echo "✅ Virtual environment created successfully with python3"
+            return 0
+        else
+            echo "❌ Failed to create virtual environment with python3"
+            return 1
+        fi
+    fi
+}
+
+# Main virtual environment setup
+setup_virtual_environment() {
+    echo "=============================================================================="
+    echo "PHASE 0: Setting up virtual environment..."
+    echo "=============================================================================="
+    echo "Note: After answering initial setup questions, the process will run unattended"
+    echo ""
+    
+    # Detect OS and package manager
+    detect_os_and_package_manager
+    
+    # Offer DeadSnakes PPA upgrade upfront for Ubuntu users
+    offer_deadsnakes_ppa_upfront
+    
+    # Find available Python versions (now including DeadSnakes if installed)
+    find_available_python_versions
+    
+    # Select best Python version
+    select_best_python
+    
+    # Clean up any failed attempts
+    cleanup_failed_venv
+    
+    # Try to create virtual environment
+    if create_virtual_environment; then
+        echo "✅ Virtual environment created successfully"
+    else
+        echo "❌ Virtual environment creation failed, installing dependencies..."
+        
+        # Install venv dependencies
+        install_venv_dependencies
+        
+        # Clean up again after installing dependencies
+        cleanup_failed_venv
+        
+        # Try creation again
+        if create_virtual_environment; then
+            echo "✅ Virtual environment created successfully after installing dependencies"
+        else
+            echo "❌ CRITICAL: Virtual environment creation failed even with dependencies"
+            echo "Please check your Python installation and try again"
+            exit 1
+        fi
+    fi
+    
+    # Final verification
+    if [ -d ".venv/bin" ] && [ -f ".venv/bin/activate" ]; then
+        echo "✅ Virtual environment structure verified (bin/activate found)"
+        echo "✅ Virtual environment setup complete!"
+    else
+        echo "❌ CRITICAL: Virtual environment structure is malformed"
+        echo "Expected: .venv/bin/activate"
+        echo "Found: $(ls -la .venv/)"
+        echo "Cleaning up and exiting..."
+        rm -rf .venv
+        exit 1
+    fi
+}
+
+# Call the virtual environment setup
+setup_virtual_environment
 
 # Activate virtual environment
 source .venv/bin/activate
@@ -25,97 +380,77 @@ source .venv/bin/activate
 # Upgrade pip
 pip install --upgrade pip wheel
 
+# Install requirements with fixes for dependency conflicts
+echo "Installing requirements..."
+
 # Install system dependencies first
-echo "Installing system dependencies..."
-
-# Detect operating system for cross-platform compatibility
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    OS=$ID
-    OS_LIKE=$ID_LIKE
-else
-    OS="unknown"
-    OS_LIKE="unknown"
-fi
-
-echo "Detected OS: $OS (like: $OS_LIKE)"
-
-# Install dependencies based on distribution
-if [[ "$OS" == "debian" || "$OS" == "ubuntu" || "$OS_LIKE" == *"debian"* ]]; then
-    echo "Installing Debian/Ubuntu dependencies..."
-    sudo apt-get update
-    sudo apt-get install -y \
-        git python3 python3-dev python3-setuptools python3-pip \
-        build-essential libtool libffi-dev libssl-dev \
-        autoconf automake bison swig libglib2.0-dev \
-        portaudio19-dev mpg123 screen flac curl \
-        libicu-dev pkg-config libjpeg-dev libfann-dev \
-        pulseaudio pulseaudio-utils espeak espeak-data \
-        libyaml-dev jq
-
-elif [[ "$OS" == "fedora" || "$OS_LIKE" == *"rhel"* || "$OS_LIKE" == *"fedora"* ]]; then
-    echo "Installing Fedora/RHEL/CentOS dependencies..."
-    if command -v dnf &> /dev/null; then
-        sudo dnf install -y \
-            git python3 python3-devel python3-pip python3-setuptools \
-            python3-virtualenv pygobject3-devel libtool libffi-devel \
-            openssl-devel autoconf bison swig glib2-devel \
-            portaudio-devel mpg123 mpg123-plugins-pulseaudio \
-            screen curl pkgconfig libicu-devel automake \
-            libjpeg-turbo-devel fann-devel gcc-c++ \
-            redhat-rpm-config jq make pulseaudio-utils
-    elif command -v yum &> /dev/null; then
-        sudo yum install -y \
-            cmake gcc-c++ git python3-devel libtool libffi-devel \
-            openssl-devel autoconf automake bison swig \
+echo "Installing system dependencies using $PACKAGE_MANAGER..."
+case "$PACKAGE_MANAGER" in
+    "yum"|"dnf")
+        if command -v dnf &> /dev/null; then
+            sudo dnf install -y \
+                git python3 python3-devel python3-pip python3-setuptools \
+                python3-virtualenv pygobject3-devel libtool libffi-devel \
+                openssl-devel autoconf bison swig glib2-devel \
+                portaudio-devel mpg123 mpg123-plugins-pulseaudio \
+                screen curl pkgconfig libicu-devel automake \
+                libjpeg-turbo-devel fann-devel gcc-c++ \
+                redhat-rpm-config jq make pulseaudio-utils
+        elif command -v yum &> /dev/null; then
+            sudo yum install -y \
+                cmake gcc-c++ git python3-devel libtool libffi-devel \
+                openssl-devel autoconf automake bison swig \
+                portaudio-devel mpg123 flac curl libicu-devel \
+                libjpeg-devel fann-devel pulseaudio
+        fi
+        ;;
+    "pacman")
+        sudo pacman -S --needed --noconfirm \
+            git python python-pip python-setuptools python-virtualenv \
+            python-gobject libffi swig portaudio mpg123 screen \
+            flac curl icu libjpeg-turbo base-devel jq pulseaudio
+        ;;
+    "zypper")
+        sudo zypper install -y \
+            git python3 python3-devel libtool libffi-devel \
+            libopenssl-devel autoconf automake bison swig \
             portaudio-devel mpg123 flac curl libicu-devel \
-            libjpeg-devel fann-devel pulseaudio
-    fi
+            pkg-config libjpeg-devel libfann-devel python3-curses \
+            pulseaudio
+        sudo zypper install -y -t pattern devel_C_C++
+        ;;
+    *)
+        # Default to apt (Debian/Ubuntu) for any unrecognized package manager
+        echo "Installing Debian/Ubuntu dependencies (default fallback)..."
+        sudo apt-get update
+        sudo apt-get install -y \
+            git python3 python3-dev python3-setuptools python3-pip \
+            build-essential libtool libffi-dev libssl-dev \
+            autoconf automake bison swig libglib2.0-dev \
+            portaudio19-dev mpg123 screen flac curl \
+            libicu-dev pkg-config libjpeg-dev libfann-dev \
+            pulseaudio pulseaudio-utils espeak espeak-data \
+            libyaml-dev jq
+        ;;
+esac
 
-elif [[ "$OS" == "arch" || "$OS_LIKE" == *"arch"* ]]; then
-    echo "Installing Arch Linux dependencies..."
-    sudo pacman -S --needed --noconfirm \
-        git python python-pip python-setuptools python-virtualenv \
-        python-gobject libffi swig portaudio mpg123 screen \
-        flac curl icu libjpeg-turbo base-devel jq pulseaudio
-
-elif [[ "$OS" == "opensuse" || "$OS_LIKE" == *"suse"* ]]; then
-    echo "Installing OpenSUSE dependencies..."
-    sudo zypper install -y \
-        git python3 python3-devel libtool libffi-devel \
-        libopenssl-devel autoconf automake bison swig \
-        portaudio-devel mpg123 flac curl libicu-devel \
-        pkg-config libjpeg-devel libfann-devel python3-curses \
-        pulseaudio
-    sudo zypper install -y -t pattern devel_C_C++
-
-else
-    echo "⚠️  Unknown distribution: $OS"
-    echo "Attempting to install common dependencies..."
-    sudo apt-get update || sudo yum update || sudo pacman -Sy || true
-    sudo apt-get install -y \
-        git python3 python3-dev build-essential \
-        portaudio19-dev libyaml-dev espeak espeak-data \
-        swig libfann-dev jq || echo "Some packages may have failed"
-fi
-
-echo "✅ System dependencies installed for $OS"
+echo "✅ System dependencies installed for $OS_NAME"
 
 # Install requirements using our offline requirements file
 echo "Installing Mycroft requirements for offline operation..."
 
-# Check Python version and handle PyAudio compilation issues
-PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-PYTHON_MAJOR=$(python3 -c "import sys; print(sys.version_info.major)")
-PYTHON_MINOR=$(python3 -c "import sys; print(sys.version_info.minor)")
-echo "Detected Python version: $PYTHON_VERSION"
+# Use Python version from our setup function
+echo "Using Python version: $PYTHON_VERSION (from setup function)"
 
 # PyAudio often fails to compile on Python 3.11+ - try system package first
+PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
+PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
+
 if [[ "$PYTHON_MAJOR" -eq 3 && "$PYTHON_MINOR" -ge 11 ]]; then
     echo "Python $PYTHON_VERSION detected (3.11+) - PyAudio compilation may fail"
     echo "Attempting to install system PyAudio package first..."
     
-    if [[ "$OS" == "debian" || "$OS" == "ubuntu" || "$OS_LIKE" == *"debian"* ]]; then
+    if [[ "$OS_NAME" == "debian" || "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"debian"* ]]; then
         # Try to install system PyAudio for this Python version
         PYTHON_DEV_PKG="python$PYTHON_VERSION-dev"
         echo "Installing $PYTHON_DEV_PKG for PyAudio compilation..."
@@ -123,10 +458,10 @@ if [[ "$PYTHON_MAJOR" -eq 3 && "$PYTHON_MINOR" -ge 11 ]]; then
         
         # Try system PyAudio package
         sudo apt-get install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available"
-    elif [[ "$OS" == "fedora" || "$OS_LIKE" == *"rhel"* || "$OS_LIKE" == *"fedora"* ]]; then
+    elif [[ "$OS_NAME" == "fedora" || "$OS_LIKE" == *"rhel"* || "$OS_LIKE" == *"fedora"* ]]; then
         sudo dnf install -y "python$PYTHON_VERSION-devel" || echo "⚠️  Python $PYTHON_VERSION devel not available"
         sudo dnf install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available"
-    elif [[ "$OS" == "arch" || "$OS_LIKE" == *"arch"* ]]; then
+    elif [[ "$OS_NAME" == "arch" || "$OS_LIKE" == *"arch"* ]]; then
         sudo pacman -S --needed --noconfirm "python$PYTHON_VERSION" || echo "⚠️  Python $PYTHON_VERSION not available"
         sudo pacman -S --needed --noconfirm python-pyaudio || echo "⚠️  python-pyaudio not available"
     fi
@@ -135,7 +470,7 @@ if [[ "$PYTHON_MAJOR" -eq 3 && "$PYTHON_MINOR" -ge 11 ]]; then
     echo "You may need to install PyAudio manually or use system packages"
     
     # Provide guidance for Ubuntu users (optional, not automatic)
-    if [[ "$OS" == "ubuntu" ]]; then
+    if [[ "$OS_NAME" == "ubuntu" ]]; then
         echo ""
         echo "💡 UBUNTU USERS: If you need a specific Python version (like 3.11), you can:"
         echo "   sudo add-apt-repository ppa:deadsnakes/ppa -y"
@@ -166,7 +501,7 @@ detect_and_recover_pyaudio() {
             echo "🔍 Detected PyAudio compilation failure!"
             
             # Check if this is Ubuntu and DeadSnakes PPA could help
-            if [[ "$OS" == "ubuntu" && "$PYTHON_MAJOR" -eq 3 && "$PYTHON_MINOR" -ge 11 ]]; then
+            if [[ "$OS_NAME" == "ubuntu" && "$PYTHON_MAJOR" -eq 3 && "$PYTHON_MINOR" -ge 11 ]]; then
                 echo ""
                 echo "💡 I can help fix this! The DeadSnakes PPA provides Python $PYTHON_VERSION packages"
                 echo "   that should resolve the PyAudio compilation issue."
@@ -872,19 +1207,21 @@ echo "Services are ready to start when you're ready to use Mycroft"
 echo ""
 
 echo "FIXES APPLIED:"
+echo "  ✅ Robust virtual environment setup with OS detection and dependency management"
+echo "  ✅ Interactive DeadSnakes PPA installation for Ubuntu users (questions upfront)"
 echo "  ✅ FANN/fann2 compilation issue resolved with dummy module"
-echo "  ✅ /opt/mycroft directory created manually with proper permissions (like old script)"
+echo "  ✅ /opt/mycroft directory created by Mycroft services with proper permissions"
 echo "  ✅ STABLE offline-compatible skills installed (hello-world, joke, date-time, alarm, weather)"
+echo "  ✅ All services stopped for clean setup completion"
 echo "  ✅ Padatious intent parsing working without fann2 compilation"
 echo "  ✅ All skill dependencies installed (pytz, holidays, pyjokes, pyalsaaudio, timezonefinder, geocoder, requests)"
 echo "  ✅ Auto-installation of default skills prevented with multiple protection layers"
 echo "  ✅ Disabled skills moved to prevent loading attempts"
 echo "  ✅ Basic configuration created (location can be added later for weather skill)"
-echo "  ✅ Skills installation verified and setup completed cleanly"
+echo "  ✅ Skills installation verified and services stopped cleanly"
 echo "  ✅ CLI interaction ready for voice commands and testing"
-echo "  ✅ Simplified setup process (no unnecessary service startup during setup)"
-echo "  ✅ Manual directory creation (reliable, immediate, like old script)"
-echo "  ✅ Proper verification flow (directories created → skills installed → setup complete)"
+echo "  ✅ Efficient installation process (no unnecessary service stopping)"
+echo "  ✅ Proper verification flow (skills installed → services stopped → setup complete)"
 echo "  ✅ Git configuration preserved (existing remotes and SSH setup maintained)"
 echo ""
 
