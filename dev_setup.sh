@@ -487,29 +487,55 @@ else
 fi
 
 # Question 2: GPIO Support (Raspberry Pi) - Only ask if relevant
-# Enhanced Raspberry Pi detection - check multiple reliable indicators
-RPI_DETECTED=false
-
-# Only check for Raspberry Pi on ARM Debian-based systems
+echo ""
 if [[ "$OS_NAME" == "raspbian" || "$OS_LIKE" == *"debian"* ]] && [[ "$(uname -m)" =~ ^(arm|aarch64)$ ]]; then
-    # Method 1: Check /etc/os-release for Raspberry Pi OS or Raspbian
-    if [[ -f "/etc/os-release" ]] && grep -q "Raspberry Pi OS\|raspbian\|raspberrypi" /etc/os-release; then
+    # Enhanced Raspberry Pi detection - check multiple reliable indicators
+    RPI_DETECTED=false
+    
+    echo "🔍 Detecting Raspberry Pi hardware..."
+    echo "Architecture: $(uname -m)"
+    echo "OS Name: $OS_NAME"  
+    echo "OS Like: $OS_LIKE"
+
+    # Method 1: Check for Raspberry Pi specific hardware files (most reliable)
+    if [[ -f "/proc/device-tree/model" ]] && grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then
+        echo "✅ Raspberry Pi detected via hardware model file"
         RPI_DETECTED=true
     fi
-    
-    # Method 2: Check for Raspberry Pi specific hardware files (most reliable)
-    if [[ -f "/proc/device-tree/model" ]] && grep -q "Raspberry Pi" /proc/device-tree/model; then
+
+    # Method 2: Check /etc/os-release for Raspberry Pi OS or Raspbian  
+    if [[ -f "/etc/os-release" ]] && grep -q "Raspberry Pi OS\|raspbian\|raspberrypi" /etc/os-release 2>/dev/null; then
+        echo "✅ Raspberry Pi detected via OS release file"
         RPI_DETECTED=true
     fi
-    
+
     # Method 3: Check for Raspberry Pi specific directories
     if [[ -d "/opt/vc" ]] || [[ -d "/usr/local/lib/python*/dist-packages/RPi" ]]; then
+        echo "✅ Raspberry Pi detected via system directories" 
         RPI_DETECTED=true
     fi
-fi
 
-# Only show GPIO question if Raspberry Pi is detected
-if [[ "$RPI_DETECTED" == true ]]; then
+    # Method 4: ARM64 (aarch64) + Debian-based system (modern Raspberry Pi OS)
+    if [[ "$(uname -m)" == "aarch64" && "$OS_LIKE" == *"debian"* ]]; then
+        # Check for common Raspberry Pi indicators on modern Pi OS
+        if [[ -f "/boot/config.txt" ]] || [[ -d "/boot/firmware" ]] || [[ -f "/proc/cpuinfo" && $(grep -c "BCM\|Raspberry Pi" /proc/cpuinfo 2>/dev/null) -gt 0 ]]; then
+            echo "✅ Raspberry Pi detected via aarch64 + Debian + Pi-specific files"
+            RPI_DETECTED=true
+        fi
+    fi
+
+    # Method 5: Check for ARM32 (older Pis) + Raspberry Pi indicators
+    if [[ "$(uname -m)" =~ ^(arm|armv).*$ ]]; then
+        # Check for common Raspberry Pi indicators on ARM32 systems
+        if [[ -f "/boot/config.txt" ]] || [[ -d "/boot/firmware" ]] || [[ -f "/proc/cpuinfo" && $(grep -c "BCM\|Raspberry Pi" /proc/cpuinfo 2>/dev/null) -gt 0 ]]; then
+            echo "✅ Raspberry Pi detected via ARM32 + Pi-specific files"
+            RPI_DETECTED=true
+        fi
+    fi
+
+    echo "Raspberry Pi detection result: $RPI_DETECTED"
+    
+    if [[ "$RPI_DETECTED" == true ]]; then
     echo ""
     echo "🔄 GPIO SUPPORT (Raspberry Pi detected via hardware/system indicators):"
     echo "GPIO libraries are needed for hardware integration (buttons, LEDs, sensors)."
@@ -525,8 +551,12 @@ if [[ "$RPI_DETECTED" == true ]]; then
         echo "✅ Skipping GPIO libraries - hardware integration disabled"
         INSTALL_GPIO=false
     fi
+    else
+        echo "ℹ️  GPIO support not applicable for this system (Debian-based ARM but not Raspberry Pi)"
+        INSTALL_GPIO=false
+    fi
 else
-    # Silently set to false for non-Raspberry Pi systems
+    echo "ℹ️  GPIO support not applicable for this system (not Raspberry Pi)"
     INSTALL_GPIO=false
 fi
 
@@ -714,14 +744,25 @@ case "$PACKAGE_MANAGER" in
         fi
         
         if command -v dnf &> /dev/null; then
-            sudo dnf install -y \
-                git python3 "$PYTHON_DEV_PKG" python3-pip python3-setuptools \
-                python3-virtualenv pygobject3-devel libtool libffi-devel \
-                openssl-devel autoconf bison swig glib2-devel \
-                portaudio-devel mpg123 mpg123-plugins-pulseaudio \
-                screen curl pkgconfig libicu-devel automake \
-                libjpeg-turbo-devel fann-devel gcc-c++ \
-                redhat-rpm-config jq make pulseaudio-utils
+            # Use version-specific packages if available, otherwise generic
+            if [[ -n "$PYTHON_VERSION" ]]; then
+                sudo dnf install -y \
+                    git python3 "$PYTHON_DEV_PKG" pygobject3-devel libtool libffi-devel \
+                    openssl-devel autoconf bison swig glib2-devel \
+                    portaudio-devel mpg123 mpg123-plugins-pulseaudio \
+                    screen curl pkgconfig libicu-devel automake \
+                    libjpeg-turbo-devel fann-devel gcc-c++ \
+                    redhat-rpm-config jq make pulseaudio-utils
+            else
+                sudo dnf install -y \
+                    git python3 "$PYTHON_DEV_PKG" python3-pip python3-setuptools \
+                    python3-virtualenv pygobject3-devel libtool libffi-devel \
+                    openssl-devel autoconf bison swig glib2-devel \
+                    portaudio-devel mpg123 mpg123-plugins-pulseaudio \
+                    screen curl pkgconfig libicu-devel automake \
+                    libjpeg-turbo-devel fann-devel gcc-c++ \
+                    redhat-rpm-config jq make pulseaudio-utils
+            fi
         elif command -v yum &> /dev/null; then
             sudo yum install -y \
                 cmake gcc-c++ git "$PYTHON_DEV_PKG" libtool libffi-devel \
@@ -757,23 +798,39 @@ case "$PACKAGE_MANAGER" in
         echo "Installing Debian/Ubuntu dependencies (default fallback)..."
         sudo apt-get update
         
-        # Use specific Python dev package if we know the version, otherwise use generic
+        # Use specific Python packages if we know the version, otherwise use generic
         if [[ -n "$PYTHON_VERSION" ]]; then
             PYTHON_DEV_PKG="python$PYTHON_VERSION-dev"
-            echo "Installing Python development package: $PYTHON_DEV_PKG"
+            PYTHON_PIP_PKG="python$PYTHON_VERSION-distutils"  # distutils instead of pip to avoid conflicts
+            PYTHON_SETUP_PKG=""  # Skip setuptools for specific versions to avoid conflicts
+            echo "Installing Python $PYTHON_VERSION development packages: $PYTHON_DEV_PKG $PYTHON_PIP_PKG"
         else
             PYTHON_DEV_PKG="python3-dev"
-            echo "Installing generic Python development package: $PYTHON_DEV_PKG"
+            PYTHON_PIP_PKG="python3-pip"
+            PYTHON_SETUP_PKG="python3-setuptools"
+            echo "Installing generic Python development packages: $PYTHON_DEV_PKG $PYTHON_PIP_PKG $PYTHON_SETUP_PKG"
         fi
         
-        sudo apt-get install -y \
-            git python3 "$PYTHON_DEV_PKG" python3-setuptools python3-pip \
-            build-essential libtool libffi-dev libssl-dev \
-            autoconf automake bison swig libglib2.0-dev \
-            portaudio19-dev mpg123 screen flac curl \
-            libicu-dev pkg-config libjpeg-dev libfann-dev \
-            pulseaudio pulseaudio-utils espeak espeak-data \
-            libyaml-dev jq
+        # Install system dependencies without version conflicts
+        if [[ -n "$PYTHON_SETUP_PKG" ]]; then
+            sudo apt-get install -y \
+                git python3 "$PYTHON_DEV_PKG" "$PYTHON_SETUP_PKG" "$PYTHON_PIP_PKG" \
+                build-essential libtool libffi-dev libssl-dev \
+                autoconf automake bison swig libglib2.0-dev \
+                portaudio19-dev mpg123 screen flac curl \
+                libicu-dev pkg-config libjpeg-dev libfann-dev \
+                pulseaudio pulseaudio-utils espeak espeak-data \
+                libyaml-dev jq
+        else
+            sudo apt-get install -y \
+                git python3 "$PYTHON_DEV_PKG" "$PYTHON_PIP_PKG" \
+                build-essential libtool libffi-dev libssl-dev \
+                autoconf automake bison swig libglib2.0-dev \
+                portaudio19-dev mpg123 screen flac curl \
+                libicu-dev pkg-config libjpeg-dev libfann-dev \
+                pulseaudio pulseaudio-utils espeak espeak-data \
+                libyaml-dev jq
+        fi
         ;;
 esac
 
@@ -1440,6 +1497,14 @@ echo "CLI INTERACTION COMMANDS:"
 echo "  'Hey Mycroft, tell me a joke'   - Test joke skill"
 echo "  'Hey Mycroft, what time is it'  - Test date-time skill"
 echo "  'Hey Mycroft, hello'            - Test hello-world skill"
+echo ""
+echo ""
+echo "TROUBLESHOOTING:"
+echo "  ℹ️  If microphone doesn't work on first startup:"
+echo "      ./stop-mycroft.sh           - Stop all services"
+echo "      ./start-mycroft.sh all      - Restart services"
+echo "      (This is normal and usually resolves initial audio initialization issues)"
+echo ""
 echo "  'Hey Mycroft, set an alarm'     - Test alarm skill"
 echo "  'Hey Mycroft, what's the weather' - Test weather skill"
 echo ""
