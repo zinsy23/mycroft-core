@@ -310,6 +310,30 @@ create_virtual_environment() {
     fi
 }
 
+# Function to verify we're in the correct virtual environment
+verify_virtual_environment() {
+    if [[ -z "$VIRTUAL_ENV" ]]; then
+        echo "❌ CRITICAL: No virtual environment active!"
+        echo "Attempting to activate .venv..."
+        if [[ -f ".venv/bin/activate" ]]; then
+            source .venv/bin/activate
+            echo "✅ Virtual environment activated"
+        else
+            echo "❌ Virtual environment not found at .venv/bin/activate"
+            return 1
+        fi
+    elif [[ "$VIRTUAL_ENV" != "$(pwd)/.venv" ]]; then
+        echo "⚠️  Warning: Wrong virtual environment active"
+        echo "Expected: $(pwd)/.venv"
+        echo "Current: $VIRTUAL_ENV"
+        echo "Switching to correct virtual environment..."
+        source .venv/bin/activate
+        echo "✅ Switched to correct virtual environment"
+    else
+        echo "✅ Virtual environment verified: $VIRTUAL_ENV"
+    fi
+}
+
 # Function to detect PyAudio build failures and offer recovery
 detect_and_recover_pyaudio() {
     local failed_packages=()
@@ -682,9 +706,16 @@ echo "Installing requirements..."
 echo "Installing system dependencies using $PACKAGE_MANAGER..."
 case "$PACKAGE_MANAGER" in
     "yum"|"dnf")
+        # Use specific Python dev package if we know the version
+        if [[ -n "$PYTHON_VERSION" ]]; then
+            PYTHON_DEV_PKG="python$PYTHON_VERSION-devel"
+        else
+            PYTHON_DEV_PKG="python3-devel"
+        fi
+        
         if command -v dnf &> /dev/null; then
             sudo dnf install -y \
-                git python3 python3-devel python3-pip python3-setuptools \
+                git python3 "$PYTHON_DEV_PKG" python3-pip python3-setuptools \
                 python3-virtualenv pygobject3-devel libtool libffi-devel \
                 openssl-devel autoconf bison swig glib2-devel \
                 portaudio-devel mpg123 mpg123-plugins-pulseaudio \
@@ -693,7 +724,7 @@ case "$PACKAGE_MANAGER" in
                 redhat-rpm-config jq make pulseaudio-utils
         elif command -v yum &> /dev/null; then
             sudo yum install -y \
-                cmake gcc-c++ git python3-devel libtool libffi-devel \
+                cmake gcc-c++ git "$PYTHON_DEV_PKG" libtool libffi-devel \
                 openssl-devel autoconf automake bison swig \
                 portaudio-devel mpg123 flac curl libicu-devel \
                 libjpeg-devel fann-devel pulseaudio
@@ -706,8 +737,15 @@ case "$PACKAGE_MANAGER" in
             flac curl icu libjpeg-turbo base-devel jq pulseaudio
         ;;
     "zypper")
+        # Use specific Python dev package if we know the version
+        if [[ -n "$PYTHON_VERSION" ]]; then
+            PYTHON_DEV_PKG="python$PYTHON_VERSION-devel"
+        else
+            PYTHON_DEV_PKG="python3-devel"
+        fi
+        
         sudo zypper install -y \
-            git python3 python3-devel libtool libffi-devel \
+            git python3 "$PYTHON_DEV_PKG" libtool libffi-devel \
             libopenssl-devel autoconf automake bison swig \
             portaudio-devel mpg123 flac curl libicu-devel \
             pkg-config libjpeg-devel libfann-devel python3-curses \
@@ -718,8 +756,18 @@ case "$PACKAGE_MANAGER" in
         # Default to apt (Debian/Ubuntu) for any unrecognized package manager
         echo "Installing Debian/Ubuntu dependencies (default fallback)..."
         sudo apt-get update
+        
+        # Use specific Python dev package if we know the version, otherwise use generic
+        if [[ -n "$PYTHON_VERSION" ]]; then
+            PYTHON_DEV_PKG="python$PYTHON_VERSION-dev"
+            echo "Installing Python development package: $PYTHON_DEV_PKG"
+        else
+            PYTHON_DEV_PKG="python3-dev"
+            echo "Installing generic Python development package: $PYTHON_DEV_PKG"
+        fi
+        
         sudo apt-get install -y \
-            git python3 python3-dev python3-setuptools python3-pip \
+            git python3 "$PYTHON_DEV_PKG" python3-setuptools python3-pip \
             build-essential libtool libffi-dev libssl-dev \
             autoconf automake bison swig libglib2.0-dev \
             portaudio19-dev mpg123 screen flac curl \
@@ -734,8 +782,18 @@ echo "✅ System dependencies installed for $OS_NAME"
 # Install requirements using our offline requirements file
 echo "Installing Mycroft requirements for offline operation..."
 
+# Verify we're in the virtual environment before installing Python packages
+if [[ -z "$VIRTUAL_ENV" ]] || [[ "$VIRTUAL_ENV" != "$(pwd)/.venv" ]]; then
+    echo "⚠️  Warning: Not in expected virtual environment"
+    echo "Expected: $(pwd)/.venv"
+    echo "Current: $VIRTUAL_ENV"
+    echo "Activating virtual environment..."
+    source .venv/bin/activate
+fi
+
 # Use Python version from our setup function
 echo "Using Python version: $PYTHON_VERSION (from setup function)"
+echo "Virtual environment: $VIRTUAL_ENV"
 
 # PyAudio often fails to compile on Python 3.11+ - try system package first
 PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
@@ -768,9 +826,19 @@ fi
 # Run the installation with recovery
 detect_and_recover_pyaudio
 
+# Ensure we're still in the virtual environment after any recovery operations
+if [[ -z "$VIRTUAL_ENV" ]] || [[ ! -f ".venv/bin/activate" ]]; then
+    echo "⚠️  Virtual environment not active after installation, reactivating..."
+    source .venv/bin/activate
+    echo "✅ Virtual environment reactivated"
+fi
+
 # Conditional installation based on user choices
 echo ""
 echo "Installing conditional packages based on your setup choices..."
+
+# Verify virtual environment before conditional installations
+verify_virtual_environment
 
 # Install TensorFlow if custom wake words are enabled
 if [[ "$INSTALL_TENSORFLOW" == true ]]; then
@@ -947,6 +1015,9 @@ else
     echo "Warning: Padatious installation may have issues"
 fi
 
+# Verify virtual environment before STT installations
+verify_virtual_environment
+
 # Install extra STT requirements (optional)
 echo "Installing additional STT requirements..."
 pip install -r requirements/extra-stt.txt || echo "Some STT extras failed, continuing..."
@@ -989,6 +1060,9 @@ chmod +x start-mycroft.sh
 chmod +x stop-mycroft.sh
 chmod +x bin/mycroft-*
 chmod +x scripts/*.sh
+
+# Verify virtual environment before skill dependencies
+verify_virtual_environment
 
 # Install common skill dependencies  
 echo "Installing common skill dependencies..."
