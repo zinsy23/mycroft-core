@@ -360,7 +360,7 @@ create_virtual_environment() {
 # Main virtual environment setup
 setup_virtual_environment() {
     echo "=============================================================================="
-    echo "PHASE 0: Setting up virtual environment..."
+    echo "PHASE 1: Setting up virtual environment..."
     echo "=============================================================================="
     echo "Note: After answering initial setup questions, the process will run unattended"
     echo ""
@@ -444,6 +444,112 @@ setup_virtual_environment() {
         exit 1
     fi
 }
+
+# PHASE 0: Interactive Setup Questions (MUST HAPPEN FIRST)
+echo "=============================================================================="
+echo "PHASE 0: Setup Configuration Questions"
+echo "=============================================================================="
+
+# Question 1: Custom Wake Word Support (TensorFlow)
+echo ""
+echo "🎤 CUSTOM WAKE WORD SUPPORT:"
+echo "TensorFlow is required if you plan to train custom wake word models."
+echo "The default 'hey mycroft' wake word works without TensorFlow."
+echo ""
+echo "Do you plan to train custom wake word models? (This requires TensorFlow ~500MB)"
+read -p "Install TensorFlow for custom wake words? [y/N] (default: no): " -r custom_wake_words
+CUSTOM_WAKE_WORDS=${custom_wake_words:-N}
+
+if [[ "$CUSTOM_WAKE_WORDS" =~ ^[Yy]$ ]]; then
+    echo "✅ Will install TensorFlow for custom wake word training"
+    INSTALL_TENSORFLOW=true
+else
+    echo "✅ Skipping TensorFlow - using default wake word only"
+    INSTALL_TENSORFLOW=false
+fi
+
+# Question 2: GPIO Support (Raspberry Pi)
+echo ""
+if [[ "$OS_NAME" == "raspbian" || "$OS_LIKE" == *"debian"* ]] && [[ "$(uname -m)" =~ ^(arm|aarch64)$ ]]; then
+    # Enhanced Raspberry Pi detection - check multiple reliable indicators
+    RPI_DETECTED=false
+    
+    # Method 1: Check /etc/os-release for Raspberry Pi OS or Raspbian
+    if [[ -f "/etc/os-release" ]] && grep -q "Raspberry Pi OS\|raspbian\|raspberrypi" /etc/os-release; then
+        RPI_DETECTED=true
+    fi
+    
+    # Method 2: Check for Raspberry Pi specific hardware files (most reliable)
+    if [[ -f "/proc/device-tree/model" ]] && grep -q "Raspberry Pi" /proc/device-tree/model; then
+        RPI_DETECTED=true
+    fi
+    
+    # Method 3: Check for Raspberry Pi specific directories
+    if [[ -d "/opt/vc" ]] || [[ -d "/usr/local/lib/python*/dist-packages/RPi" ]]; then
+        RPI_DETECTED=true
+    fi
+    
+    if [[ "$RPI_DETECTED" == true ]]; then
+        echo "🔄 GPIO SUPPORT (Raspberry Pi detected via hardware/system indicators):"
+        echo "GPIO libraries are needed for hardware integration (buttons, LEDs, sensors)."
+        echo "This includes RPi.GPIO and rpi-lgpio for advanced push button logic."
+        echo ""
+        read -p "Install GPIO support libraries? [Y/n] (default: yes): " -r gpio_support
+        GPIO_SUPPORT=${gpio_support:-Y}
+        
+        if [[ "$GPIO_SUPPORT" =~ ^[Yy]$ ]]; then
+            echo "✅ Will install GPIO libraries for Raspberry Pi hardware integration"
+            INSTALL_GPIO=true
+        else
+            echo "✅ Skipping GPIO libraries - hardware integration disabled"
+            INSTALL_GPIO=false
+        fi
+    else
+        echo "ℹ️  GPIO support not applicable for this system (Debian-based ARM but not Raspberry Pi)"
+        INSTALL_GPIO=false
+    fi
+else
+    echo "ℹ️  GPIO support not applicable for this system (not Raspberry Pi)"
+    INSTALL_GPIO=false
+fi
+
+# Question 3: Python Version (DeadSnakes PPA for Ubuntu users)
+echo ""
+if [[ "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"ubuntu"* ]]; then
+    echo "🐍 PYTHON VERSION OPTIMIZATION (Ubuntu detected):"
+    echo "The DeadSnakes PPA provides Python 3.11+ which works better with Mycroft."
+    echo "This can resolve virtual environment and dependency issues."
+    echo ""
+    echo "⚠️  Note: This adds a third-party repository to your system."
+    echo ""
+    read -p "Install Python 3.11+ via DeadSnakes PPA? [Y/n] (default: yes): " -r deadsnakes_ppa
+    DEADSNAKES_PPA=${deadsnakes_ppa:-Y}
+    
+    if [[ "$DEADSNAKES_PPA" =~ ^[Yy]$ ]]; then
+        echo "✅ Will install Python 3.11+ via DeadSnakes PPA"
+        INSTALL_DEADSNAKES=true
+    else
+        echo "✅ Skipping DeadSnakes PPA - using system Python version"
+        INSTALL_DEADSNAKES=false
+    fi
+else
+    echo "ℹ️  DeadSnakes PPA not applicable for this system (not Ubuntu)"
+    INSTALL_DEADSNAKES=false
+fi
+
+echo ""
+echo "Setup configuration complete:"
+echo "  - Custom wake words: $([ "$INSTALL_TENSORFLOW" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
+echo "  - GPIO support: $([ "$INSTALL_GPIO" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
+echo "  - Python 3.11+ (DeadSnakes): $([ "$INSTALL_DEADSNAKES" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
+echo ""
+
+# PHASE 1: Virtual Environment Setup (using answers from Phase 0)
+echo "=============================================================================="
+echo "PHASE 1: Setting up virtual environment..."
+echo "=============================================================================="
+echo "Note: The process will now run unattended using your configuration choices"
+echo ""
 
 # Call the virtual environment setup
 setup_virtual_environment
@@ -941,105 +1047,6 @@ md5sum requirements/requirements-offline.txt requirements/extra-audiobackend.txt
 
 # Note: Git configuration not needed for public repos - user's existing config preserved
 echo "✅ Git configuration preserved - existing remotes and SSH setup maintained"
-
-# PHASE 0: Interactive Setup Questions
-echo "=============================================================================="
-echo "PHASE 0: Setup Configuration Questions"
-echo "=============================================================================="
-
-# Question 1: Custom Wake Word Support (TensorFlow)
-echo ""
-echo "🎤 CUSTOM WAKE WORD SUPPORT:"
-echo "TensorFlow is required if you plan to train custom wake word models."
-echo "The default 'hey mycroft' wake word works without TensorFlow."
-echo ""
-echo "Do you plan to train custom wake word models? (This requires TensorFlow ~500MB)"
-read -p "Install TensorFlow for custom wake words? [y/N] (default: no): " -r custom_wake_words
-CUSTOM_WAKE_WORDS=${custom_wake_words:-N}
-
-if [[ "$CUSTOM_WAKE_WORDS" =~ ^[Yy]$ ]]; then
-    echo "✅ Will install TensorFlow for custom wake word training"
-    INSTALL_TENSORFLOW=true
-else
-    echo "✅ Skipping TensorFlow - using default wake word only"
-    INSTALL_TENSORFLOW=false
-fi
-
-# Question 2: GPIO Support (Raspberry Pi)
-echo ""
-if [[ "$OS_NAME" == "raspbian" || "$OS_LIKE" == *"debian"* ]] && [[ "$(uname -m)" =~ ^(arm|aarch64)$ ]]; then
-    # Enhanced Raspberry Pi detection - check multiple reliable indicators
-    RPI_DETECTED=false
-    
-    # Method 1: Check /etc/os-release for Raspberry Pi OS or Raspbian
-    if [[ -f "/etc/os-release" ]] && grep -q "Raspberry Pi OS\|raspbian\|raspberrypi" /etc/os-release; then
-        RPI_DETECTED=true
-    fi
-    
-    # Method 2: Check for Raspberry Pi specific hardware files (most reliable)
-    if [[ -f "/proc/device-tree/model" ]] && grep -q "Raspberry Pi" /proc/device-tree/model; then
-        RPI_DETECTED=true
-    fi
-    
-    # Method 3: Check for Raspberry Pi specific directories
-    if [[ -d "/opt/vc" ]] || [[ -d "/usr/local/lib/python*/dist-packages/RPi" ]]; then
-        RPI_DETECTED=true
-    fi
-    
-    if [[ "$RPI_DETECTED" == true ]]; then
-        echo "🔄 GPIO SUPPORT (Raspberry Pi detected via hardware/system indicators):"
-        echo "GPIO libraries are needed for hardware integration (buttons, LEDs, sensors)."
-        echo "This includes RPi.GPIO and rpi-lgpio for advanced push button logic."
-        echo ""
-        read -p "Install GPIO support libraries? [Y/n] (default: yes): " -r gpio_support
-        GPIO_SUPPORT=${gpio_support:-Y}
-        
-        if [[ "$GPIO_SUPPORT" =~ ^[Yy]$ ]]; then
-            echo "✅ Will install GPIO libraries for Raspberry Pi hardware integration"
-            INSTALL_GPIO=true
-        else
-            echo "✅ Skipping GPIO libraries - hardware integration disabled"
-            INSTALL_GPIO=false
-        fi
-    else
-        echo "ℹ️  GPIO support not applicable for this system (Debian-based ARM but not Raspberry Pi)"
-        INSTALL_GPIO=false
-    fi
-else
-    echo "ℹ️  GPIO support not applicable for this system (not Raspberry Pi)"
-    INSTALL_GPIO=false
-fi
-
-# Question 3: Python Version (DeadSnakes PPA for Ubuntu users)
-echo ""
-if [[ "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"ubuntu"* ]]; then
-    echo "🐍 PYTHON VERSION OPTIMIZATION (Ubuntu detected):"
-    echo "The DeadSnakes PPA provides Python 3.11+ which works better with Mycroft."
-    echo "This can resolve virtual environment and dependency issues."
-    echo ""
-    echo "⚠️  Note: This adds a third-party repository to your system."
-    echo ""
-    read -p "Install Python 3.11+ via DeadSnakes PPA? [Y/n] (default: yes): " -r deadsnakes_ppa
-    DEADSNAKES_PPA=${deadsnakes_ppa:-Y}
-    
-    if [[ "$DEADSNAKES_PPA" =~ ^[Yy]$ ]]; then
-        echo "✅ Will install Python 3.11+ via DeadSnakes PPA"
-        INSTALL_DEADSNAKES=true
-    else
-        echo "✅ Skipping DeadSnakes PPA - using system Python version"
-        INSTALL_DEADSNAKES=false
-    fi
-else
-    echo "ℹ️  DeadSnakes PPA not applicable for this system (not Ubuntu)"
-    INSTALL_DEADSNAKES=false
-fi
-
-echo ""
-echo "Setup configuration complete:"
-echo "  - Custom wake words: $([ "$INSTALL_TENSORFLOW" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
-echo "  - GPIO support: $([ "$INSTALL_GPIO" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
-echo "  - Python 3.11+ (DeadSnakes): $([ "$INSTALL_DEADSNAKES" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
-echo ""
 
 # PHASE 1: CHECK IF /opt/mycroft ALREADY EXISTS
 echo "=============================================================================="
