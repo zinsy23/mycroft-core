@@ -322,10 +322,8 @@ detect_and_recover_pyaudio() {
         echo ""
         echo "⚠️  Some packages failed to install. Analyzing failures..."
         
-        # Check for PyAudio compilation failures
-        if grep -q "error: command.*gcc.*failed" /tmp/pip_install.log || \
-           grep -q "Failed building wheel for PyAudio" /tmp/pip_install.log || \
-           grep -q "error: subprocess-exited-with-error" /tmp/pip_install.log; then
+        # Check for common build failures (PyAudio, fann2, etc.)
+        if grep -qE "(error: command.*gcc.*failed|Failed building wheel|error: subprocess-exited-with-error|error: Microsoft Visual C\+\+|No module named.*distutils|portaudio\.h: No such file|fann\.h: No such file)" /tmp/pip_install.log; then
             
             echo "🔍 Detected PyAudio compilation failure!"
             
@@ -408,35 +406,68 @@ echo "==========================================================================
 # Detect OS and package manager first (needed for questions)
 detect_os_and_package_manager
 
+# Check for existing setup
+EXISTING_VENV=false
+EXISTING_TENSORFLOW=false
+NEEDS_UPDATE=false
+
+if [ -d ".venv" ]; then
+    echo "🔍 Existing virtual environment detected"
+    EXISTING_VENV=true
+    
+    # Check if it's working
+    if [ -f ".venv/bin/activate" ]; then
+        # Check if TensorFlow is already installed
+        if .venv/bin/python -c "import tensorflow" 2>/dev/null; then
+            EXISTING_TENSORFLOW=true
+        fi
+        
+        # Check if setup needs updating (missing .installed file or requirements changed)
+        if [ ! -f ".installed" ] || ! md5sum -c .installed >/dev/null 2>&1; then
+            NEEDS_UPDATE=true
+        fi
+    else
+        echo "⚠️  Existing virtual environment appears broken"
+        NEEDS_UPDATE=true
+    fi
+fi
+
 # PHASE 0.5: Interactive Setup Questions (using detected system info)
 echo "=============================================================================="
 echo "PHASE 0.5: Setup Configuration Questions"
 echo "=============================================================================="
 
 # Question 1: Custom Wake Word Support (TensorFlow)
-echo ""
-echo "🎤 CUSTOM WAKE WORD SUPPORT:"
-echo "TensorFlow is required if you plan to train custom wake word models."
-echo "The default 'hey mycroft' wake word works without TensorFlow."
-echo ""
-echo "Do you plan to train custom wake word models? (This requires TensorFlow ~500MB)"
-read -p "Install TensorFlow for custom wake words? [y/N] (default: no): " -r custom_wake_words
-CUSTOM_WAKE_WORDS=${custom_wake_words:-N}
-
-if [[ "$CUSTOM_WAKE_WORDS" =~ ^[Yy]$ ]]; then
-    echo "✅ Will install TensorFlow for custom wake word training"
-    INSTALL_TENSORFLOW=true
+if [[ "$EXISTING_TENSORFLOW" == true ]]; then
+    echo ""
+    echo "🎤 CUSTOM WAKE WORD SUPPORT:"
+    echo "✅ TensorFlow is already installed in existing virtual environment"
+    INSTALL_TENSORFLOW=false  # Don't reinstall
 else
-    echo "✅ Skipping TensorFlow - using default wake word only"
-    INSTALL_TENSORFLOW=false
+    echo ""
+    echo "🎤 CUSTOM WAKE WORD SUPPORT:"
+    echo "TensorFlow is required if you plan to train custom wake word models."
+    echo "The default 'hey mycroft' wake word works without TensorFlow."
+    echo ""
+    echo "Do you plan to train custom wake word models? (This requires TensorFlow ~500MB)"
+    read -p "Install TensorFlow for custom wake words? [y/N] (default: no): " -r custom_wake_words
+    CUSTOM_WAKE_WORDS=${custom_wake_words:-N}
+
+    if [[ "$CUSTOM_WAKE_WORDS" =~ ^[Yy]$ ]]; then
+        echo "✅ Will install TensorFlow for custom wake word training"
+        INSTALL_TENSORFLOW=true
+    else
+        echo "✅ Skipping TensorFlow - using default wake word only"
+        INSTALL_TENSORFLOW=false
+    fi
 fi
 
-# Question 2: GPIO Support (Raspberry Pi)
-echo ""
+# Question 2: GPIO Support (Raspberry Pi) - Only ask if relevant
+# Enhanced Raspberry Pi detection - check multiple reliable indicators
+RPI_DETECTED=false
+
+# Only check for Raspberry Pi on ARM Debian-based systems
 if [[ "$OS_NAME" == "raspbian" || "$OS_LIKE" == *"debian"* ]] && [[ "$(uname -m)" =~ ^(arm|aarch64)$ ]]; then
-    # Enhanced Raspberry Pi detection - check multiple reliable indicators
-    RPI_DETECTED=false
-    
     # Method 1: Check /etc/os-release for Raspberry Pi OS or Raspbian
     if [[ -f "/etc/os-release" ]] && grep -q "Raspberry Pi OS\|raspbian\|raspberrypi" /etc/os-release; then
         RPI_DETECTED=true
@@ -451,28 +482,27 @@ if [[ "$OS_NAME" == "raspbian" || "$OS_LIKE" == *"debian"* ]] && [[ "$(uname -m)
     if [[ -d "/opt/vc" ]] || [[ -d "/usr/local/lib/python*/dist-packages/RPi" ]]; then
         RPI_DETECTED=true
     fi
+fi
+
+# Only show GPIO question if Raspberry Pi is detected
+if [[ "$RPI_DETECTED" == true ]]; then
+    echo ""
+    echo "🔄 GPIO SUPPORT (Raspberry Pi detected via hardware/system indicators):"
+    echo "GPIO libraries are needed for hardware integration (buttons, LEDs, sensors)."
+    echo "This includes RPi.GPIO and rpi-lgpio for advanced push button logic."
+    echo ""
+    read -p "Install GPIO support libraries? [Y/n] (default: yes): " -r gpio_support
+    GPIO_SUPPORT=${gpio_support:-Y}
     
-    if [[ "$RPI_DETECTED" == true ]]; then
-        echo "🔄 GPIO SUPPORT (Raspberry Pi detected via hardware/system indicators):"
-        echo "GPIO libraries are needed for hardware integration (buttons, LEDs, sensors)."
-        echo "This includes RPi.GPIO and rpi-lgpio for advanced push button logic."
-        echo ""
-        read -p "Install GPIO support libraries? [Y/n] (default: yes): " -r gpio_support
-        GPIO_SUPPORT=${gpio_support:-Y}
-        
-        if [[ "$GPIO_SUPPORT" =~ ^[Yy]$ ]]; then
-            echo "✅ Will install GPIO libraries for Raspberry Pi hardware integration"
-            INSTALL_GPIO=true
-        else
-            echo "✅ Skipping GPIO libraries - hardware integration disabled"
-            INSTALL_GPIO=false
-        fi
+    if [[ "$GPIO_SUPPORT" =~ ^[Yy]$ ]]; then
+        echo "✅ Will install GPIO libraries for Raspberry Pi hardware integration"
+        INSTALL_GPIO=true
     else
-        echo "ℹ️  GPIO support not applicable for this system (Debian-based ARM but not Raspberry Pi)"
+        echo "✅ Skipping GPIO libraries - hardware integration disabled"
         INSTALL_GPIO=false
     fi
 else
-    echo "ℹ️  GPIO support not applicable for this system (not Raspberry Pi)"
+    # Silently set to false for non-Raspberry Pi systems
     INSTALL_GPIO=false
 fi
 
@@ -480,16 +510,16 @@ fi
 echo ""
 if [[ "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"ubuntu"* ]]; then
     echo "🐍 PYTHON VERSION OPTIMIZATION (Ubuntu detected):"
-    echo "The DeadSnakes PPA provides Python 3.11+ which works better with Mycroft."
+    echo "The DeadSnakes PPA provides Python 3.11 which works better with Mycroft."
     echo "This can resolve virtual environment and dependency issues."
     echo ""
     echo "⚠️  Note: This adds a third-party repository to your system."
     echo ""
-    read -p "Install Python 3.11+ via DeadSnakes PPA? [Y/n] (default: yes): " -r deadsnakes_ppa
+    read -p "Install Python 3.11 via DeadSnakes PPA? [Y/n] (default: yes): " -r deadsnakes_ppa
     DEADSNAKES_PPA=${deadsnakes_ppa:-Y}
     
     if [[ "$DEADSNAKES_PPA" =~ ^[Yy]$ ]]; then
-        echo "✅ Will install Python 3.11+ via DeadSnakes PPA"
+        echo "✅ Will install Python 3.11 via DeadSnakes PPA"
         INSTALL_DEADSNAKES=true
     else
         echo "✅ Skipping DeadSnakes PPA - using system Python version"
@@ -504,7 +534,7 @@ echo ""
 echo "Setup configuration complete:"
 echo "  - Custom wake words: $([ "$INSTALL_TENSORFLOW" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
 echo "  - GPIO support: $([ "$INSTALL_GPIO" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
-echo "  - Python 3.11+ (DeadSnakes): $([ "$INSTALL_DEADSNAKES" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
+echo "  - Python 3.11 (DeadSnakes): $([ "$INSTALL_DEADSNAKES" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
 echo ""
 
 # PHASE 1: Virtual Environment Setup (using answers from Phase 0.5)
@@ -514,32 +544,40 @@ echo "==========================================================================
 echo "Note: The process will now run unattended using your configuration choices"
 echo ""
 
+# Skip virtual environment setup if existing one is working and doesn't need updates
+if [[ "$EXISTING_VENV" == true && "$NEEDS_UPDATE" == false ]]; then
+    echo "✅ Existing virtual environment is up to date - skipping recreation"
+    echo "Activating existing virtual environment..."
+    source .venv/bin/activate
+    echo "✅ Virtual environment activated successfully"
+    
+    # Skip to later phases
+    echo "Skipping to system dependencies and package installation..."
+else
+    echo "Creating new virtual environment or updating existing one..."
+
 # Install Python 3.11 if DeadSnakes PPA was requested
 if [[ "$INSTALL_DEADSNAKES" == true ]]; then
     echo ""
-    echo "🐍 Installing Python 3.11+ via DeadSnakes PPA (as requested in setup)..."
-    echo "This will provide Python 3.11, 3.12, and 3.13 packages for optimal Mycroft performance"
+    echo "🐍 Installing Python 3.11 via DeadSnakes PPA (as requested in setup)..."
+    echo "This will provide Python 3.11 for optimal Mycroft performance"
     echo ""
     
     # Add DeadSnakes PPA
     if sudo add-apt-repository ppa:deadsnakes/ppa -y; then
         echo "✅ DeadSnakes PPA added successfully"
         
-        # Update package lists
-        if sudo apt update; then
-            echo "✅ Package lists updated"
-            
-            # Install Python 3.11 and venv
-            if sudo apt install -y python3.11 python3.11-venv; then
-                echo "✅ Python 3.11 installed successfully"
-                DEADSNAKES_INSTALLED=true
-            else
-                echo "❌ Failed to install Python 3.11"
-                echo "Continuing with system Python versions..."
-                DEADSNAKES_INSTALLED=false
-            fi
+        # Update package lists (ignore CD-ROM errors)
+        echo "Updating package lists..."
+        sudo apt update 2>&1 | grep -v "cdrom://" | grep -v "apt-cdrom" || true
+        
+        # Try to install Python 3.11 regardless of update warnings
+        echo "Attempting to install Python 3.11..."
+        if sudo apt install -y python3.11 python3.11-venv python3.11-dev 2>/dev/null; then
+            echo "✅ Python 3.11 installed successfully"
+            DEADSNAKES_INSTALLED=true
         else
-            echo "❌ Failed to update package lists"
+            echo "❌ Failed to install Python 3.11 packages"
             echo "Continuing with system Python versions..."
             DEADSNAKES_INSTALLED=false
         fi
@@ -552,6 +590,9 @@ else
     echo "ℹ️  DeadSnakes PPA installation skipped (as requested in setup)"
     DEADSNAKES_INSTALLED=false
 fi
+
+# Force refresh command cache to find newly installed Python versions
+hash -r
 
 # Find available Python versions (now including DeadSnakes if installed)
 find_available_python_versions
@@ -625,6 +666,8 @@ else
     rm -rf .venv
     exit 1
 fi
+
+fi  # End of virtual environment creation conditional
 
 # Activate virtual environment
 source .venv/bin/activate
