@@ -13,112 +13,48 @@ TOP=$(pwd -L)
 
 echo "Setting up Mycroft for offline/local use..."
 
-# PHASE 0: Basic System Detection (needed for questions)
-echo "=============================================================================="
-echo "PHASE 0: Basic System Detection"
-echo "=============================================================================="
+#==============================================================================
+# FUNCTION DEFINITIONS (All functions defined before use)
+#==============================================================================
 
-# Detect OS and package manager first (needed for questions)
-detect_os_and_package_manager
-
-# PHASE 0.5: Interactive Setup Questions (using detected system info)
-echo "=============================================================================="
-echo "PHASE 0.5: Setup Configuration Questions"
-echo "=============================================================================="
-
-# Question 1: Custom Wake Word Support (TensorFlow)
-echo ""
-echo "🎤 CUSTOM WAKE WORD SUPPORT:"
-echo "TensorFlow is required if you plan to train custom wake word models."
-echo "The default 'hey mycroft' wake word works without TensorFlow."
-echo ""
-echo "Do you plan to train custom wake word models? (This requires TensorFlow ~500MB)"
-read -p "Install TensorFlow for custom wake words? [y/N] (default: no): " -r custom_wake_words
-CUSTOM_WAKE_WORDS=${custom_wake_words:-N}
-
-if [[ "$CUSTOM_WAKE_WORDS" =~ ^[Yy]$ ]]; then
-    echo "✅ Will install TensorFlow for custom wake word training"
-    INSTALL_TENSORFLOW=true
-else
-    echo "✅ Skipping TensorFlow - using default wake word only"
-    INSTALL_TENSORFLOW=false
-fi
-
-# Question 2: GPIO Support (Raspberry Pi)
-echo ""
-if [[ "$OS_NAME" == "raspbian" || "$OS_LIKE" == *"debian"* ]] && [[ "$(uname -m)" =~ ^(arm|aarch64)$ ]]; then
-    # Enhanced Raspberry Pi detection - check multiple reliable indicators
-    RPI_DETECTED=false
+# Function to detect OS and package manager
+detect_os_and_package_manager() {
+    echo "Detecting operating system and package manager..."
     
-    # Method 1: Check /etc/os-release for Raspberry Pi OS or Raspbian
-    if [[ -f "/etc/os-release" ]] && grep -q "Raspberry Pi OS\|raspbian\|raspberrypi" /etc/os-release; then
-        RPI_DETECTED=true
-    fi
-    
-    # Method 2: Check for Raspberry Pi specific hardware files (most reliable)
-    if [[ -f "/proc/device-tree/model" ]] && grep -q "Raspberry Pi" /proc/device-tree/model; then
-        RPI_DETECTED=true
-    fi
-    
-    # Method 3: Check for Raspberry Pi specific directories
-    if [[ -d "/opt/vc" ]] || [[ -d "/usr/local/lib/python*/dist-packages/RPi" ]]; then
-        RPI_DETECTED=true
-    fi
-    
-    if [[ "$RPI_DETECTED" == true ]]; then
-        echo "🔄 GPIO SUPPORT (Raspberry Pi detected via hardware/system indicators):"
-        echo "GPIO libraries are needed for hardware integration (buttons, LEDs, sensors)."
-        echo "This includes RPi.GPIO and rpi-lgpio for advanced push button logic."
-        echo ""
-        read -p "Install GPIO support libraries? [Y/n] (default: yes): " -r gpio_support
-        GPIO_SUPPORT=${gpio_support:-Y}
-        
-        if [[ "$GPIO_SUPPORT" =~ ^[Yy]$ ]]; then
-            echo "✅ Will install GPIO libraries for Raspberry Pi hardware integration"
-            INSTALL_GPIO=true
-        else
-            echo "✅ Skipping GPIO libraries - hardware integration disabled"
-            INSTALL_GPIO=false
-        fi
+    # Detect OS
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS_NAME="$ID"
+        OS_LIKE="$ID_LIKE"
+        OS_VERSION="$VERSION_ID"
+        echo "Detected OS: $OS_NAME $OS_VERSION (like: $OS_LIKE)"
     else
-        echo "ℹ️  GPIO support not applicable for this system (Debian-based ARM but not Raspberry Pi)"
-        INSTALL_GPIO=false
+        echo "⚠️  Warning: Could not detect OS, assuming Ubuntu/Debian"
+        OS_NAME="ubuntu"
+        OS_LIKE="debian"
     fi
-else
-    echo "ℹ️  GPIO support not applicable for this system (not Raspberry Pi)"
-    INSTALL_GPIO=false
-fi
-
-# Question 3: Python Version (DeadSnakes PPA for Ubuntu users)
-echo ""
-if [[ "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"ubuntu"* ]]; then
-    echo "🐍 PYTHON VERSION OPTIMIZATION (Ubuntu detected):"
-    echo "The DeadSnakes PPA provides Python 3.11+ which works better with Mycroft."
-    echo "This can resolve virtual environment and dependency issues."
-    echo ""
-    echo "⚠️  Note: This adds a third-party repository to your system."
-    echo ""
-    read -p "Install Python 3.11+ via DeadSnakes PPA? [Y/n] (default: yes): " -r deadsnakes_ppa
-    DEADSNAKES_PPA=${deadsnakes_ppa:-Y}
     
-    if [[ "$DEADSNAKES_PPA" =~ ^[Yy]$ ]]; then
-        echo "✅ Will install Python 3.11+ via DeadSnakes PPA"
-        INSTALL_DEADSNAKES=true
+    # Detect package manager
+    if command -v apt-get >/dev/null 2>&1; then
+        PACKAGE_MANAGER="apt"
+        echo "Detected package manager: apt (Debian/Ubuntu)"
+    elif command -v yum >/dev/null 2>&1; then
+        PACKAGE_MANAGER="yum"
+        echo "Detected package manager: yum (RHEL/CentOS)"
+    elif command -v dnf >/dev/null 2>&1; then
+        PACKAGE_MANAGER="dnf"
+        echo "Detected package manager: dnf (Fedora/RHEL)"
+    elif command -v pacman >/dev/null 2>&1; then
+        PACKAGE_MANAGER="pacman"
+        echo "Detected package manager: pacman (Arch)"
+    elif command -v zypper >/dev/null 2>&1; then
+        PACKAGE_MANAGER="zypper"
+        echo "Detected package manager: zypper (openSUSE)"
     else
-        echo "✅ Skipping DeadSnakes PPA - using system Python version"
-        INSTALL_DEADSNAKES=false
+        echo "⚠️  Warning: Could not detect package manager, assuming apt"
+        PACKAGE_MANAGER="apt"
     fi
-else
-    echo "ℹ️  DeadSnakes PPA not applicable for this system (not Ubuntu)"
-    INSTALL_DEADSNAKES=false
-fi
-
-echo ""
-echo "Setup configuration complete:"
-echo "  - Custom wake words: $([ "$INSTALL_TENSORFLOW" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
-echo "  - GPIO support: $([ "$INSTALL_GPIO" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
-echo "  - Python 3.11+ (DeadSnakes): $([ "$INSTALL_DEADSNAKES" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
-echo ""
+}
 
 # Function to verify Python version stability before venv creation
 verify_python_version_stability() {
@@ -168,45 +104,6 @@ verify_python_version_stability() {
     else
         echo "ℹ️  Python version $version (not 3.11) - stability check not applicable"
         return 0
-    fi
-}
-
-# Function to detect OS and package manager
-detect_os_and_package_manager() {
-    echo "Detecting operating system and package manager..."
-    
-    # Detect OS
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        OS_NAME="$ID"
-        OS_LIKE="$ID_LIKE"
-        OS_VERSION="$VERSION_ID"
-        echo "Detected OS: $OS_NAME $OS_VERSION (like: $OS_LIKE)"
-    else
-        echo "⚠️  Warning: Could not detect OS, assuming Ubuntu/Debian"
-        OS_NAME="ubuntu"
-        OS_LIKE="debian"
-    fi
-    
-    # Detect package manager
-    if command -v apt-get >/dev/null 2>&1; then
-        PACKAGE_MANAGER="apt"
-        echo "Detected package manager: apt (Debian/Ubuntu)"
-    elif command -v yum >/dev/null 2>&1; then
-        PACKAGE_MANAGER="yum"
-        echo "Detected package manager: yum (RHEL/CentOS)"
-    elif command -v dnf >/dev/null 2>&1; then
-        PACKAGE_MANAGER="dnf"
-        echo "Detected package manager: dnf (Fedora/RHEL)"
-    elif command -v pacman >/dev/null 2>&1; then
-        PACKAGE_MANAGER="pacman"
-        echo "Detected package manager: pacman (Arch)"
-    elif command -v zypper >/dev/null 2>&1; then
-        PACKAGE_MANAGER="zypper"
-        echo "Detected package manager: zypper (openSUSE)"
-    else
-        echo "⚠️  Warning: Could not detect package manager, assuming apt"
-        PACKAGE_MANAGER="apt"
     fi
 }
 
@@ -346,57 +243,6 @@ select_best_python() {
     exit 1
 }
 
-# Function to offer DeadSnakes PPA installation upfront
-offer_deadsnakes_ppa_upfront() {
-    if [[ "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"ubuntu"* ]]; then
-        if [[ "$INSTALL_DEADSNAKES" == true ]]; then
-            echo ""
-            echo "🐍 Installing Python 3.11+ via DeadSnakes PPA (as requested in setup)..."
-            echo "This will provide Python 3.11, 3.12, and 3.13 packages for optimal Mycroft performance"
-            echo ""
-            
-            # Add DeadSnakes PPA
-            if sudo add-apt-repository ppa:deadsnakes/ppa -y; then
-                echo "✅ DeadSnakes PPA added successfully"
-                
-                # Update package lists
-                if sudo apt update; then
-                    echo "✅ Package lists updated"
-                    
-                    # Install Python 3.11 and venv
-                    if sudo apt install -y python3.11 python3.11-venv; then
-                        echo "✅ Python 3.11 installed successfully"
-                        DEADSNAKES_INSTALLED=true
-                        return 0
-                    else
-                        echo "❌ Failed to install Python 3.11"
-                        echo "Continuing with system Python versions..."
-                        DEADSNAKES_INSTALLED=false
-                        return 1
-                    fi
-                else
-                    echo "❌ Failed to update package lists"
-                    echo "Continuing with system Python versions..."
-                    DEADSNAKES_INSTALLED=false
-                    return 1
-                fi
-            else
-                echo "❌ Failed to add DeadSnakes PPA"
-                echo "Continuing with system Python versions..."
-                DEADSNAKES_INSTALLED=false
-                return 1
-            fi
-        else
-            echo "ℹ️  DeadSnakes PPA installation skipped (as requested in setup)"
-            DEADSNAKES_INSTALLED=false
-            return 1
-        fi
-    else
-        DEADSNAKES_INSTALLED=false
-        return 1
-    fi
-}
-
 # Function to install minimal virtual environment dependencies
 install_venv_dependencies() {
     echo "Installing virtual environment dependencies..."
@@ -463,263 +309,6 @@ create_virtual_environment() {
         fi
     fi
 }
-
-# Main virtual environment setup
-setup_virtual_environment() {
-    echo "=============================================================================="
-    echo "PHASE 1: Setting up virtual environment..."
-    echo "=============================================================================="
-    echo "Note: After answering initial setup questions, the process will run unattended"
-    echo ""
-    
-    # Note: OS and package manager already detected in Phase 0
-    # Note: DeadSnakes PPA installation is handled in system dependencies section
-    # based on user choice from Phase 0.5
-    
-    # Find available Python versions (now including DeadSnakes if installed)
-    find_available_python_versions
-    
-    # Select best Python version
-    select_best_python
-    
-    # Verify Python version stability before venv creation
-    echo "Verifying Python version stability before virtual environment creation..."
-    if ! verify_python_version_stability "$PYTHON_CMD" 2; then
-        echo "⚠️  Python version stability check failed!"
-        
-        # If this is Python 3.11 and DeadSnakes was requested, try to upgrade
-        if [[ "$PYTHON_VERSION" == "3.11" && "$INSTALL_DEADSNAKES" == true ]]; then
-            echo "Attempting to upgrade Python 3.11 to stable version..."
-            
-            # Upgrade Python 3.11 packages to stable versions
-            sudo apt update
-            sudo apt upgrade python3.11 python3.11-venv python3.11-dev python3.11-minimal libpython3.11-minimal libpython3.11-stdlib -y
-            sudo apt --fix-broken install -y
-            
-            # Re-check version stability
-            echo "Re-checking Python version stability after upgrade..."
-            if ! verify_python_version_stability "$PYTHON_CMD" 2; then
-                echo "❌ CRITICAL: Python 3.11 still unstable after upgrade attempt"
-                echo "This may cause pip installation issues. Proceeding with caution..."
-            else
-                echo "✅ Python version stability verified after upgrade"
-            fi
-        else
-            echo "⚠️  Proceeding with potentially unstable Python version - pip issues may occur"
-        fi
-    else
-        echo "✅ Python version stability verified"
-    fi
-    
-    # Clean up any failed attempts
-    cleanup_failed_venv
-    
-    # Try to create virtual environment
-    if create_virtual_environment; then
-        echo "✅ Virtual environment created successfully"
-    else
-        echo "❌ Virtual environment creation failed, installing dependencies..."
-        
-        # Install venv dependencies
-        install_venv_dependencies
-        
-        # Clean up again after installing dependencies
-        cleanup_failed_venv
-        
-        # Try creation again
-        if create_virtual_environment; then
-            echo "✅ Virtual environment created successfully after installing dependencies"
-        else
-            echo "❌ CRITICAL: Virtual environment creation failed even with dependencies"
-            echo "Please check your Python installation and try again"
-            exit 1
-        fi
-    fi
-    
-    # Final verification
-    if [ -d ".venv/bin" ] && [ -f ".venv/bin/activate" ]; then
-        echo "✅ Virtual environment structure verified (bin/activate found)"
-        echo "✅ Virtual environment setup complete!"
-    else
-        echo "❌ CRITICAL: Virtual environment structure is malformed"
-        echo "Expected: .venv/bin/activate"
-        echo "Found: $(ls -la .venv/)"
-        echo "Cleaning up and exiting..."
-        rm -rf .venv
-        exit 1
-    fi
-}
-
-
-# PHASE 1: Virtual Environment Setup (using answers from Phase 0.5)
-echo "=============================================================================="
-echo "PHASE 1: Setting up virtual environment..."
-echo "=============================================================================="
-echo "Note: The process will now run unattended using your configuration choices"
-echo ""
-
-# Call the virtual environment setup
-setup_virtual_environment
-
-# Activate virtual environment
-source .venv/bin/activate
-
-# Upgrade pip
-pip install --upgrade pip wheel
-
-# Install requirements with fixes for dependency conflicts
-echo "Installing requirements..."
-
-# Install system dependencies first
-echo "Installing system dependencies using $PACKAGE_MANAGER..."
-case "$PACKAGE_MANAGER" in
-    "yum"|"dnf")
-        if command -v dnf &> /dev/null; then
-            sudo dnf install -y \
-                git python3 python3-devel python3-pip python3-setuptools \
-                python3-virtualenv pygobject3-devel libtool libffi-devel \
-                openssl-devel autoconf bison swig glib2-devel \
-                portaudio-devel mpg123 mpg123-plugins-pulseaudio \
-                screen curl pkgconfig libicu-devel automake \
-                libjpeg-turbo-devel fann-devel gcc-c++ \
-                redhat-rpm-config jq make pulseaudio-utils
-        elif command -v yum &> /dev/null; then
-            sudo yum install -y \
-                cmake gcc-c++ git python3-devel libtool libffi-devel \
-                openssl-devel autoconf automake bison swig \
-                portaudio-devel mpg123 flac curl libicu-devel \
-                libjpeg-devel fann-devel pulseaudio
-        fi
-        ;;
-    "pacman")
-        sudo pacman -S --needed --noconfirm \
-            git python python-pip python-setuptools python-virtualenv \
-            python-gobject libffi swig portaudio mpg123 screen \
-            flac curl icu libjpeg-turbo base-devel jq pulseaudio
-        ;;
-    "zypper")
-        sudo zypper install -y \
-            git python3 python3-devel libtool libffi-devel \
-            libopenssl-devel autoconf automake bison swig \
-            portaudio-devel mpg123 flac curl libicu-devel \
-            pkg-config libjpeg-devel libfann-devel python3-curses \
-            pulseaudio
-        sudo zypper install -y -t pattern devel_C_C++
-        ;;
-    *)
-        # Default to apt (Debian/Ubuntu) for any unrecognized package manager
-        echo "Installing Debian/Ubuntu dependencies (default fallback)..."
-        sudo apt-get update
-        sudo apt-get install -y \
-            git python3 python3-dev python3-setuptools python3-pip \
-            build-essential libtool libffi-dev libssl-dev \
-            autoconf automake bison swig libglib2.0-dev \
-            portaudio19-dev mpg123 screen flac curl \
-            libicu-dev pkg-config libjpeg-dev libfann-dev \
-            pulseaudio pulseaudio-utils espeak espeak-data \
-            libyaml-dev jq
-        
-        # Install Python 3.11 if DeadSnakes PPA was requested
-        if [[ "$INSTALL_DEADSNAKES" == true ]]; then
-            echo "Installing Python 3.11 via DeadSnakes PPA (as requested)..."
-            
-            # Add DeadSnakes PPA first
-            echo "Adding DeadSnakes PPA..."
-            sudo add-apt-repository ppa:deadsnakes/ppa -y
-            sudo apt update
-            
-            # Install Python 3.11 packages
-            sudo apt-get install -y python3.11 python3.11-dev python3.11-venv
-            echo "✅ Python 3.11 installed via DeadSnakes PPA"
-            
-            # Check if we got an early/RC version that could cause pip issues
-            echo "Verifying Python 3.11 version stability..."
-            PYTHON311_VERSION=$(python3.11 --version 2>/dev/null | grep -o '3\.11\.[0-9]*' | head -1)
-            
-            if [[ -n "$PYTHON311_VERSION" ]]; then
-                echo "Detected Python 3.11 version: $PYTHON311_VERSION"
-                
-                # Check if this is an early/RC version (3.11.0, 3.11.1, etc.)
-                PYTHON311_MINOR=$(echo "$PYTHON311_VERSION" | cut -d. -f3)
-                if [[ "$PYTHON311_MINOR" -lt 2 ]]; then
-                    echo "⚠️  Early Python 3.11 version detected ($PYTHON311_VERSION) - this may cause pip issues"
-                    echo "Upgrading to stable version via DeadSnakes PPA..."
-                    
-                    # Upgrade Python 3.11 packages to stable versions
-                    echo "Upgrading Python 3.11 packages to stable versions..."
-                    sudo apt update
-                    sudo apt upgrade python3.11 python3.11-venv python3.11-dev python3.11-minimal libpython3.11-minimal libpython3.11-stdlib -y
-                    
-                    # Fix any broken dependencies
-                    echo "Fixing any broken dependencies..."
-                    sudo apt --fix-broken install -y
-                    
-                    # Verify the upgrade worked
-                    PYTHON311_VERSION_NEW=$(python3.11 --version 2>/dev/null | grep -o '3\.11\.[0-9]*' | head -1)
-                    PYTHON311_MINOR_NEW=$(echo "$PYTHON311_VERSION_NEW" | cut -d. -f3)
-                    
-                    if [[ "$PYTHON311_MINOR_NEW" -ge 2 ]]; then
-                        echo "✅ Python 3.11 upgraded to stable version: $PYTHON311_VERSION_NEW"
-                    else
-                        echo "⚠️  Warning: Python 3.11 still on early version: $PYTHON311_VERSION_NEW"
-                        echo "   This may cause pip installation issues later"
-                    fi
-                else
-                    echo "✅ Python 3.11 version $PYTHON311_VERSION is stable (3.11.2+)"
-                fi
-            else
-                echo "⚠️  Warning: Could not determine Python 3.11 version"
-            fi
-        fi
-        ;;
-esac
-
-echo "✅ System dependencies installed for $OS_NAME"
-
-# Install requirements using our offline requirements file
-echo "Installing Mycroft requirements for offline operation..."
-
-# Use Python version from our setup function
-echo "Using Python version: $PYTHON_VERSION (from setup function)"
-
-# PyAudio often fails to compile on Python 3.11+ - try system package first
-PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
-PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
-
-if [[ "$PYTHON_MAJOR" -eq 3 && "$PYTHON_MINOR" -ge 11 ]]; then
-    echo "Python $PYTHON_VERSION detected (3.11+) - PyAudio compilation may fail"
-    echo "Attempting to install system PyAudio package first..."
-    
-    if [[ "$OS_NAME" == "debian" || "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"debian"* ]]; then
-        # Try to install system PyAudio for this Python version
-        PYTHON_DEV_PKG="python$PYTHON_VERSION-dev"
-        echo "Installing $PYTHON_DEV_PKG for PyAudio compilation..."
-        sudo apt-get install -y "$PYTHON_DEV_PKG" || echo "⚠️  $PYTHON_DEV_PKG not available"
-        
-        # Try system PyAudio package
-        sudo apt-get install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available"
-    elif [[ "$OS_NAME" == "fedora" || "$OS_LIKE" == *"rhel"* || "$OS_LIKE" == *"fedora"* ]]; then
-        sudo dnf install -y "python$PYTHON_VERSION-devel" || echo "⚠️  Python $PYTHON_VERSION devel not available"
-        sudo dnf install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available"
-    elif [[ "$OS_NAME" == "arch" || "$OS_LIKE" == *"arch"* ]]; then
-        sudo pacman -S --needed --noconfirm "python$PYTHON_VERSION" || echo "⚠️  Python $PYTHON_VERSION not available"
-        sudo pacman -S --needed --noconfirm python-pyaudio || echo "⚠️  python-pyaudio not available"
-    fi
-    
-    echo "Note: If PyAudio compilation fails, the script will continue with other packages"
-    echo "You may need to install PyAudio manually or use system packages"
-    
-    # Provide guidance for Ubuntu users (optional, not automatic)
-    if [[ "$OS_NAME" == "ubuntu" ]]; then
-        echo ""
-        echo "💡 UBUNTU USERS: If you need a specific Python version (like 3.11), you can:"
-        echo "   sudo add-apt-repository ppa:deadsnakes/ppa -y"
-        echo "   sudo apt update"
-        echo "   sudo apt install python3.11 python3.11-venv python3.11-dev"
-        echo "   Then recreate your virtual environment with: python3.11 -m venv .venv"
-        echo "   This is optional and only needed for specific Python version requirements"
-    fi
-fi
 
 # Function to detect PyAudio build failures and offer recovery
 detect_and_recover_pyaudio() {
@@ -806,6 +395,332 @@ detect_and_recover_pyaudio() {
         return 0
     fi
 }
+
+#==============================================================================
+# MAIN EXECUTION STARTS HERE
+#==============================================================================
+
+# PHASE 0: Basic System Detection (needed for questions)
+echo "=============================================================================="
+echo "PHASE 0: Basic System Detection"
+echo "=============================================================================="
+
+# Detect OS and package manager first (needed for questions)
+detect_os_and_package_manager
+
+# PHASE 0.5: Interactive Setup Questions (using detected system info)
+echo "=============================================================================="
+echo "PHASE 0.5: Setup Configuration Questions"
+echo "=============================================================================="
+
+# Question 1: Custom Wake Word Support (TensorFlow)
+echo ""
+echo "🎤 CUSTOM WAKE WORD SUPPORT:"
+echo "TensorFlow is required if you plan to train custom wake word models."
+echo "The default 'hey mycroft' wake word works without TensorFlow."
+echo ""
+echo "Do you plan to train custom wake word models? (This requires TensorFlow ~500MB)"
+read -p "Install TensorFlow for custom wake words? [y/N] (default: no): " -r custom_wake_words
+CUSTOM_WAKE_WORDS=${custom_wake_words:-N}
+
+if [[ "$CUSTOM_WAKE_WORDS" =~ ^[Yy]$ ]]; then
+    echo "✅ Will install TensorFlow for custom wake word training"
+    INSTALL_TENSORFLOW=true
+else
+    echo "✅ Skipping TensorFlow - using default wake word only"
+    INSTALL_TENSORFLOW=false
+fi
+
+# Question 2: GPIO Support (Raspberry Pi)
+echo ""
+if [[ "$OS_NAME" == "raspbian" || "$OS_LIKE" == *"debian"* ]] && [[ "$(uname -m)" =~ ^(arm|aarch64)$ ]]; then
+    # Enhanced Raspberry Pi detection - check multiple reliable indicators
+    RPI_DETECTED=false
+    
+    # Method 1: Check /etc/os-release for Raspberry Pi OS or Raspbian
+    if [[ -f "/etc/os-release" ]] && grep -q "Raspberry Pi OS\|raspbian\|raspberrypi" /etc/os-release; then
+        RPI_DETECTED=true
+    fi
+    
+    # Method 2: Check for Raspberry Pi specific hardware files (most reliable)
+    if [[ -f "/proc/device-tree/model" ]] && grep -q "Raspberry Pi" /proc/device-tree/model; then
+        RPI_DETECTED=true
+    fi
+    
+    # Method 3: Check for Raspberry Pi specific directories
+    if [[ -d "/opt/vc" ]] || [[ -d "/usr/local/lib/python*/dist-packages/RPi" ]]; then
+        RPI_DETECTED=true
+    fi
+    
+    if [[ "$RPI_DETECTED" == true ]]; then
+        echo "🔄 GPIO SUPPORT (Raspberry Pi detected via hardware/system indicators):"
+        echo "GPIO libraries are needed for hardware integration (buttons, LEDs, sensors)."
+        echo "This includes RPi.GPIO and rpi-lgpio for advanced push button logic."
+        echo ""
+        read -p "Install GPIO support libraries? [Y/n] (default: yes): " -r gpio_support
+        GPIO_SUPPORT=${gpio_support:-Y}
+        
+        if [[ "$GPIO_SUPPORT" =~ ^[Yy]$ ]]; then
+            echo "✅ Will install GPIO libraries for Raspberry Pi hardware integration"
+            INSTALL_GPIO=true
+        else
+            echo "✅ Skipping GPIO libraries - hardware integration disabled"
+            INSTALL_GPIO=false
+        fi
+    else
+        echo "ℹ️  GPIO support not applicable for this system (Debian-based ARM but not Raspberry Pi)"
+        INSTALL_GPIO=false
+    fi
+else
+    echo "ℹ️  GPIO support not applicable for this system (not Raspberry Pi)"
+    INSTALL_GPIO=false
+fi
+
+# Question 3: Python Version (DeadSnakes PPA for Ubuntu users)
+echo ""
+if [[ "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"ubuntu"* ]]; then
+    echo "🐍 PYTHON VERSION OPTIMIZATION (Ubuntu detected):"
+    echo "The DeadSnakes PPA provides Python 3.11+ which works better with Mycroft."
+    echo "This can resolve virtual environment and dependency issues."
+    echo ""
+    echo "⚠️  Note: This adds a third-party repository to your system."
+    echo ""
+    read -p "Install Python 3.11+ via DeadSnakes PPA? [Y/n] (default: yes): " -r deadsnakes_ppa
+    DEADSNAKES_PPA=${deadsnakes_ppa:-Y}
+    
+    if [[ "$DEADSNAKES_PPA" =~ ^[Yy]$ ]]; then
+        echo "✅ Will install Python 3.11+ via DeadSnakes PPA"
+        INSTALL_DEADSNAKES=true
+    else
+        echo "✅ Skipping DeadSnakes PPA - using system Python version"
+        INSTALL_DEADSNAKES=false
+    fi
+else
+    echo "ℹ️  DeadSnakes PPA not applicable for this system (not Ubuntu)"
+    INSTALL_DEADSNAKES=false
+fi
+
+echo ""
+echo "Setup configuration complete:"
+echo "  - Custom wake words: $([ "$INSTALL_TENSORFLOW" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
+echo "  - GPIO support: $([ "$INSTALL_GPIO" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
+echo "  - Python 3.11+ (DeadSnakes): $([ "$INSTALL_DEADSNAKES" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
+echo ""
+
+# PHASE 1: Virtual Environment Setup (using answers from Phase 0.5)
+echo "=============================================================================="
+echo "PHASE 1: Setting up virtual environment..."
+echo "=============================================================================="
+echo "Note: The process will now run unattended using your configuration choices"
+echo ""
+
+# Install Python 3.11 if DeadSnakes PPA was requested
+if [[ "$INSTALL_DEADSNAKES" == true ]]; then
+    echo ""
+    echo "🐍 Installing Python 3.11+ via DeadSnakes PPA (as requested in setup)..."
+    echo "This will provide Python 3.11, 3.12, and 3.13 packages for optimal Mycroft performance"
+    echo ""
+    
+    # Add DeadSnakes PPA
+    if sudo add-apt-repository ppa:deadsnakes/ppa -y; then
+        echo "✅ DeadSnakes PPA added successfully"
+        
+        # Update package lists
+        if sudo apt update; then
+            echo "✅ Package lists updated"
+            
+            # Install Python 3.11 and venv
+            if sudo apt install -y python3.11 python3.11-venv; then
+                echo "✅ Python 3.11 installed successfully"
+                DEADSNAKES_INSTALLED=true
+            else
+                echo "❌ Failed to install Python 3.11"
+                echo "Continuing with system Python versions..."
+                DEADSNAKES_INSTALLED=false
+            fi
+        else
+            echo "❌ Failed to update package lists"
+            echo "Continuing with system Python versions..."
+            DEADSNAKES_INSTALLED=false
+        fi
+    else
+        echo "❌ Failed to add DeadSnakes PPA"
+        echo "Continuing with system Python versions..."
+        DEADSNAKES_INSTALLED=false
+    fi
+else
+    echo "ℹ️  DeadSnakes PPA installation skipped (as requested in setup)"
+    DEADSNAKES_INSTALLED=false
+fi
+
+# Find available Python versions (now including DeadSnakes if installed)
+find_available_python_versions
+
+# Select best Python version
+select_best_python
+
+# Verify Python version stability before venv creation
+echo "Verifying Python version stability before virtual environment creation..."
+if ! verify_python_version_stability "$PYTHON_CMD" 2; then
+    echo "⚠️  Python version stability check failed!"
+    
+    # If this is Python 3.11 and DeadSnakes was requested, try to upgrade
+    if [[ "$PYTHON_VERSION" == "3.11" && "$INSTALL_DEADSNAKES" == true ]]; then
+        echo "Attempting to upgrade Python 3.11 to stable version..."
+        
+        # Upgrade Python 3.11 packages to stable versions
+        sudo apt update
+        sudo apt upgrade python3.11 python3.11-venv python3.11-dev python3.11-minimal libpython3.11-minimal libpython3.11-stdlib -y
+        sudo apt --fix-broken install -y
+        
+        # Re-check version stability
+        echo "Re-checking Python version stability after upgrade..."
+        if ! verify_python_version_stability "$PYTHON_CMD" 2; then
+            echo "❌ CRITICAL: Python 3.11 still unstable after upgrade attempt"
+            echo "This may cause pip installation issues. Proceeding with caution..."
+        else
+            echo "✅ Python version stability verified after upgrade"
+        fi
+    else
+        echo "⚠️  Proceeding with potentially unstable Python version - pip issues may occur"
+    fi
+else
+    echo "✅ Python version stability verified"
+fi
+
+# Clean up any failed attempts
+cleanup_failed_venv
+
+# Try to create virtual environment
+if create_virtual_environment; then
+    echo "✅ Virtual environment created successfully"
+else
+    echo "❌ Virtual environment creation failed, installing dependencies..."
+    
+    # Install venv dependencies
+    install_venv_dependencies
+    
+    # Clean up again after installing dependencies
+    cleanup_failed_venv
+    
+    # Try creation again
+    if create_virtual_environment; then
+        echo "✅ Virtual environment created successfully after installing dependencies"
+    else
+        echo "❌ CRITICAL: Virtual environment creation failed even with dependencies"
+        echo "Please check your Python installation and try again"
+        exit 1
+    fi
+fi
+
+# Final verification
+if [ -d ".venv/bin" ] && [ -f ".venv/bin/activate" ]; then
+    echo "✅ Virtual environment structure verified (bin/activate found)"
+    echo "✅ Virtual environment setup complete!"
+else
+    echo "❌ CRITICAL: Virtual environment structure is malformed"
+    echo "Expected: .venv/bin/activate"
+    echo "Found: $(ls -la .venv/)"
+    echo "Cleaning up and exiting..."
+    rm -rf .venv
+    exit 1
+fi
+
+# Activate virtual environment
+source .venv/bin/activate
+
+# Upgrade pip
+pip install --upgrade pip wheel
+
+# Install requirements with fixes for dependency conflicts
+echo "Installing requirements..."
+
+# Install system dependencies first
+echo "Installing system dependencies using $PACKAGE_MANAGER..."
+case "$PACKAGE_MANAGER" in
+    "yum"|"dnf")
+        if command -v dnf &> /dev/null; then
+            sudo dnf install -y \
+                git python3 python3-devel python3-pip python3-setuptools \
+                python3-virtualenv pygobject3-devel libtool libffi-devel \
+                openssl-devel autoconf bison swig glib2-devel \
+                portaudio-devel mpg123 mpg123-plugins-pulseaudio \
+                screen curl pkgconfig libicu-devel automake \
+                libjpeg-turbo-devel fann-devel gcc-c++ \
+                redhat-rpm-config jq make pulseaudio-utils
+        elif command -v yum &> /dev/null; then
+            sudo yum install -y \
+                cmake gcc-c++ git python3-devel libtool libffi-devel \
+                openssl-devel autoconf automake bison swig \
+                portaudio-devel mpg123 flac curl libicu-devel \
+                libjpeg-devel fann-devel pulseaudio
+        fi
+        ;;
+    "pacman")
+        sudo pacman -S --needed --noconfirm \
+            git python python-pip python-setuptools python-virtualenv \
+            python-gobject libffi swig portaudio mpg123 screen \
+            flac curl icu libjpeg-turbo base-devel jq pulseaudio
+        ;;
+    "zypper")
+        sudo zypper install -y \
+            git python3 python3-devel libtool libffi-devel \
+            libopenssl-devel autoconf automake bison swig \
+            portaudio-devel mpg123 flac curl libicu-devel \
+            pkg-config libjpeg-devel libfann-devel python3-curses \
+            pulseaudio
+        sudo zypper install -y -t pattern devel_C_C++
+        ;;
+    *)
+        # Default to apt (Debian/Ubuntu) for any unrecognized package manager
+        echo "Installing Debian/Ubuntu dependencies (default fallback)..."
+        sudo apt-get update
+        sudo apt-get install -y \
+            git python3 python3-dev python3-setuptools python3-pip \
+            build-essential libtool libffi-dev libssl-dev \
+            autoconf automake bison swig libglib2.0-dev \
+            portaudio19-dev mpg123 screen flac curl \
+            libicu-dev pkg-config libjpeg-dev libfann-dev \
+            pulseaudio pulseaudio-utils espeak espeak-data \
+            libyaml-dev jq
+        ;;
+esac
+
+echo "✅ System dependencies installed for $OS_NAME"
+
+# Install requirements using our offline requirements file
+echo "Installing Mycroft requirements for offline operation..."
+
+# Use Python version from our setup function
+echo "Using Python version: $PYTHON_VERSION (from setup function)"
+
+# PyAudio often fails to compile on Python 3.11+ - try system package first
+PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
+PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
+
+if [[ "$PYTHON_MAJOR" -eq 3 && "$PYTHON_MINOR" -ge 11 ]]; then
+    echo "Python $PYTHON_VERSION detected (3.11+) - PyAudio compilation may fail"
+    echo "Attempting to install system PyAudio package first..."
+    
+    if [[ "$OS_NAME" == "debian" || "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"debian"* ]]; then
+        # Try to install system PyAudio for this Python version
+        PYTHON_DEV_PKG="python$PYTHON_VERSION-dev"
+        echo "Installing $PYTHON_DEV_PKG for PyAudio compilation..."
+        sudo apt-get install -y "$PYTHON_DEV_PKG" || echo "⚠️  $PYTHON_DEV_PKG not available"
+        
+        # Try system PyAudio package
+        sudo apt-get install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available"
+    elif [[ "$OS_NAME" == "fedora" || "$OS_LIKE" == *"rhel"* || "$OS_LIKE" == *"fedora"* ]]; then
+        sudo dnf install -y "python$PYTHON_VERSION-devel" || echo "⚠️  Python $PYTHON_VERSION devel not available"
+        sudo dnf install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available"
+    elif [[ "$OS_NAME" == "arch" || "$OS_LIKE" == *"arch"* ]]; then
+        sudo pacman -S --needed --noconfirm "python$PYTHON_VERSION" || echo "⚠️  Python $PYTHON_VERSION not available"
+        sudo pacman -S --needed --noconfirm python-pyaudio || echo "⚠️  python-pyaudio not available"
+    fi
+    
+    echo "Note: If PyAudio compilation fails, the script will continue with other packages"
+    echo "You may need to install PyAudio manually or use system packages"
+fi
 
 # Run the installation with recovery
 detect_and_recover_pyaudio
@@ -1055,9 +970,10 @@ md5sum requirements/requirements-offline.txt requirements/extra-audiobackend.txt
 # Note: Git configuration not needed for public repos - user's existing config preserved
 echo "✅ Git configuration preserved - existing remotes and SSH setup maintained"
 
-# PHASE 2: CHECK IF /opt/mycroft ALREADY EXISTS
+# PHASE 2: CREATE /opt/mycroft DIRECTORY STRUCTURE
 echo "=============================================================================="
 echo "PHASE 2: Creating /opt/mycroft directory structure..."
+echo "=============================================================================="
 
 # Create /opt/mycroft/skills directory manually (reliable, immediate)
 echo "Creating /opt/mycroft/skills directory..."
@@ -1079,7 +995,7 @@ chmod -R 755 /opt/mycroft/skills
 chown -R "$USER":"$(id -gn)" /opt/mycroft/skills
 echo "✅ Directory permissions set correctly"
 
-# NOW CREATE CONFIGURATION AFTER DIRECTORY EXISTS
+# PHASE 2.5: CREATE CONFIGURATION AFTER DIRECTORY EXISTS
 echo "=============================================================================="
 echo "PHASE 2.5: Creating Mycroft configuration with /opt/mycroft paths..."
 echo "=============================================================================="
@@ -1087,109 +1003,6 @@ echo "==========================================================================
 # Create unified Mycroft configuration with all necessary settings
 echo "Creating unified Mycroft configuration..."
 mkdir -p ~/.config/mycroft
-
-# COMMENTED OUT: Complex audio device detection (can be re-enabled if needed)
-# This was causing issues in some setups, but might be needed for specific hardware
-# Uncomment the section below if you need explicit audio device selection
-#
-# # Auto-detect external microphones (following original Mycroft philosophy of flexible device detection)
-# EXTERNAL_MIC_DETECTED=""
-# 
-# # Look for USB audio devices (most common external mics)
-# if [ -z "$EXTERNAL_MIC_DETECTED" ]; then
-#     EXTERNAL_MIC_DETECTED=$(arecord -l 2>/dev/null | grep -i "usb" | head -1 | cut -d: -f1 | grep -o "card [0-9]*" | cut -d" " -f2)
-#     [ ! -z "$EXTERNAL_MIC_DETECTED" ] && echo "Detected USB audio device on card $EXTERNAL_MIC_DETECTED"
-# fi
-# 
-# # Look for known microphone brands/patterns (like original Mycroft's regex approach)
-# if [ -z "$EXTERNAL_MIC_DETECTED" ]; then
-#     EXTERNAL_MIC_DETECTED=$(arecord -l 2>/dev/null | grep -iE "(blue|yeti|samson|rode|shure|audio-technica|webcam|c920|headset|microphone|mic)" | head -1 | cut -d: -f1 | grep -o "card [0-9]*" | cut -d" " -f2)
-#     [ ! -z "$EXTERNAL_MIC_DETECTED" ] && echo "Detected branded audio device on card $EXTERNAL_MIC_DETECTED"
-# fi
-# 
-# # Fallback: avoid card 0 (usually built-in) and prefer the highest numbered card (likely external)
-# if [ -z "$EXTERNAL_MIC_DETECTED" ]; then
-#     EXTERNAL_MIC_DETECTED=$(arecord -l 2>/dev/null | grep -v "card 0:" | tail -1 | cut -d: -f1 | grep -o "card [0-9]*" | cut -d" " -f2)
-#     [ ! -z "$EXTERNAL_MIC_DETECTED" ] && echo "Using highest-numbered audio device (card $EXTERNAL_MIC_DETECTED) as likely external mic"
-# fi
-# 
-# USB_MIC="$EXTERNAL_MIC_DETECTED"
-# 
-# # Create unified configuration with all settings (location is optional for weather skill)
-# if [ ! -z "$USB_MIC" ]; then
-#     # Get device name for the USB microphone
-#     USB_MIC_NAME=$(arecord -l 2>/dev/null | grep "card $USB_MIC:" | cut -d[ -f2 | cut -d] -f1)
-#     echo "Found external microphone: $USB_MIC_NAME on card $USB_MIC"
-#     
-#     # Create unified config with microphone and optional location for weather skill
-#     cat > ~/.config/mycroft/mycroft.conf << EOF
-# {
-#   "listener": {
-#     "device_name": "$USB_MIC_NAME",
-#     "sample_rate": 16000
-#   },
-#   "stt": {
-#     "module": "ovos-stt-plugin-fasterwhisper",
-#     "ovos-stt-plugin-fasterwhisper": {
-#       "model": "base.en",
-#       "use_cuda": false,
-#       "language": "en"
-#     }
-#   },
-#   "tts": {
-#     "module": "espeak"
-#   },
-#   "skills": {
-#     "upload_skill_manifest": false,
-#     "auto_update": false,
-#     "installer": {
-#       "disabled": true
-#     },
-#     "blacklisted_skills": [],
-#     "priority_skills": []
-#   },
-#   "server": {
-#     "sync_skill_settings": false
-#   },
-#   "data_dir": "/opt/mycroft",
-#   "skills_dir": "/opt/mycroft/skills"
-# }
-# EOF
-#     echo "✅ Created unified configuration with microphone (location can be added later for weather skill)"
-# else
-#     echo "No external microphone detected, using default audio settings"
-#     # Create unified config without specific device
-#     cat > ~/.config/mycroft/mycroft.conf << EOF
-# {
-#   "stt": {
-#     "module": "ovos-stt-plugin-fasterwhisper",
-#     "ovos-stt-plugin-fasterwhisper": {
-#       "model": "base.en",
-#       "use_cuda": false,
-#       "language": "en"
-#     }
-#   },
-#   "tts": {
-#     "module": "espeak"
-#   },
-#   "skills": {
-#     "upload_skill_manifest": false,
-#     "auto_update": false,
-#     "installer": {
-#       "disabled": true
-#     },
-#     "blacklisted_skills": [],
-#     "priority_skills": []
-#   },
-#   "server": {
-#     "sync_skill_settings": false
-#   },
-#   "data_dir": "/opt/mycroft",
-#   "skills_dir": "/opt/mycroft/skills"
-# }
-# EOF
-#     echo "✅ Created unified configuration (location can be added later for weather skill)"
-# fi
 
 # Create configuration similar to the working old setup approach
 # This is simpler and more reliable than complex device detection
@@ -1245,9 +1058,6 @@ echo ""
 echo "Note: This configuration follows the simpler approach that worked in your old setup."
 echo "If you need custom wake words or audio devices, you can edit ~/.config/mycroft/mycroft.conf"
 echo "Location configuration can be added later for the weather skill if needed."
-echo ""
-echo "🔧 TROUBLESHOOTING: If audio doesn't work, the complex device detection code above"
-echo "   is commented out and can be re-enabled by uncommenting those lines."
 
 echo "=============================================================================="
 echo "PHASE 3: Installing and configuring offline-compatible skills..."
@@ -1472,7 +1282,7 @@ echo ""
 
 echo "FIXES APPLIED:"
 echo "  ✅ Robust virtual environment setup with OS detection and dependency management"
-echo "  ✅ Interactive DeadSnakes PPA installation for Ubuntu users (questions upfront)"
+echo "  ✅ Interactive user questions asked upfront after minimal OS detection"
 echo "  ✅ FANN/fann2 compilation issue resolved with dummy module"
 echo "  ✅ /opt/mycroft directory created by Mycroft services with proper permissions"
 echo "  ✅ STABLE offline-compatible skills installed (hello-world, joke, date-time, alarm, weather)"
@@ -1487,6 +1297,8 @@ echo "  ✅ CLI interaction ready for voice commands and testing"
 echo "  ✅ Efficient installation process (no unnecessary service stopping)"
 echo "  ✅ Proper verification flow (skills installed → services stopped → setup complete)"
 echo "  ✅ Git configuration preserved (existing remotes and SSH setup maintained)"
+echo "  ✅ Function definitions moved before usage (fixed bash execution order)"
+echo "  ✅ Duplicate PHASE sections consolidated"
 echo ""
 
 echo "The following external services have been disabled:"
