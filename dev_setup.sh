@@ -488,14 +488,16 @@ fi
 
 # Question 2: GPIO Support (Raspberry Pi) - Only ask if relevant
 echo ""
-if [[ "$OS_NAME" == "raspbian" || "$OS_LIKE" == *"debian"* ]] && [[ "$(uname -m)" =~ ^(arm|aarch64)$ ]]; then
-    # Enhanced Raspberry Pi detection - check multiple reliable indicators
-    RPI_DETECTED=false
-    
-    echo "🔍 Detecting Raspberry Pi hardware..."
+
+# More robust conditional - check ARM architecture first, then do comprehensive Pi detection
+if [[ "$(uname -m)" =~ ^(arm|aarch64|armv7l).*$ ]]; then
+    echo "🔍 ARM architecture detected - checking for Raspberry Pi hardware..."
     echo "Architecture: $(uname -m)"
     echo "OS Name: $OS_NAME"  
     echo "OS Like: $OS_LIKE"
+    
+    # Enhanced Raspberry Pi detection - check multiple reliable indicators
+    RPI_DETECTED=false
 
     # Method 1: Check for Raspberry Pi specific hardware files (most reliable)
     if [[ -f "/proc/device-tree/model" ]] && grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then
@@ -515,22 +517,22 @@ if [[ "$OS_NAME" == "raspbian" || "$OS_LIKE" == *"debian"* ]] && [[ "$(uname -m)
         RPI_DETECTED=true
     fi
 
-    # Method 4: ARM64 (aarch64) + Debian-based system (modern Raspberry Pi OS)
-    if [[ "$(uname -m)" == "aarch64" && "$OS_LIKE" == *"debian"* ]]; then
-        # Check for common Raspberry Pi indicators on modern Pi OS
-        if [[ -f "/boot/config.txt" ]] || [[ -d "/boot/firmware" ]] || [[ -f "/proc/cpuinfo" && $(grep -c "BCM\|Raspberry Pi" /proc/cpuinfo 2>/dev/null) -gt 0 ]]; then
-            echo "✅ Raspberry Pi detected via aarch64 + Debian + Pi-specific files"
-            RPI_DETECTED=true
-        fi
+    # Method 4: Check for common Raspberry Pi boot/system files
+    if [[ -f "/boot/config.txt" ]] || [[ -d "/boot/firmware" ]]; then
+        echo "✅ Raspberry Pi detected via boot configuration files"
+        RPI_DETECTED=true
     fi
 
-    # Method 5: Check for ARM32 (older Pis) + Raspberry Pi indicators
-    if [[ "$(uname -m)" =~ ^(arm|armv).*$ ]]; then
-        # Check for common Raspberry Pi indicators on ARM32 systems
-        if [[ -f "/boot/config.txt" ]] || [[ -d "/boot/firmware" ]] || [[ -f "/proc/cpuinfo" && $(grep -c "BCM\|Raspberry Pi" /proc/cpuinfo 2>/dev/null) -gt 0 ]]; then
-            echo "✅ Raspberry Pi detected via ARM32 + Pi-specific files"
-            RPI_DETECTED=true
-        fi
+    # Method 5: Check /proc/cpuinfo for Broadcom/Pi indicators
+    if [[ -f "/proc/cpuinfo" ]] && $(grep -c "BCM\|Raspberry Pi\|Broadcom" /proc/cpuinfo 2>/dev/null) -gt 0; then
+        echo "✅ Raspberry Pi detected via CPU information"
+        RPI_DETECTED=true
+    fi
+
+    # Method 6: Check for Pi-specific kernel modules or hardware
+    if [[ -d "/sys/firmware/devicetree/base" ]] && find /sys/firmware/devicetree/base -name "*raspberry*" -o -name "*bcm*" 2>/dev/null | grep -q .; then
+        echo "✅ Raspberry Pi detected via device tree"
+        RPI_DETECTED=true
     fi
 
     echo "Raspberry Pi detection result: $RPI_DETECTED"
@@ -552,11 +554,11 @@ if [[ "$OS_NAME" == "raspbian" || "$OS_LIKE" == *"debian"* ]] && [[ "$(uname -m)
         INSTALL_GPIO=false
     fi
     else
-        echo "ℹ️  GPIO support not applicable for this system (Debian-based ARM but not Raspberry Pi)"
+        echo "ℹ️  GPIO support not applicable for this system (ARM architecture but not Raspberry Pi)"
         INSTALL_GPIO=false
     fi
 else
-    echo "ℹ️  GPIO support not applicable for this system (not Raspberry Pi)"
+    echo "ℹ️  GPIO support not applicable for this system (not ARM architecture)"
     INSTALL_GPIO=false
 fi
 
@@ -894,8 +896,8 @@ fi
 echo ""
 echo "Installing conditional packages based on your setup choices..."
 
-# Verify virtual environment before conditional installations
-verify_virtual_environment
+# Ensure we're in the virtual environment for conditional installations  
+source .venv/bin/activate
 
 # Install TensorFlow if custom wake words are enabled
 if [[ "$INSTALL_TENSORFLOW" == true ]]; then
@@ -920,6 +922,8 @@ fi
 # Fix threading issues with Python 3.11+ by ensuring compatible messagebus client
 echo "Fixing threading compatibility issues..."
 pip install --force-reinstall mycroft-messagebus-client==0.9.6
+
+
 
 # Handle padatious separately due to fann2 dependency issues
 echo "Installing padatious (with fann2 fix)..."
@@ -1072,8 +1076,8 @@ else
     echo "Warning: Padatious installation may have issues"
 fi
 
-# Verify virtual environment before STT installations
-verify_virtual_environment
+# Ensure we're in the virtual environment for STT installations
+source .venv/bin/activate
 
 # Install extra STT requirements (optional)
 echo "Installing additional STT requirements..."
@@ -1118,8 +1122,8 @@ chmod +x stop-mycroft.sh
 chmod +x bin/mycroft-*
 chmod +x scripts/*.sh
 
-# Verify virtual environment before skill dependencies
-verify_virtual_environment
+# Ensure we're in the virtual environment for skill dependencies
+source .venv/bin/activate
 
 # Install common skill dependencies  
 echo "Installing common skill dependencies..."
@@ -1178,9 +1182,20 @@ echo "==========================================================================
 echo "Creating unified Mycroft configuration..."
 mkdir -p ~/.config/mycroft
 
-# Create configuration similar to the working old setup approach
-# This is simpler and more reliable than complex device detection
-echo "Creating Mycroft configuration (simplified approach like old working setup)..."
+# Detect system architecture for optimized configuration
+ARCH=$(uname -m)
+echo "Detected architecture: $ARCH"
+
+# Create configuration optimized for the current system
+if [[ "$ARCH" =~ ^(arm|aarch64|armv).*$ ]]; then
+    echo "Creating Raspberry Pi optimized configuration..."
+    CONFIG_TYPE="Raspberry Pi optimized"
+else
+    echo "Creating standard system configuration..."
+    CONFIG_TYPE="standard system"
+fi
+
+echo "Creating Mycroft configuration ($CONFIG_TYPE)..."
 cat > ~/.config/mycroft/mycroft.conf << 'EOF'
 {
   "max_allowed_core_version": 21.2,
@@ -1504,6 +1519,12 @@ echo "  ℹ️  If microphone doesn't work on first startup:"
 echo "      ./stop-mycroft.sh           - Stop all services"
 echo "      ./start-mycroft.sh all      - Restart services"
 echo "      (This is normal and usually resolves initial audio initialization issues)"
+echo ""
+echo "  🔧 If you see STT errors on any system:"
+echo "      Check logs: tail -f /var/log/mycroft/*.log"  
+echo "      STT errors are usually temporary initialization issues"
+echo ""
+
 echo ""
 echo "  'Hey Mycroft, set an alarm'     - Test alarm skill"
 echo "  'Hey Mycroft, what's the weather' - Test weather skill"
