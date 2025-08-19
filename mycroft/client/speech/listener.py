@@ -384,11 +384,14 @@ class RecognizerLoop(EventEmitter):
         self.consumer.start()
 
     def stop(self):
-        self.state.running = False
-        self.producer.stop()
-        # wait for threads to shutdown
-        self.producer.join()
-        self.consumer.join()
+        if hasattr(self, 'state') and self.state:
+            self.state.running = False
+        if hasattr(self, 'producer') and self.producer:
+            self.producer.stop()
+            # wait for threads to shutdown
+            self.producer.join()
+        if hasattr(self, 'consumer') and self.consumer:
+            self.consumer.join()
 
     def mute(self):
         """Mute microphone and increase number of requests to mute."""
@@ -454,8 +457,14 @@ class RecognizerLoop(EventEmitter):
 
     def reload(self):
         """Reload configuration and restart consumer and producer."""
+        # Thread-safety check: only reload if fully initialized
+        if not hasattr(self, 'state') or not self.state:
+            LOG.warning("RecognizerLoop not fully initialized, skipping reload")
+            return
+        
         self.stop()
-        self.wakeword_recognizer.stop()
+        if hasattr(self, 'wakeword_recognizer') and self.wakeword_recognizer:
+            self.wakeword_recognizer.stop()
         # load config
         self._load_config()
         # restart
