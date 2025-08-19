@@ -243,6 +243,53 @@ select_best_python() {
     exit 1
 }
 
+# Function to silently test if Chromium works (returns 0 if working, 1 if broken)
+test_chromium_silent() {
+    # Only test on Debian-based systems where we know the issue occurs
+    if [[ "$OS_NAME" != "debian" && "$OS_NAME" != "ubuntu" && "$OS_LIKE" != *"debian"* ]]; then
+        return 0  # Assume working on non-Debian systems
+    fi
+    
+    # Check if Chromium is installed
+    if ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
+        return 0  # Not installed, no issue
+    fi
+    
+    # Try to run Chromium with --version (should work even in headless environment)
+    local chromium_cmd=""
+    if command -v chromium >/dev/null 2>&1; then
+        chromium_cmd="chromium"
+    elif command -v chromium-browser >/dev/null 2>&1; then
+        chromium_cmd="chromium-browser"
+    fi
+    
+    # Test if Chromium can start without segfault (timeout after 10 seconds)
+    if timeout 10 "$chromium_cmd" --version >/dev/null 2>&1; then
+        return 0  # Working
+    else
+        return 1  # Broken (likely segfault)
+    fi
+}
+
+# Function to auto-fix Chromium if it's broken due to library conflicts
+fix_chromium_if_broken() {
+    if ! test_chromium_silent; then
+        echo "🔧 Detected Chromium compatibility issue after audio library installation"
+        echo "   Auto-fixing by updating Chromium packages..."
+        if sudo apt-get update >/dev/null 2>&1 && sudo apt-get upgrade -y chromium* >/dev/null 2>&1; then
+            echo "✅ Chromium updated successfully"
+            # Test again to confirm fix
+            if test_chromium_silent; then
+                echo "✅ Chromium compatibility issue resolved"
+            else
+                echo "⚠️  Chromium may still have issues - manual intervention may be needed"
+            fi
+        else
+            echo "⚠️  Failed to update Chromium automatically"
+        fi
+    fi
+}
+
 # Function to install minimal virtual environment dependencies
 install_venv_dependencies() {
     echo "Installing virtual environment dependencies..."
@@ -813,6 +860,10 @@ case "$PACKAGE_MANAGER" in
             echo "Installing generic Python development packages: $PYTHON_DEV_PKG $PYTHON_PIP_PKG $PYTHON_SETUP_PKG"
         fi
         
+        # Check Chromium status before installing audio libraries (silent check)
+        test_chromium_silent
+        local chromium_was_working=$?
+        
         # Install system dependencies without version conflicts
         if [[ -n "$PYTHON_SETUP_PKG" ]]; then
             sudo apt-get install -y \
@@ -832,6 +883,11 @@ case "$PACKAGE_MANAGER" in
                 libicu-dev pkg-config libjpeg-dev libfann-dev \
                 pulseaudio pulseaudio-utils espeak espeak-data \
                 libyaml-dev jq
+        fi
+        
+        # Check if Chromium broke after audio library installation and auto-fix if needed
+        if [[ $chromium_was_working -eq 0 ]]; then
+            fix_chromium_if_broken
         fi
         ;;
 esac
