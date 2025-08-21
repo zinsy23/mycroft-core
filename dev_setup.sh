@@ -243,52 +243,10 @@ select_best_python() {
     exit 1
 }
 
-# Function to silently test if Chromium works (returns 0 if working, 1 if broken)
-test_chromium_silent() {
-    # Only test on Debian-based systems where we know the issue occurs
-    if [[ "$OS_NAME" != "debian" && "$OS_NAME" != "ubuntu" && "$OS_LIKE" != *"debian"* ]]; then
-        return 0  # Assume working on non-Debian systems
-    fi
-    
-    # Check if Chromium is installed
-    if ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
-        return 0  # Not installed, no issue
-    fi
-    
-    # Try to run Chromium with --version (should work even in headless environment)
-    local chromium_cmd=""
-    if command -v chromium >/dev/null 2>&1; then
-        chromium_cmd="chromium"
-    elif command -v chromium-browser >/dev/null 2>&1; then
-        chromium_cmd="chromium-browser"
-    fi
-    
-    # Test if Chromium can start without segfault (timeout after 10 seconds)
-    if timeout 10 "$chromium_cmd" --version >/dev/null 2>&1; then
-        return 0  # Working
-    else
-        return 1  # Broken (likely segfault)
-    fi
-}
-
-# Function to auto-fix Chromium if it's broken due to library conflicts
-fix_chromium_if_broken() {
-    if ! test_chromium_silent; then
-        echo "🔧 Detected Chromium compatibility issue after audio library installation"
-        echo "   Auto-fixing by updating Chromium packages..."
-        if sudo apt-get update >/dev/null 2>&1 && sudo apt-get upgrade -y chromium* >/dev/null 2>&1; then
-            echo "✅ Chromium updated successfully"
-            # Test again to confirm fix
-            if test_chromium_silent; then
-                echo "✅ Chromium compatibility issue resolved"
-            else
-                echo "⚠️  Chromium may still have issues - manual intervention may be needed"
-            fi
-        else
-            echo "⚠️  Failed to update Chromium automatically"
-        fi
-    fi
-}
+# NOTE: Chromium segfault detection/fixing removed
+# Rationale: If Chromium has segfaults before Mycroft setup, it's a system-level
+# issue unrelated to Mycroft and should be fixed by the user separately.
+# Mycroft setup should focus only on Mycroft dependencies and configuration.
 
 # Function to install minimal virtual environment dependencies
 install_venv_dependencies() {
@@ -860,10 +818,6 @@ case "$PACKAGE_MANAGER" in
             echo "Installing generic Python development packages: $PYTHON_DEV_PKG $PYTHON_PIP_PKG $PYTHON_SETUP_PKG"
         fi
         
-        # Check Chromium status before installing audio libraries (silent check)
-        test_chromium_silent
-        local chromium_was_working=$?
-        
         # Install system dependencies without version conflicts
         if [[ -n "$PYTHON_SETUP_PKG" ]]; then
             sudo apt-get install -y \
@@ -885,10 +839,7 @@ case "$PACKAGE_MANAGER" in
                 libyaml-dev jq
         fi
         
-        # Check if Chromium broke after audio library installation and auto-fix if needed
-        if [[ $chromium_was_working -eq 0 ]]; then
-            fix_chromium_if_broken
-        fi
+        # Chromium segfault monitoring removed - not related to Mycroft setup
         ;;
 esac
 
@@ -904,6 +855,32 @@ if [[ -z "$VIRTUAL_ENV" ]] || [[ "$VIRTUAL_ENV" != "$(pwd)/.venv" ]]; then
     echo "Current: $VIRTUAL_ENV"
     echo "Activating virtual environment..."
     source .venv/bin/activate
+fi
+
+# Critical dependency fix: Ensure pyxdg is installed first (required for Mycroft config)
+echo "Installing critical dependencies first..."
+pip install pyxdg>=0.27
+
+# Verify pyxdg installation immediately
+echo "Verifying pyxdg installation..."
+if python -c "import xdg.BaseDirectory; print('✅ pyxdg module imported successfully')" 2>/dev/null; then
+    echo "✅ pyxdg (xdg module) verified and working"
+else
+    echo "❌ CRITICAL: pyxdg installation failed - trying alternative installation"
+    # Try system package as fallback
+    if [[ "$OS_NAME" == "debian" || "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"debian"* ]]; then
+        sudo apt-get install -y python3-xdg
+        echo "Installed system python3-xdg package as fallback"
+    fi
+    
+    # Test again
+    if python -c "import xdg.BaseDirectory; print('✅ pyxdg module now working')" 2>/dev/null; then
+        echo "✅ pyxdg fixed with system package"
+    else
+        echo "❌ CRITICAL: pyxdg still not working - Mycroft may fail to start"
+        echo "   This will cause: ModuleNotFoundError: No module named 'xdg'"
+        echo "   Manual fix: pip install pyxdg OR sudo apt-get install python3-xdg"
+    fi
 fi
 
 # Use Python version from our setup function
@@ -1579,6 +1556,11 @@ echo ""
 echo "  🔧 If you see STT errors on any system:"
 echo "      Check logs: tail -f /var/log/mycroft/*.log"  
 echo "      STT errors are usually temporary initialization issues"
+echo ""
+echo "  ⚠️  If Chromium has segmentation faults (unrelated to Mycroft):"
+echo "      This is a system-level issue, not caused by Mycroft setup"
+echo "      To fix: sudo apt-get update && sudo apt-get upgrade chromium-browser"
+echo "      Or: sudo apt-get install --reinstall chromium-browser"
 echo ""
 
 echo ""
