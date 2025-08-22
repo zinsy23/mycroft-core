@@ -355,6 +355,9 @@ class ResponsiveRecognizer(speech_recognition.Recognizer):
             os.mkdir(self.saved_utterances_dir)
 
         self.mic_level_file = os.path.join(get_ipc_directory(), "mic_level")
+        
+        # Initialize mic level file immediately with default values
+        self._initialize_mic_level_file()
 
         # Signal statuses
         self._stop_signaled = False
@@ -477,6 +480,21 @@ class ResponsiveRecognizer(speech_recognition.Recognizer):
                 int(source.muted)
                 )
             )
+
+    def _initialize_mic_level_file(self):
+        """Initialize the mic level file immediately so CLI can display it."""
+        try:
+            # Create the IPC directory if it doesn't exist
+            os.makedirs(os.path.dirname(self.mic_level_file), exist_ok=True)
+            
+            # Write initial mic level data
+            with open(self.mic_level_file, 'w') as f:
+                f.write('Energy:  cur=0 thresh={:.3f} muted=0'.format(
+                    getattr(self, 'energy_threshold', 1000)
+                ))
+            LOG.debug("Initialized mic level file for CLI display")
+        except Exception as e:
+            LOG.debug(f"Could not initialize mic level file: {e}")
 
     def _skip_wake_word(self):
         """Check if told programatically to skip the wake word
