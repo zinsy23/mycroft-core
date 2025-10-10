@@ -285,9 +285,7 @@ class RecognizerLoop(EventEmitter):
         super(RecognizerLoop, self).__init__()
         self._watchdog = watchdog
         self.mute_calls = 0
-        self._initialization_complete = False
         self._load_config()
-        self._initialization_complete = True
 
     def _load_config(self):
         """Load configuration parameters from configuration."""
@@ -433,11 +431,6 @@ class RecognizerLoop(EventEmitter):
 
         Wait for KeyboardInterrupt and shutdown cleanly.
         """
-        # Ensure microphone initialization is complete before starting
-        if not self._ensure_initialization_complete():
-            LOG.error('Microphone initialization failed, cannot start listener')
-            return
-            
         try:
             self.start_async()
         except Exception:
@@ -462,32 +455,12 @@ class RecognizerLoop(EventEmitter):
                 LOG.exception('Exception in RecognizerLoop')
                 raise
 
-    def _ensure_initialization_complete(self):
-        """Ensure microphone and recognizer initialization is complete.
-        
-        This method handles cases where initialization was skipped due to 
-        timing issues during startup.
-        """
-        if not getattr(self, '_initialization_complete', False):
-            LOG.info("Completing delayed microphone initialization")
-            try:
-                self._load_config()
-                self._initialization_complete = True
-                LOG.info("Microphone initialization completed successfully")
-            except Exception as e:
-                LOG.error(f"Failed to complete microphone initialization: {e}")
-                return False
-        return True
-
     def reload(self):
         """Reload configuration and restart consumer and producer."""
-        # Thread-safety check: only reload if fully initialized
         if not hasattr(self, 'state') or not self.state:
             LOG.warning("RecognizerLoop not fully initialized, skipping reload")
-            # However, ensure basic microphone initialization happens
-            self._ensure_initialization_complete()
             return
-        
+
         self.stop()
         if hasattr(self, 'wakeword_recognizer') and self.wakeword_recognizer:
             self.wakeword_recognizer.stop()
