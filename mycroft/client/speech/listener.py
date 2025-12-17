@@ -457,10 +457,15 @@ class RecognizerLoop(EventEmitter):
 
     def reload(self):
         """Reload configuration and restart consumer and producer."""
-        if not hasattr(self, 'state') or not self.state:
-            LOG.warning("RecognizerLoop not fully initialized, skipping reload")
+        # If we haven't started yet or not running, just update config
+        # The new config will be used when start_async() is called
+        if not hasattr(self, 'state') or not self.state.running:
+            LOG.debug("Config changed before listener started, updating config")
+            self._load_config()
             return
 
+        # We're running, do a full restart with new config
+        LOG.info("Reloading listener with new configuration")
         self.stop()
         if hasattr(self, 'wakeword_recognizer') and self.wakeword_recognizer:
             self.wakeword_recognizer.stop()
