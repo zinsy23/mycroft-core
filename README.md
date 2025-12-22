@@ -20,6 +20,11 @@
 - **Service Readiness**: Enclosure service timeout resolved
 - **Dependencies**: Local alternatives for all external services
 
+### ℹ️ **Known Installation Notes:**
+- **Pocketsphinx**: May fail on x86_64 with modern GCC (C23 issue) - this is OK, Precise wake word engine is used instead
+- **Python 3.11+**: Installed via `uv` if not present (no system packages needed)
+- **TensorFlow**: Optional, only needed for custom wake word training
+
 ---
 
 ## 🚀 **Quick Start (Offline Setup)**
@@ -343,7 +348,12 @@ ls -la ~/.local/share/mycroft/precise/
 
 # Verify wake word configuration
 ./bin/mycroft-config show user | grep -A 10 hotwords
+
+# Check which wake word engine is loaded
+tail -f /var/log/mycroft/voice.log | grep -i "wake word"
 ```
+
+**Note:** If you see pocketsphinx installation failures during setup, this is expected on modern x86_64 systems and won't affect functionality. Precise is the primary wake word engine and works perfectly.
 
 #### **Skills Not Loading**
 ```bash
@@ -359,6 +369,110 @@ tail -f /var/log/mycroft/skills.log
 - **Audio**: `/var/log/mycroft/audio.log`
 - **Voice**: `/var/log/mycroft/voice.log`
 - **Message Bus**: `/var/log/mycroft/messagebus.log`
+
+---
+
+## 🎤 **Wake Word Engines**
+
+### **Understanding Wake Word vs. Speech-to-Text**
+
+Mycroft uses **two separate systems** for voice recognition:
+
+| Component | Purpose | Engine Used | When It Runs |
+|-----------|---------|-------------|--------------|
+| **Wake Word Detection** | Listens for "Hey Mycroft" | Precise (default) | Continuously (24/7) |
+| **Speech-to-Text (STT)** | Converts commands to text | FasterWhisper | After wake word detected |
+
+**Important:** These are **independent systems**. FasterWhisper cannot be used for wake word detection.
+
+### **Available Wake Word Engines**
+
+#### **1. Precise (Default - Recommended)** ✅
+- **Status**: Fully working, installed by default
+- **Quality**: Excellent accuracy for "hey mycroft"
+- **Requirements**: precise-runner (automatically installed)
+- **Configuration**: Already configured in `~/.config/mycroft/mycroft.conf`
+
+```json
+"hotwords": {
+  "hey mycroft": {
+    "module": "precise",
+    "threshold": 1e-90
+  }
+}
+```
+
+#### **2. Pocketsphinx (Fallback)** ⚠️
+- **Status**: Optional, may fail on modern x86_64 systems
+- **Quality**: Fair accuracy, higher false positive rate
+- **Known Issue**: Fails to compile on x86_64 with GCC 13+ (C23 `bool` typedef conflict)
+- **Works On**: ARM/Raspberry Pi systems (compiles successfully)
+- **Fallback**: Mycroft automatically falls back to pocketsphinx if Precise fails
+
+**Why pocketsphinx may fail:**
+```
+Error: 'bool' cannot be defined via 'typedef'
+Cause: Modern GCC defaults to C23 standard where 'bool' is a keyword
+Impact: Installation fails on x86_64 Debian/Ubuntu with GCC 13+
+```
+
+**This is OK because:**
+- ✅ Precise is the primary engine (better quality)
+- ✅ Setup continues without pocketsphinx (marked as optional)
+- ✅ On Raspberry Pi, pocketsphinx installs successfully as backup
+- ✅ Mycroft works perfectly with just Precise
+
+#### **3. Alternative Wake Word Engines**
+
+If Precise doesn't work for you, consider these alternatives:
+
+| Engine | License | Quality | Installation |
+|--------|---------|---------|--------------|
+| **Porcupine** | Free tier available | Excellent | `pip install pvporcupine` |
+| **openWakeWord** | Open source | Excellent | `pip install openwakeword` |
+| **Snowboy** | Deprecated | Good | No longer maintained |
+
+### **Wake Word Engine Fallback Chain**
+
+Mycroft automatically tries engines in this order:
+
+```
+1. Precise (configured)
+   ↓ (if fails)
+2. Pocketsphinx (backup)
+   ↓ (if fails)
+3. Basic Pocketsphinx (last resort)
+```
+
+### **Testing Your Wake Word**
+
+```bash
+# Check which engine is loaded
+tail -f /var/log/mycroft/voice.log | grep -i "wake word"
+
+# Verify Precise model exists
+ls -la ~/.local/share/mycroft/precise/
+
+# Test wake word sensitivity
+# Say "Hey Mycroft" and watch for detection in logs
+tail -f /var/log/mycroft/voice.log
+```
+
+### **Pocketsphinx Installation Status**
+
+During setup, you'll see one of these messages:
+
+**On x86_64 (Debian/Ubuntu with GCC 13+):**
+```
+⚠️  pocketsphinx installation failed (known issue on x86_64 with GCC 13+)
+   This is OK - Precise wake word engine will be used instead
+   Primary wake word 'hey mycroft' (Precise) will still work perfectly
+```
+
+**On Raspberry Pi (ARM):**
+```
+✅ pocketsphinx installed - 'wake up' alternative wake word available
+```
 
 ---
 

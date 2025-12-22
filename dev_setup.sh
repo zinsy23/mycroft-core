@@ -1192,6 +1192,17 @@ echo "Installing conditional packages based on your setup choices..."
 # Ensure we're in the virtual environment for conditional installations  
 source .venv/bin/activate
 
+# Install pocketsphinx (optional - for alternative wake word "wake up")
+echo "Attempting to install pocketsphinx (optional wake word engine)..."
+if pip install pocketsphinx==0.1.0 2>&1 | tee /tmp/pocketsphinx_install.log; then
+    echo "✅ pocketsphinx installed - 'wake up' alternative wake word available"
+else
+    echo "⚠️  pocketsphinx installation failed (known issue on x86_64 with GCC 13+)"
+    echo "   This is OK - Precise wake word engine will be used instead"
+    echo "   Note: 'wake up' alternative wake word will not be available"
+    echo "   Primary wake word 'hey mycroft' (Precise) will still work perfectly"
+fi
+
 # Install TensorFlow if custom wake words are enabled
 if [[ "$INSTALL_TENSORFLOW" == true ]]; then
     echo "Installing TensorFlow for custom wake word training..."

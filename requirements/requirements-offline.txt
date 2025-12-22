@@ -11,7 +11,10 @@ requests-futures==0.9.5
 # Audio processing
 PyAudio==0.2.11
 SpeechRecognition==3.8.1
-pocketsphinx==0.1.0
+# pocketsphinx==0.1.0  # Optional: Only needed for pocketsphinx wake word engine
+                       # Fails on x86_64 with GCC 13+ (C23 bool typedef issue)
+                       # Works on ARM/Pi - provides "wake up" alternative wake word
+                       # Not needed for primary functionality (Precise + FasterWhisper)
 
 # System utilities
 pyserial==3.0
