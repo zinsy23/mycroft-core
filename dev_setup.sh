@@ -1009,8 +1009,14 @@ case "$PACKAGE_MANAGER" in
         
         sudo apt-get update
         
+        # Skip Python dev packages if using uv (uv provides complete Python installation)
+        if [[ "$INSTALL_PYTHON_VIA_UV" == true ]]; then
+            echo "ℹ️  Skipping Python dev packages - using uv-provided Python 3.11 (complete installation)"
+            PYTHON_DEV_PKG=""
+            PYTHON_PIP_PKG=""
+            PYTHON_SETUP_PKG=""
         # Use specific Python packages if we know the version, otherwise use generic
-        if [[ -n "$PYTHON_VERSION" ]]; then
+        elif [[ -n "$PYTHON_VERSION" ]]; then
             PYTHON_DEV_PKG="python$PYTHON_VERSION-dev"
             # Python 3.12+ removed distutils (it's now in setuptools)
             # Only try to install distutils for Python < 3.12
@@ -1033,7 +1039,10 @@ case "$PACKAGE_MANAGER" in
         
         # Install system dependencies without version conflicts
         # Build package list based on whether PYTHON_SETUP_PKG and PYTHON_PIP_PKG are set
-        PYTHON_PACKAGES="git python3 $PYTHON_DEV_PKG"
+        PYTHON_PACKAGES="git python3"
+        if [[ -n "$PYTHON_DEV_PKG" ]]; then
+            PYTHON_PACKAGES="$PYTHON_PACKAGES $PYTHON_DEV_PKG"
+        fi
         if [[ -n "$PYTHON_PIP_PKG" ]]; then
             PYTHON_PACKAGES="$PYTHON_PACKAGES $PYTHON_PIP_PKG"
         fi
@@ -1128,22 +1137,38 @@ PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
 
 if [[ "$PYTHON_MAJOR" -eq 3 && "$PYTHON_MINOR" -ge 11 ]]; then
     echo "Python $PYTHON_VERSION detected (3.11+) - PyAudio compilation may fail"
-    echo "Attempting to install system PyAudio package first..."
     
-    if [[ "$OS_NAME" == "debian" || "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"debian"* ]]; then
-        # Try to install system PyAudio for this Python version
-        PYTHON_DEV_PKG="python$PYTHON_VERSION-dev"
-        echo "Installing $PYTHON_DEV_PKG for PyAudio compilation..."
-        sudo apt-get install -y "$PYTHON_DEV_PKG" || echo "⚠️  $PYTHON_DEV_PKG not available"
+    # Skip Python dev package installation if using uv (already has complete headers)
+    if [[ "$INSTALL_PYTHON_VIA_UV" == true ]]; then
+        echo "ℹ️  Using uv-provided Python 3.11 - has complete headers for PyAudio compilation"
+        echo "   Skipping system Python dev package installation"
         
-        # Try system PyAudio package
-        sudo apt-get install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available"
-    elif [[ "$OS_NAME" == "fedora" || "$OS_LIKE" == *"rhel"* || "$OS_LIKE" == *"fedora"* ]]; then
-        sudo dnf install -y "python$PYTHON_VERSION-devel" || echo "⚠️  Python $PYTHON_VERSION devel not available"
-        sudo dnf install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available"
-    elif [[ "$OS_NAME" == "arch" || "$OS_LIKE" == *"arch"* ]]; then
-        sudo pacman -S --needed --noconfirm "python$PYTHON_VERSION" || echo "⚠️  Python $PYTHON_VERSION not available"
-        sudo pacman -S --needed --noconfirm python-pyaudio || echo "⚠️  python-pyaudio not available"
+        # Still try to install system PyAudio package as fallback
+        if [[ "$OS_NAME" == "debian" || "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"debian"* ]]; then
+            sudo apt-get install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available (will compile from source)"
+        elif [[ "$OS_NAME" == "fedora" || "$OS_LIKE" == *"rhel"* || "$OS_LIKE" == *"fedora"* ]]; then
+            sudo dnf install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available (will compile from source)"
+        elif [[ "$OS_NAME" == "arch" || "$OS_LIKE" == *"arch"* ]]; then
+            sudo pacman -S --needed --noconfirm python-pyaudio || echo "⚠️  python-pyaudio not available (will compile from source)"
+        fi
+    else
+        echo "Attempting to install system PyAudio package first..."
+        
+        if [[ "$OS_NAME" == "debian" || "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"debian"* ]]; then
+            # Try to install system PyAudio for this Python version
+            PYTHON_DEV_PKG="python$PYTHON_VERSION-dev"
+            echo "Installing $PYTHON_DEV_PKG for PyAudio compilation..."
+            sudo apt-get install -y "$PYTHON_DEV_PKG" || echo "⚠️  $PYTHON_DEV_PKG not available"
+            
+            # Try system PyAudio package
+            sudo apt-get install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available"
+        elif [[ "$OS_NAME" == "fedora" || "$OS_LIKE" == *"rhel"* || "$OS_LIKE" == *"fedora"* ]]; then
+            sudo dnf install -y "python$PYTHON_VERSION-devel" || echo "⚠️  Python $PYTHON_VERSION devel not available"
+            sudo dnf install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available"
+        elif [[ "$OS_NAME" == "arch" || "$OS_LIKE" == *"arch"* ]]; then
+            sudo pacman -S --needed --noconfirm "python$PYTHON_VERSION" || echo "⚠️  Python $PYTHON_VERSION not available"
+            sudo pacman -S --needed --noconfirm python-pyaudio || echo "⚠️  python-pyaudio not available"
+        fi
     fi
     
     echo "Note: If PyAudio compilation fails, the script will continue with other packages"
