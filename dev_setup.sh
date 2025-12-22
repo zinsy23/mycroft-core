@@ -859,9 +859,18 @@ case "$PACKAGE_MANAGER" in
         # Use specific Python packages if we know the version, otherwise use generic
         if [[ -n "$PYTHON_VERSION" ]]; then
             PYTHON_DEV_PKG="python$PYTHON_VERSION-dev"
-            PYTHON_PIP_PKG="python$PYTHON_VERSION-distutils"  # distutils instead of pip to avoid conflicts
+            # Python 3.12+ removed distutils (it's now in setuptools)
+            # Only try to install distutils for Python < 3.12
+            PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
+            PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
+            if [[ "$PYTHON_MAJOR" -eq 3 ]] && [[ "$PYTHON_MINOR" -lt 12 ]]; then
+                PYTHON_PIP_PKG="python$PYTHON_VERSION-distutils"
+                echo "Installing Python $PYTHON_VERSION development packages: $PYTHON_DEV_PKG $PYTHON_PIP_PKG"
+            else
+                PYTHON_PIP_PKG=""  # distutils removed in 3.12+, use venv's pip instead
+                echo "Installing Python $PYTHON_VERSION development packages: $PYTHON_DEV_PKG"
+            fi
             PYTHON_SETUP_PKG=""  # Skip setuptools for specific versions to avoid conflicts
-            echo "Installing Python $PYTHON_VERSION development packages: $PYTHON_DEV_PKG $PYTHON_PIP_PKG"
         else
             PYTHON_DEV_PKG="python3-dev"
             PYTHON_PIP_PKG="python3-pip"
@@ -870,8 +879,11 @@ case "$PACKAGE_MANAGER" in
         fi
         
         # Install system dependencies without version conflicts
-        # Build package list based on whether PYTHON_SETUP_PKG is set
-        PYTHON_PACKAGES="git python3 $PYTHON_DEV_PKG $PYTHON_PIP_PKG"
+        # Build package list based on whether PYTHON_SETUP_PKG and PYTHON_PIP_PKG are set
+        PYTHON_PACKAGES="git python3 $PYTHON_DEV_PKG"
+        if [[ -n "$PYTHON_PIP_PKG" ]]; then
+            PYTHON_PACKAGES="$PYTHON_PACKAGES $PYTHON_PIP_PKG"
+        fi
         if [[ -n "$PYTHON_SETUP_PKG" ]]; then
             PYTHON_PACKAGES="$PYTHON_PACKAGES $PYTHON_SETUP_PKG"
         fi
