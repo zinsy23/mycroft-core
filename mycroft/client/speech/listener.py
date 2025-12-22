@@ -310,6 +310,17 @@ class RecognizerLoop(EventEmitter):
         self.wakeword_recognizer = self.create_wake_word_recognizer()
         # TODO - localization
         self.wakeup_recognizer = self.create_wakeup_recognizer()
+        
+        # If wake word recognizer failed (e.g., during first-time Precise download),
+        # the TriggerReload mechanism will reinitialize everything.
+        # We still need to create state and responsive_recognizer to avoid crashes,
+        # but use a dummy recognizer if needed.
+        if not self.wakeword_recognizer:
+            LOG.warning("Wake word recognizer initialization incomplete - will retry via reload")
+            # Create a minimal dummy recognizer to prevent crashes until reload completes
+            from mycroft.client.speech.hotword_factory import HotWordEngine
+            self.wakeword_recognizer = HotWordEngine("hey mycroft")
+        
         self.responsive_recognizer = ResponsiveRecognizer(
             self.wakeword_recognizer, self._watchdog)
         self.state = RecognizerLoopState()
