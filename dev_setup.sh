@@ -201,6 +201,73 @@ find_available_python_versions() {
     echo "Available Python versions (sorted): ${AVAILABLE_PYTHONS[*]}"
 }
 
+# Function to detect compatible Python (3.10 or 3.11) for Mycroft
+detect_compatible_python() {
+    echo "Checking for compatible Python (3.10 or 3.11)..."
+    
+    PYTHON_CMD=""
+    PYTHON_VERSION=""
+    PYTHON_MAJOR=""
+    PYTHON_MINOR=""
+    
+    # Check for python3.11 first (preferred)
+    if command -v python3.11 &> /dev/null; then
+        PYTHON_CMD="python3.11"
+        PYTHON_VERSION="3.11"
+        PYTHON_MAJOR="3"
+        PYTHON_MINOR="11"
+        echo "✅ Found Python 3.11"
+        return 0
+    fi
+    
+    # Check for python3.10 (fallback)
+    if command -v python3.10 &> /dev/null; then
+        PYTHON_CMD="python3.10"
+        PYTHON_VERSION="3.10"
+        PYTHON_MAJOR="3"
+        PYTHON_MINOR="10"
+        echo "✅ Found Python 3.10"
+        return 0
+    fi
+    
+    # Check if system python3 is 3.10 or 3.11
+    if command -v python3 &> /dev/null; then
+        local sys_version
+        sys_version=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "unknown")
+        local sys_major=$(echo "$sys_version" | cut -d. -f1)
+        local sys_minor=$(echo "$sys_version" | cut -d. -f2)
+        
+        if [[ "$sys_major" == "3" ]] && [[ "$sys_minor" == "11" || "$sys_minor" == "10" ]]; then
+            PYTHON_CMD="python3"
+            PYTHON_VERSION="$sys_version"
+            PYTHON_MAJOR="$sys_major"
+            PYTHON_MINOR="$sys_minor"
+            echo "✅ System Python is $sys_version (compatible)"
+            return 0
+        elif [[ "$sys_major" == "3" ]] && [[ "$sys_minor" -lt 10 ]]; then
+            echo "⚠️  System Python $sys_version is too old (< 3.10)"
+            return 1
+        elif [[ "$sys_major" == "3" ]] && [[ "$sys_minor" -gt 11 ]]; then
+            echo "⚠️  System Python $sys_version is too new (> 3.11)"
+            echo "   Python $sys_version has compatibility issues with Mycroft dependencies"
+            return 1
+        fi
+    fi
+    
+    # No compatible Python found
+    echo ""
+    echo "❌ No compatible Python (3.10 or 3.11) found"
+    echo ""
+    echo "Mycroft requires Python 3.10 or 3.11 for full compatibility."
+    echo "  - Python < 3.10: Too old, missing features"
+    echo "  - Python 3.10-3.11: ✅ Fully compatible"
+    echo "  - Python > 3.11: Too new, dependency issues (pocketsphinx, tensorflow)"
+    echo ""
+    echo "This script can install Python 3.11 automatically using 'uv'."
+    echo ""
+    return 1
+}
+
 # Function to select best Python version for Mycroft
 select_best_python() {
     echo "Selecting best Python version for Mycroft..."
@@ -455,6 +522,10 @@ echo "==========================================================================
 # Detect OS and package manager first (needed for questions)
 detect_os_and_package_manager
 
+# Detect compatible Python (3.10 or 3.11)
+detect_compatible_python
+PYTHON_DETECTED=$?
+
 # Check for existing setup
 EXISTING_VENV=false
 EXISTING_TENSORFLOW=false
@@ -587,35 +658,45 @@ else
     INSTALL_GPIO=false
 fi
 
-# Question 3: Python Version (DeadSnakes PPA for Ubuntu users)
+# Question 3: Python 3.10/3.11 Installation (if not already present)
 echo ""
-if [[ "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"ubuntu"* ]]; then
-    echo "🐍 PYTHON VERSION OPTIMIZATION (Ubuntu detected):"
-    echo "The DeadSnakes PPA provides Python 3.11 which works better with Mycroft."
-    echo "This can resolve virtual environment and dependency issues."
+
+if [[ "$PYTHON_DETECTED" -ne 0 ]]; then
+    echo "🐍 PYTHON 3.10/3.11 INSTALLATION:"
+    echo "Mycroft requires Python 3.10 or 3.11 for full compatibility."
+    echo "  - Python 3.11 is recommended (supported until October 2027)"
+    echo "  - Python 3.10 also works (supported until October 2026)"
     echo ""
-    echo "⚠️  Note: This adds a third-party repository to your system."
+    echo "This script will install Python 3.11 using 'uv' (universal Python installer):"
+    echo "  - Fast: Downloads pre-built binaries (installs in seconds)"
+    echo "  - Universal: Works on any Linux distribution"
+    echo "  - Isolated: Doesn't interfere with system Python"
     echo ""
-    read -p "Install Python 3.11 via DeadSnakes PPA? [Y/n] (default: yes): " -r deadsnakes_ppa
-    DEADSNAKES_PPA=${deadsnakes_ppa:-Y}
     
-    if [[ "$DEADSNAKES_PPA" =~ ^[Yy]$ ]]; then
-        echo "✅ Will install Python 3.11 via DeadSnakes PPA"
-        INSTALL_DEADSNAKES=true
+    read -p "Install Python 3.11 via uv? [Y/n] (default: yes): " -r install_python
+    INSTALL_PYTHON=${install_python:-Y}
+    
+    if [[ "$INSTALL_PYTHON" =~ ^[Yy]$ ]]; then
+        echo "✅ Will install Python 3.11 via uv"
+        INSTALL_PYTHON_VIA_UV=true
     else
-        echo "✅ Skipping DeadSnakes PPA - using system Python version"
-        INSTALL_DEADSNAKES=false
+        echo "❌ Python 3.10/3.11 installation declined"
+        echo ""
+        echo "⚠️  WARNING: Setup cannot continue without Python 3.10 or 3.11"
+        echo ""
+        echo "Please install Python 3.10 or 3.11 manually and re-run this script."
+        exit 1
     fi
 else
-    echo "ℹ️  DeadSnakes PPA not applicable for this system (not Ubuntu)"
-    INSTALL_DEADSNAKES=false
+    echo "✅ Compatible Python found: $PYTHON_CMD (Python $PYTHON_VERSION)"
+    INSTALL_PYTHON_VIA_UV=false
 fi
 
 echo ""
 echo "Setup configuration complete:"
 echo "  - Custom wake words: $([ "$INSTALL_TENSORFLOW" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
 echo "  - GPIO support: $([ "$INSTALL_GPIO" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
-echo "  - Python 3.11 (DeadSnakes): $([ "$INSTALL_DEADSNAKES" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
+echo "  - Python installation: $([ "$INSTALL_PYTHON_VIA_UV" = true ] && echo "✅ Will install 3.11 via uv" || echo "ℹ️  Using $PYTHON_VERSION")"
 echo ""
 
 # PHASE 1: Virtual Environment Setup (using answers from Phase 0.5)
@@ -637,57 +718,129 @@ if [[ "$EXISTING_VENV" == true && "$NEEDS_UPDATE" == false ]]; then
 else
     echo "Creating new virtual environment or updating existing one..."
 
-# Install Python 3.11 if DeadSnakes PPA was requested
-if [[ "$INSTALL_DEADSNAKES" == true ]]; then
+# Install Python 3.11 via uv if requested
+if [[ "$INSTALL_PYTHON_VIA_UV" == true ]]; then
     echo ""
-    echo "🐍 Installing Python 3.11 via DeadSnakes PPA (as requested in setup)..."
+    echo "🐍 Installing Python 3.11 via uv (as requested in setup)..."
     echo "This will provide Python 3.11 for optimal Mycroft performance"
     echo ""
     
-    # Add DeadSnakes PPA
-    if sudo add-apt-repository ppa:deadsnakes/ppa -y; then
-        echo "✅ DeadSnakes PPA added successfully"
+    PYTHON311_INSTALLED=false
+    
+    # Check if uv already installed
+    if command -v uv &> /dev/null; then
+        echo "✅ uv already installed"
+        uv --version
+    else
+        echo "Installing uv..."
         
-        # Update package lists (ignore CD-ROM errors)
-        echo "Updating package lists..."
-        sudo apt update 2>&1 | grep -v "cdrom://" | grep -v "apt-cdrom" || true
-        
-        # Try to install Python 3.11 regardless of update warnings
-        echo "Attempting to install Python 3.11..."
-        if sudo apt install -y python3.11 python3.11-venv python3.11-dev 2>/dev/null; then
-            echo "✅ Python 3.11 installed successfully"
-            DEADSNAKES_INSTALLED=true
+        # Install uv (single binary, no dependencies)
+        if curl -LsSf https://astral.sh/uv/install.sh | sh; then
+            echo "✅ uv installed"
+            
+            # Add uv to PATH for this session
+            export PATH="$HOME/.local/bin:$PATH"
+            
+            # Verify installation
+            if command -v uv &> /dev/null; then
+                echo "✅ uv available in PATH"
+                uv --version
+            else
+                echo "❌ uv installed but not in PATH"
+                echo "Please add $HOME/.local/bin to your PATH and re-run this script."
+                exit 1
+            fi
         else
-            echo "❌ Failed to install Python 3.11 packages"
-            echo "Continuing with system Python versions..."
-            DEADSNAKES_INSTALLED=false
+            echo "❌ Failed to install uv"
+            exit 1
+        fi
+    fi
+    
+    # Install Python 3.11 via uv
+    echo ""
+    echo "Installing Python 3.11 via uv (downloading pre-built binary)..."
+    if uv python install 3.11; then
+        echo "✅ Python 3.11 installed successfully via uv"
+        
+        # Find where uv installed Python
+        UV_PYTHON_PATH=$(uv python find 3.11 2>/dev/null || echo "")
+        
+        if [[ -n "$UV_PYTHON_PATH" ]] && [[ -f "$UV_PYTHON_PATH" ]]; then
+            PYTHON_CMD="$UV_PYTHON_PATH"
+            PYTHON_VERSION="3.11"
+            PYTHON_MAJOR="3"
+            PYTHON_MINOR="11"
+            
+            echo "✅ Python 3.11 now available via uv"
+            echo "   Location: $PYTHON_CMD"
+            $PYTHON_CMD --version
+            
+            PYTHON311_INSTALLED=true
+        else
+            echo "⚠️  uv installed Python but couldn't find it, trying manual search..."
+            
+            # Try common uv Python locations
+            for possible_path in \
+                "$HOME/.local/share/uv/python/cpython-3.11"*/bin/python3.11 \
+                "$HOME/.local/share/uv/python/cpython-3.11"*/bin/python3 \
+                "$HOME/.cache/uv/python/cpython-3.11"*/bin/python3.11; do
+                
+                if [[ -f "$possible_path" ]]; then
+                    PYTHON_CMD="$possible_path"
+                    PYTHON_VERSION="3.11"
+                    PYTHON_MAJOR="3"
+                    PYTHON_MINOR="11"
+                    echo "✅ Found uv Python at: $PYTHON_CMD"
+                    $PYTHON_CMD --version
+                    PYTHON311_INSTALLED=true
+                    break
+                fi
+            done
+            
+            if [[ "$PYTHON311_INSTALLED" == false ]]; then
+                echo "❌ Could not locate uv-installed Python"
+                exit 1
+            fi
         fi
     else
-        echo "❌ Failed to add DeadSnakes PPA"
-        echo "Continuing with system Python versions..."
-        DEADSNAKES_INSTALLED=false
+        echo "❌ Failed to install Python 3.11 via uv"
+        exit 1
     fi
+    
+    # Refresh command cache
+    hash -r
+    
+    # Re-detect Python 3.11 after installation
+    echo ""
+    echo "Verifying Python 3.11 installation..."
+    if command -v python3.11 &> /dev/null; then
+        # uv created a symlink, use that for simplicity
+        PYTHON_CMD="python3.11"
+        echo "✅ python3.11 command available"
+    fi
+    
+    $PYTHON_CMD --version
 else
-    echo "ℹ️  DeadSnakes PPA installation skipped (as requested in setup)"
-    DEADSNAKES_INSTALLED=false
+    echo "ℹ️  Using existing Python $PYTHON_VERSION"
 fi
 
 # Force refresh command cache to find newly installed Python versions
 hash -r
 
-# Find available Python versions (now including DeadSnakes if installed)
-find_available_python_versions
-
-# Select best Python version
-select_best_python
+# Python 3.11 was already enforced in PHASE 0, so we just use it
+# PYTHON_CMD and PYTHON_VERSION are already set by enforce_python_311()
+echo "Using enforced Python 3.11: $PYTHON_CMD (version $PYTHON_VERSION)"
 
 # Verify Python version stability before venv creation
 echo "Verifying Python version stability before virtual environment creation..."
 if ! verify_python_version_stability "$PYTHON_CMD" 2; then
     echo "⚠️  Python version stability check failed!"
     
-    # If this is Python 3.11 and DeadSnakes was requested, try to upgrade
-    if [[ "$PYTHON_VERSION" == "3.11" && "$INSTALL_DEADSNAKES" == true ]]; then
+    # If this is Python 3.11 and we just installed it via uv, it should be stable
+    if [[ "$PYTHON_VERSION" == "3.11" && "$INSTALL_PYTHON_VIA_UV" == true ]]; then
+        echo "⚠️  uv-installed Python 3.11 stability check failed (unexpected)"
+        echo "Continuing anyway as uv provides stable builds..."
+    elif [[ "$PYTHON_VERSION" == "3.11" ]]; then
         echo "Attempting to upgrade Python 3.11 to stable version..."
         
         # Upgrade Python 3.11 packages to stable versions
