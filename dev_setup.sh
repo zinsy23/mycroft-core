@@ -347,12 +347,16 @@ detect_and_recover_pyaudio() {
     echo "Installing Python requirements with failure detection..."
     
     # Try to install requirements and capture failures
-    if ! pip install -r requirements/requirements-offline.txt 2>&1 | tee /tmp/pip_install.log; then
+    pip install -r requirements/requirements-offline.txt 2>&1 | tee /tmp/pip_install.log
+    local pip_exit_code=$?
+    
+    # Check for build failures even if pip returned success (it can lie!)
+    if grep -qE "(error: command.*gcc.*failed|Failed building wheel|error: subprocess-exited-with-error|error: Microsoft Visual C\+\+|No module named.*distutils|portaudio\.h: No such file|fann\.h: No such file)" /tmp/pip_install.log; then
         echo ""
-        echo "⚠️  Some packages failed to install. Analyzing failures..."
+        echo "⚠️  Detected package build failures. Analyzing..."
         
         # Check for common build failures (PyAudio, fann2, etc.)
-        if grep -qE "(error: command.*gcc.*failed|Failed building wheel|error: subprocess-exited-with-error|error: Microsoft Visual C\+\+|No module named.*distutils|portaudio\.h: No such file|fann\.h: No such file)" /tmp/pip_install.log; then
+        if grep -qE "(portaudio\.h: No such file|fann\.h: No such file)" /tmp/pip_install.log; then
             
             echo "🔍 Detected PyAudio compilation failure!"
             
@@ -376,18 +380,30 @@ detect_and_recover_pyaudio() {
                     
                     # Add DeadSnakes PPA
                     echo "Adding DeadSnakes PPA..."
-                    sudo add-apt-repository ppa:deadsnakes/ppa -y
-                    sudo apt update
+                    if ! sudo add-apt-repository ppa:deadsnakes/ppa -y; then
+                        echo "❌ Failed to add DeadSnakes PPA"
+                        return 1
+                    fi
+                    if ! sudo apt update; then
+                        echo "❌ Failed to update package lists"
+                        return 1
+                    fi
                     
                     # Install Python version-specific packages
                     echo "Installing Python $PYTHON_VERSION development packages..."
-                    sudo apt install -y "python$PYTHON_VERSION-dev" "python$PYTHON_VERSION-venv"
+                    if ! sudo apt install -y "python$PYTHON_VERSION-dev" "python$PYTHON_VERSION-venv"; then
+                        echo "❌ Failed to install Python $PYTHON_VERSION packages"
+                        return 1
+                    fi
                     
                     # Recreate virtual environment with new Python version
                     echo "Recreating virtual environment with Python $PYTHON_VERSION..."
                     deactivate 2>/dev/null || true
                     rm -rf .venv
-                    "python$PYTHON_VERSION" -m venv .venv
+                    if ! "python$PYTHON_VERSION" -m venv .venv; then
+                        echo "❌ Failed to create virtual environment"
+                        return 1
+                    fi
                     source .venv/bin/activate
                     
                     # Re-run the failed installation
@@ -417,6 +433,10 @@ detect_and_recover_pyaudio() {
             echo "   Check the error log above for details."
             return 1
         fi
+    elif [ $pip_exit_code -ne 0 ]; then
+        echo "❌ pip install failed with exit code $pip_exit_code"
+        echo "   Check the error log above for details."
+        return 1
     else
         echo "✅ All packages installed successfully!"
         return 0
@@ -753,36 +773,48 @@ case "$PACKAGE_MANAGER" in
         if command -v dnf &> /dev/null; then
             # Use version-specific packages if available, otherwise generic
             if [[ -n "$PYTHON_VERSION" ]]; then
-                sudo dnf install -y \
+                if ! sudo dnf install -y \
                     git python3 "$PYTHON_DEV_PKG" pygobject3-devel libtool libffi-devel \
                     openssl-devel autoconf bison swig glib2-devel \
                     portaudio-devel mpg123 mpg123-plugins-pulseaudio \
                     screen curl pkgconfig libicu-devel automake \
                     libjpeg-turbo-devel fann-devel gcc-c++ \
-                    redhat-rpm-config jq make pulseaudio-utils
+                    redhat-rpm-config jq make pulseaudio-utils; then
+                    echo "❌ Failed to install system dependencies"
+                    exit 1
+                fi
             else
-                sudo dnf install -y \
+                if ! sudo dnf install -y \
                     git python3 "$PYTHON_DEV_PKG" python3-pip python3-setuptools \
                     python3-virtualenv pygobject3-devel libtool libffi-devel \
                     openssl-devel autoconf bison swig glib2-devel \
                     portaudio-devel mpg123 mpg123-plugins-pulseaudio \
                     screen curl pkgconfig libicu-devel automake \
                     libjpeg-turbo-devel fann-devel gcc-c++ \
-                    redhat-rpm-config jq make pulseaudio-utils
+                    redhat-rpm-config jq make pulseaudio-utils; then
+                    echo "❌ Failed to install system dependencies"
+                    exit 1
+                fi
             fi
         elif command -v yum &> /dev/null; then
-            sudo yum install -y \
+            if ! sudo yum install -y \
                 cmake gcc-c++ git "$PYTHON_DEV_PKG" libtool libffi-devel \
                 openssl-devel autoconf automake bison swig \
                 portaudio-devel mpg123 flac curl libicu-devel \
-                libjpeg-devel fann-devel pulseaudio
+                libjpeg-devel fann-devel pulseaudio; then
+                echo "❌ Failed to install system dependencies"
+                exit 1
+            fi
         fi
         ;;
     "pacman")
-        sudo pacman -S --needed --noconfirm \
+        if ! sudo pacman -S --needed --noconfirm \
             git python python-pip python-setuptools python-virtualenv \
             python-gobject libffi swig portaudio mpg123 screen \
-            flac curl icu libjpeg-turbo base-devel jq pulseaudio
+            flac curl icu libjpeg-turbo base-devel jq pulseaudio; then
+            echo "❌ Failed to install system dependencies"
+            exit 1
+        fi
         ;;
     "zypper")
         # Use specific Python dev package if we know the version
@@ -792,25 +824,53 @@ case "$PACKAGE_MANAGER" in
             PYTHON_DEV_PKG="python3-devel"
         fi
         
-        sudo zypper install -y \
+        if ! sudo zypper install -y \
             git python3 "$PYTHON_DEV_PKG" libtool libffi-devel \
             libopenssl-devel autoconf automake bison swig \
             portaudio-devel mpg123 flac curl libicu-devel \
             pkg-config libjpeg-devel libfann-devel python3-curses \
-            pulseaudio
-        sudo zypper install -y -t pattern devel_C_C++
+            pulseaudio; then
+            echo "❌ Failed to install system dependencies"
+            exit 1
+        fi
+        if ! sudo zypper install -y -t pattern devel_C_C++; then
+            echo "⚠️  Warning: Failed to install C++ development pattern"
+        fi
         ;;
     *)
         # Default to apt (Debian/Ubuntu) for any unrecognized package manager
         echo "Installing Debian/Ubuntu dependencies (default fallback)..."
+        
+        # Fix any interrupted dpkg installations before proceeding
+        echo "Checking for interrupted package installations..."
+        if ! sudo dpkg --configure -a 2>/dev/null; then
+            echo "⚠️  Detected interrupted package installation, fixing..."
+            sudo apt --fix-broken install -y || {
+                echo "❌ Failed to fix broken packages. Please run manually:"
+                echo "   sudo dpkg --configure -a"
+                echo "   sudo apt --fix-broken install"
+                exit 1
+            }
+            echo "✅ Fixed broken package state"
+        fi
+        
         sudo apt-get update
         
         # Use specific Python packages if we know the version, otherwise use generic
         if [[ -n "$PYTHON_VERSION" ]]; then
             PYTHON_DEV_PKG="python$PYTHON_VERSION-dev"
-            PYTHON_PIP_PKG="python$PYTHON_VERSION-distutils"  # distutils instead of pip to avoid conflicts
+            # Python 3.12+ removed distutils (it's now in setuptools)
+            # Only try to install distutils for Python < 3.12
+            PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
+            PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
+            if [[ "$PYTHON_MAJOR" -eq 3 ]] && [[ "$PYTHON_MINOR" -lt 12 ]]; then
+                PYTHON_PIP_PKG="python$PYTHON_VERSION-distutils"
+                echo "Installing Python $PYTHON_VERSION development packages: $PYTHON_DEV_PKG $PYTHON_PIP_PKG"
+            else
+                PYTHON_PIP_PKG=""  # distutils removed in 3.12+, use venv's pip instead
+                echo "Installing Python $PYTHON_VERSION development packages: $PYTHON_DEV_PKG"
+            fi
             PYTHON_SETUP_PKG=""  # Skip setuptools for specific versions to avoid conflicts
-            echo "Installing Python $PYTHON_VERSION development packages: $PYTHON_DEV_PKG $PYTHON_PIP_PKG"
         else
             PYTHON_DEV_PKG="python3-dev"
             PYTHON_PIP_PKG="python3-pip"
@@ -819,25 +879,47 @@ case "$PACKAGE_MANAGER" in
         fi
         
         # Install system dependencies without version conflicts
-        if [[ -n "$PYTHON_SETUP_PKG" ]]; then
-            sudo apt-get install -y \
-                git python3 "$PYTHON_DEV_PKG" "$PYTHON_SETUP_PKG" "$PYTHON_PIP_PKG" \
-                build-essential libtool libffi-dev libssl-dev \
-                autoconf automake bison swig libglib2.0-dev \
-                portaudio19-dev mpg123 screen flac curl \
-                libicu-dev pkg-config libjpeg-dev libfann-dev \
-                pulseaudio pulseaudio-utils espeak espeak-data \
-                libyaml-dev jq
-        else
-            sudo apt-get install -y \
-                git python3 "$PYTHON_DEV_PKG" "$PYTHON_PIP_PKG" \
-                build-essential libtool libffi-dev libssl-dev \
-                autoconf automake bison swig libglib2.0-dev \
-                portaudio19-dev mpg123 screen flac curl \
-                libicu-dev pkg-config libjpeg-dev libfann-dev \
-                pulseaudio pulseaudio-utils espeak espeak-data \
-                libyaml-dev jq
+        # Build package list based on whether PYTHON_SETUP_PKG and PYTHON_PIP_PKG are set
+        PYTHON_PACKAGES="git python3 $PYTHON_DEV_PKG"
+        if [[ -n "$PYTHON_PIP_PKG" ]]; then
+            PYTHON_PACKAGES="$PYTHON_PACKAGES $PYTHON_PIP_PKG"
         fi
+        if [[ -n "$PYTHON_SETUP_PKG" ]]; then
+            PYTHON_PACKAGES="$PYTHON_PACKAGES $PYTHON_SETUP_PKG"
+        fi
+        
+        if ! sudo apt-get install -y \
+            $PYTHON_PACKAGES \
+            build-essential libtool libffi-dev libssl-dev \
+            autoconf automake bison swig libglib2.0-dev \
+            portaudio19-dev libasound2-dev mpg123 screen flac curl \
+            libicu-dev pkg-config libjpeg-dev libfann-dev \
+            pulseaudio pulseaudio-utils espeak espeak-data \
+            libyaml-dev jq; then
+            echo "❌ Failed to install system dependencies"
+            echo "Please check the errors above and run:"
+            echo "   sudo apt --fix-broken install"
+            exit 1
+        fi
+        
+        # Verify critical packages for audio compilation
+        echo "Verifying critical development packages..."
+        MISSING_PKGS=()
+        for pkg in portaudio19-dev swig libasound2-dev build-essential; do
+            if ! dpkg -l | grep -q "^ii.*$pkg"; then
+                MISSING_PKGS+=("$pkg")
+            fi
+        done
+        
+        if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
+            echo "❌ Missing required packages: ${MISSING_PKGS[*]}"
+            echo "Attempting to install missing packages..."
+            if ! sudo apt-get install -y "${MISSING_PKGS[@]}"; then
+                echo "❌ Failed to install missing packages"
+                exit 1
+            fi
+        fi
+        echo "✅ All critical packages verified"
         
         # Chromium segfault monitoring removed - not related to Mycroft setup
         ;;
