@@ -689,7 +689,19 @@ if [[ "$PYTHON_DETECTED" -ne 0 ]]; then
     fi
 else
     echo "✅ Compatible Python found: $PYTHON_CMD (Python $PYTHON_VERSION)"
-    INSTALL_PYTHON_VIA_UV=false
+    
+    # Check if this Python is from uv (installed in uv's directory)
+    PYTHON_PATH=$(which "$PYTHON_CMD" 2>/dev/null || echo "$PYTHON_CMD")
+    PYTHON_REALPATH=$(readlink -f "$PYTHON_PATH" 2>/dev/null || echo "$PYTHON_PATH")
+    
+    if [[ "$PYTHON_PATH" == *"uv/python"* ]] || [[ "$PYTHON_PATH" == *".local/share/uv"* ]] || \
+       [[ "$PYTHON_REALPATH" == *"uv/python"* ]] || [[ "$PYTHON_REALPATH" == *".local/share/uv"* ]]; then
+        echo "   Detected uv-installed Python (no system dev packages needed)"
+        INSTALL_PYTHON_VIA_UV=true
+    else
+        echo "   Detected system Python (may need dev packages)"
+        INSTALL_PYTHON_VIA_UV=false
+    fi
 fi
 
 echo ""
@@ -1103,7 +1115,7 @@ fi
 
 # Critical dependency fix: Ensure pyxdg is installed first (required for Mycroft config)
 echo "Installing critical dependencies first..."
-pip install pyxdg>=0.27
+pip install "pyxdg>=0.27"
 
 # Verify pyxdg installation immediately
 echo "Verifying pyxdg installation..."
@@ -1194,7 +1206,10 @@ source .venv/bin/activate
 
 # Install pocketsphinx (optional - for alternative wake word "wake up")
 echo "Attempting to install pocketsphinx (optional wake word engine)..."
-if pip install pocketsphinx==0.1.0 2>&1 | tee /tmp/pocketsphinx_install.log; then
+pip install pocketsphinx==0.1.0 2>&1 | tee /tmp/pocketsphinx_install.log
+POCKETSPHINX_EXIT_CODE=${PIPESTATUS[0]}
+
+if [ $POCKETSPHINX_EXIT_CODE -eq 0 ]; then
     echo "✅ pocketsphinx installed - 'wake up' alternative wake word available"
 else
     echo "⚠️  pocketsphinx installation failed (known issue on x86_64 with GCC 13+)"
@@ -1390,6 +1405,51 @@ pip install -r requirements/extra-stt.txt || echo "Some STT extras failed, conti
 # Install ovos-stt-plugin-fasterwhisper for local STT
 echo "Installing FasterWhisper STT plugin..."
 pip install ovos-stt-plugin-fasterwhisper
+
+# Pre-download Precise wake word model to avoid runtime download issues
+echo "Pre-downloading Precise wake word model..."
+PRECISE_DIR="$HOME/.local/share/mycroft/precise"
+mkdir -p "$PRECISE_DIR"
+
+if [ ! -f "$PRECISE_DIR/hey-mycroft.pb" ]; then
+    echo "Downloading 'hey mycroft' wake word model..."
+    DOWNLOAD_SUCCESS=false
+    
+    # Try wget first (more robust with retries)
+    if command -v wget >/dev/null 2>&1; then
+        echo "Using wget for download..."
+        if wget -c "https://raw.githubusercontent.com/MycroftAI/precise-data/models/hey-mycroft.tar.gz" \
+                -O "$PRECISE_DIR/hey-mycroft.tar.gz" \
+                --tries=5 --read-timeout=10 --timeout=30 2>&1 | grep -v "^--"; then
+            DOWNLOAD_SUCCESS=true
+        fi
+    # Fallback to curl (available on all systems we support)
+    elif command -v curl >/dev/null 2>&1; then
+        echo "Using curl for download..."
+        if curl -L --retry 5 --retry-delay 2 --max-time 60 --connect-timeout 30 \
+                -o "$PRECISE_DIR/hey-mycroft.tar.gz" \
+                "https://raw.githubusercontent.com/MycroftAI/precise-data/models/hey-mycroft.tar.gz" 2>&1; then
+            DOWNLOAD_SUCCESS=true
+        fi
+    else
+        echo "⚠️  Neither wget nor curl found - cannot download model"
+    fi
+    
+    if [ "$DOWNLOAD_SUCCESS" = true ]; then
+        # Extract the model
+        if tar -xzf "$PRECISE_DIR/hey-mycroft.tar.gz" -C "$PRECISE_DIR" 2>/dev/null; then
+            echo "✅ Precise wake word model installed successfully"
+            ls -lh "$PRECISE_DIR"/hey-mycroft.pb* 2>/dev/null || true
+        else
+            echo "⚠️  Failed to extract Precise model - will download at runtime"
+        fi
+    else
+        echo "⚠️  Failed to download Precise model - will download at runtime"
+        echo "   This is OK - Mycroft will attempt to download it when starting"
+    fi
+else
+    echo "✅ Precise wake word model already exists"
+fi
 
 # CRITICAL: Add mycroft-core to the virtual environment path
 # This is equivalent to typing 'add2virtualenv $TOP' and is essential for module imports

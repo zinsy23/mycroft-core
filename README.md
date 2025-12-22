@@ -24,6 +24,7 @@
 - **Pocketsphinx**: May fail on x86_64 with modern GCC (C23 issue) - this is OK, Precise wake word engine is used instead
 - **Python 3.11+**: Installed via `uv` if not present (no system packages needed)
 - **TensorFlow**: Optional, only needed for custom wake word training
+- **Precise Model**: Pre-downloaded during setup to avoid runtime network issues
 
 ---
 
