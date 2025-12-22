@@ -62,8 +62,18 @@ def main():
         # Special signal handler allows a clean shutdown of the GUI
         signal.signal(signal.SIGINT, ctrl_c_handler)
         load_settings()
-        curses.wrapper(gui_main)
-        curses.endwin()
+        try:
+            curses.wrapper(gui_main)
+        except (KeyboardInterrupt, curses.error):
+            # Clean exit on Ctrl+C or curses errors
+            # curses.wrapper() handles cleanup in its finally block
+            pass
+        finally:
+            # Ensure terminal is restored, but ignore errors if already done
+            try:
+                curses.endwin()
+            except (curses.error, Exception):
+                pass
         save_settings()
 
 

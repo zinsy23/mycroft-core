@@ -488,12 +488,21 @@ class HotWordFactory:
     The factory can select between a range of built-in Hotword engines and also
     from Hotword engine plugins.
     """
+    # Build CLASSES dict dynamically - only include pocketsphinx if available
     CLASSES = {
-        "pocketsphinx": PocketsphinxHotWord,
         "precise": PreciseHotword,
         "snowboy": SnowboyHotWord,
         "porcupine": PorcupineHotWord
     }
+    
+    # Try to add pocketsphinx if the module is available
+    try:
+        from pocketsphinx import Decoder  # noqa: F401
+        CLASSES["pocketsphinx"] = PocketsphinxHotWord
+        _POCKETSPHINX_AVAILABLE = True
+    except ImportError:
+        LOG.info("pocketsphinx not available - wake word fallback disabled")
+        _POCKETSPHINX_AVAILABLE = False
 
     @staticmethod
     def load_module(module, hotword, config, lang, loop):
@@ -544,6 +553,12 @@ class HotWordFactory:
         config = config.get(hotword) or config["hey mycroft"]
 
         module = config.get("module", "precise")
-        return cls.load_module(module, hotword, config, lang, loop) or \
-            cls.load_module('pocketsphinx', hotword, config, lang, loop) or \
-            cls.CLASSES['pocketsphinx']()
+        result = cls.load_module(module, hotword, config, lang, loop)
+        
+        # Only fall back to pocketsphinx if it's available
+        if not result and cls._POCKETSPHINX_AVAILABLE:
+            result = cls.load_module('pocketsphinx', hotword, config, lang, loop)
+            if not result:
+                result = cls.CLASSES['pocketsphinx']()
+        
+        return result
