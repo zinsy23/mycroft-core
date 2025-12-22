@@ -1211,11 +1211,13 @@ POCKETSPHINX_EXIT_CODE=${PIPESTATUS[0]}
 
 if [ $POCKETSPHINX_EXIT_CODE -eq 0 ]; then
     echo "✅ pocketsphinx installed - 'wake up' alternative wake word available"
+    POCKETSPHINX_INSTALLED=true
 else
     echo "⚠️  pocketsphinx installation failed (known issue on x86_64 with GCC 13+)"
     echo "   This is OK - Precise wake word engine will be used instead"
     echo "   Note: 'wake up' alternative wake word will not be available"
     echo "   Primary wake word 'hey mycroft' (Precise) will still work perfectly"
+    POCKETSPHINX_INSTALLED=false
 fi
 
 # Install TensorFlow if custom wake words are enabled
@@ -1546,6 +1548,14 @@ echo "==========================================================================
 echo "Creating unified Mycroft configuration..."
 mkdir -p ~/.config/mycroft
 
+# Check if config already exists and back it up
+if [ -f ~/.config/mycroft/mycroft.conf ]; then
+    BACKUP_FILE=~/.config/mycroft/mycroft.conf.backup.$(date +%Y%m%d_%H%M%S)
+    echo "⚠️  Existing configuration found - backing up to:"
+    echo "   $BACKUP_FILE"
+    cp ~/.config/mycroft/mycroft.conf "$BACKUP_FILE"
+fi
+
 # Detect system architecture for optimized configuration
 ARCH=$(uname -m)
 echo "Detected architecture: $ARCH"
@@ -1560,7 +1570,25 @@ else
 fi
 
 echo "Creating Mycroft configuration ($CONFIG_TYPE)..."
-cat > ~/.config/mycroft/mycroft.conf << 'EOF'
+
+# Build listener configuration based on pocketsphinx availability
+if [ "$POCKETSPHINX_INSTALLED" = true ]; then
+    echo "Including 'wake up' secondary wake word (pocketsphinx available)"
+    LISTENER_CONFIG='"listener": {
+    "wake_word": "hey mycroft",
+    "stand_up_word": "wake up",
+    "sample_rate": 16000
+  },'
+else
+    echo "Disabling 'wake up' secondary wake word (pocketsphinx not available)"
+    LISTENER_CONFIG='"listener": {
+    "wake_word": "hey mycroft",
+    "stand_up_word": "",
+    "sample_rate": 16000
+  },'
+fi
+
+cat > ~/.config/mycroft/mycroft.conf <<EOF
 {
   "max_allowed_core_version": 21.2,
   "hotwords": {
@@ -1571,10 +1599,7 @@ cat > ~/.config/mycroft/mycroft.conf << 'EOF'
       "lang": "en-us"
     }
   },
-  "listener": {
-    "wake_word": "hey mycroft",
-    "sample_rate": 16000
-  },
+  $LISTENER_CONFIG
   "stt": {
     "module": "ovos-stt-plugin-fasterwhisper",
     "ovos-stt-plugin-fasterwhisper": {

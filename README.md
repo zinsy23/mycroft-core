@@ -330,17 +330,42 @@ Add to `mycroft.conf` for weather skill:
 
 ### **Common Issues**
 
-#### **Audio Not Working**
+#### **Microphone Not Working**
+
+**Most common issue: Wrong default microphone selected**
+
 ```bash
-# Check audio devices
-arecord -l
+# 1. List all available microphones
+pactl list sources short
 
-# Test microphone
-arecord -D hw:1,0 -f S16_LE -r 16000 -c 1 test.wav
+# 2. Check which one is currently default
+pactl info | grep "Default Source"
 
-# Check Mycroft logs
-tail -f /var/log/mycroft/*.log
+# 3. Set the correct microphone as default
+pactl set-default-source SOURCE_NAME_FROM_STEP_1
+
+# Example:
+pactl set-default-source alsa_input.usb-046d_C922_Pro_Stream_Webcam_46FC0ADF-02.analog-stereo
+
+# 4. Restart Mycroft
+cd ~/mycroft-core
+./stop-mycroft.sh && ./start-mycroft.sh all
 ```
+
+**To make it permanent**, edit `~/.config/mycroft/mycroft.conf` and add:
+```json
+{
+  "listener": {
+    "device_name": "C922",
+    "sample_rate": 16000
+  }
+}
+```
+(Use a substring that matches your device name)
+
+**Other issues:**
+- **Voice service crashed**: Check `/var/log/mycroft/voice.log` for pocketsphinx errors
+- **Microphone muted**: Run `pactl list sources | grep -A 10 "YOUR_DEVICE" | grep Mute`
 
 #### **Wake Word Not Responding**
 ```bash
