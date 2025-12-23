@@ -210,39 +210,7 @@ precise-listen -w "your phrase" /path/to/model.pb
 }
 ```
 
-**Example 2: Multiple Wake Words**
-```json
-{
-  "hotwords": {
-    "hey mycroft": {
-      "module": "precise",
-      "phonemes": "HH EY . M AY K R AO F T",
-      "threshold": 1e-90
-    },
-    "computer": {
-      "module": "precise",
-      "local_model_file": "/home/pi/.mycroft/precise/computer.pb",
-      "sensitivity": 0.31,
-      "trigger_level": 3
-    }
-  },
-  "listener": {
-    "wake_word": "computer"
-  }
-}
-```
-
-#### **Configuration Parameters**
-- **`module`**: Always "precise" for custom wake words
-- **`local_model_file`**: Path to your trained .pb model file
-- **`sensitivity`**: Lower values = more sensitive (0.1 to 1.0)
-- **`trigger_level`**: Number of consecutive detections needed (1-5)
-- **`threshold`**: Detection threshold (lower = more sensitive)
-
-#### **Model File Locations**
-- **Default models**: `~/.local/share/mycroft/precise/`
-- **Custom models**: `~/.mycroft/precise/` or custom path
-- **File format**: `.pb` (Protocol Buffer)
+**Note**: The old path `/home/pi/.mycroft/precise/` is deprecated. Use `~/.local/share/mycroft/precise/` instead.
 
 ### **Configuration Management**
 ```bash

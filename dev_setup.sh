@@ -566,10 +566,12 @@ if [[ "$EXISTING_TENSORFLOW" == true ]]; then
 else
     echo ""
     echo "🎤 CUSTOM WAKE WORD SUPPORT:"
-    echo "TensorFlow is required if you plan to train custom wake word models."
+    echo "TensorFlow is required if you want to use OR train custom wake word models."
+    echo "(e.g., 'computer', 'jarvis', etc. instead of 'hey mycroft')"
+    echo ""
     echo "The default 'hey mycroft' wake word works without TensorFlow."
     echo ""
-    echo "Do you plan to train custom wake word models? (This requires TensorFlow ~500MB)"
+    echo "Do you plan to use custom wake word models? (This requires TensorFlow ~500MB)"
     read -p "Install TensorFlow for custom wake words? [y/N] (default: no): " -r custom_wake_words
     CUSTOM_WAKE_WORDS=${custom_wake_words:-N}
 
@@ -1222,12 +1224,43 @@ fi
 
 # Install TensorFlow if custom wake words are enabled
 if [[ "$INSTALL_TENSORFLOW" == true ]]; then
-    echo "Installing TensorFlow for custom wake word training..."
+    echo "Installing TensorFlow for custom wake word models..."
+    echo "(Required for both training new models AND running custom wake word detection)"
     pip install tensorflow==2.12.0
-    pip install mycroft-precise
+    
+    # Install mycroft-precise with all required dependencies
+    echo "Installing mycroft-precise 0.3.0 with dependencies..."
+    pip install mycroft-precise==0.3.0 --no-deps
+    pip install attrs bbopt fitipy h5py pyache sonopy keras speechpy-fast wavio 'prettyparse==1.0.0'
+    
+    # Patch prettyparse compatibility issue for Python 3.11+
+    echo "Patching prettyparse compatibility..."
+    PRECISE_ENGINE_PY=$(echo "$TOP/.venv/lib/python"*/site-packages/precise/scripts/engine.py)
+    if [ -f "$PRECISE_ENGINE_PY" ]; then
+        sed -i '18s/from prettyparse import create_parser/from prettyparse import parse_args as create_parser/' "$PRECISE_ENGINE_PY"
+        echo "✅ Patched precise-engine for Python 3.11+ compatibility"
+    else
+        echo "⚠️  Warning: Could not find precise engine.py to patch (path: $PRECISE_ENGINE_PY)"
+    fi
+    
+    # Create symlink to prevent Precise binary download override
+    echo "Setting up Precise engine symlink..."
+    PRECISE_DIR="$HOME/.local/share/mycroft/precise"
+    mkdir -p "$PRECISE_DIR/precise-engine"
+    
+    # Remove any existing binary
+    rm -f "$PRECISE_DIR/precise-engine/precise-engine"
+    
+    # Create symlink to venv version
+    ln -sf "$TOP/.venv/bin/precise-engine" "$PRECISE_DIR/precise-engine/precise-engine"
+    echo "✅ Precise engine symlink created (prevents download override)"
+    
     echo "✅ TensorFlow and mycroft-precise installed for custom wake words"
+    echo ""
+    echo "📖 To use custom wake words, see CUSTOM_WAKE_WORDS.md for configuration examples"
 else
-    echo "ℹ️  Skipping TensorFlow - using default wake word only"
+    echo "ℹ️  Skipping TensorFlow and custom wake word support"
+    echo "   (Default 'hey mycroft' wake word uses pre-built Precise binary with bundled TensorFlow)"
 fi
 
 # Install GPIO libraries if Raspberry Pi GPIO support is enabled
