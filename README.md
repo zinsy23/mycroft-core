@@ -180,26 +180,25 @@ This setup takes longer than the original Mycroft installation because we're bui
 
 ### **Custom Wake Word Configuration**
 
-If you installed TensorFlow during setup, you can train and use custom wake words. Here's how to configure them:
+⚠️ **IMPORTANT**: Custom wake words require special setup on Python 3.11+.
 
-#### **Training Custom Wake Words**
-```bash
-# Train a custom wake word (requires audio samples)
-precise-train -w "your phrase" /path/to/audio/samples
+**See [CUSTOM_WAKE_WORDS.md](CUSTOM_WAKE_WORDS.md)** for complete setup instructions, including:
+- Quick start guide (TL;DR)
+- Step-by-step setup
+- Configuration examples
+- Troubleshooting
 
-# Test the trained model
-precise-listen -w "your phrase" /path/to/model.pb
-```
+#### **Quick Configuration Example**
 
-#### **Configuration Examples**
-
-**Example 1: "Computer" Wake Word**
 ```json
 {
+  "precise": {
+    "executable": "~/.local/share/mycroft/precise/precise-engine/precise-engine"
+  },
   "hotwords": {
     "computer": {
       "module": "precise",
-      "local_model_file": "/home/pi/.mycroft/precise/computer.pb",
+      "local_model_file": "~/.local/share/mycroft/precise/computer.pb",
       "sensitivity": 0.31,
       "trigger_level": 3
     }

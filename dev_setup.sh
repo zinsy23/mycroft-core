@@ -1224,43 +1224,47 @@ fi
 
 # Install TensorFlow if custom wake words are enabled
 if [[ "$INSTALL_TENSORFLOW" == true ]]; then
-    echo "Installing TensorFlow for custom wake word models..."
-    echo "(Required for both training new models AND running custom wake word detection)"
-    pip install tensorflow==2.12.0
+    echo "Installing Precise 0.3.0 for custom wake word models..."
     
-    # Install mycroft-precise with all required dependencies
-    echo "Installing mycroft-precise 0.3.0 with dependencies..."
-    pip install mycroft-precise==0.3.0 --no-deps
-    pip install attrs bbopt fitipy h5py pyache sonopy keras speechpy-fast wavio 'prettyparse==1.0.0'
+    # Download and extract Precise 0.3.0 pre-built binary
+    PRECISE_DIR="$HOME/.local/share/mycroft/precise"
+    mkdir -p "$PRECISE_DIR"
     
-    # Patch prettyparse compatibility issue for Python 3.11+
-    echo "Patching prettyparse compatibility..."
-    PRECISE_ENGINE_PY=$(echo "$TOP/.venv/lib/python"*/site-packages/precise/scripts/engine.py)
-    if [ -f "$PRECISE_ENGINE_PY" ]; then
-        sed -i '18s/from prettyparse import create_parser/from prettyparse import parse_args as create_parser/' "$PRECISE_ENGINE_PY"
-        echo "✅ Patched precise-engine for Python 3.11+ compatibility"
+    ARCH=$(uname -m)
+    if [[ "$ARCH" == "x86_64" ]]; then
+        PRECISE_URL="https://github.com/MycroftAI/mycroft-precise/releases/download/v0.3.0/precise-engine_0.3.0_x86_64.tar.gz"
+    elif [[ "$ARCH" == "aarch64" ]]; then
+        PRECISE_URL="https://github.com/MycroftAI/mycroft-precise/releases/download/v0.3.0/precise-engine_0.3.0_aarch64.tar.gz"
     else
-        echo "⚠️  Warning: Could not find precise engine.py to patch (path: $PRECISE_ENGINE_PY)"
+        echo "⚠️  Warning: Unsupported architecture $ARCH for Precise 0.3.0"
+        echo "   Custom wake words may not work. Continuing anyway..."
+        PRECISE_URL=""
     fi
     
-    # Create symlink to prevent Precise binary download override
-    echo "Setting up Precise engine symlink..."
-    PRECISE_DIR="$HOME/.local/share/mycroft/precise"
-    mkdir -p "$PRECISE_DIR/precise-engine"
+    if [[ -n "$PRECISE_URL" ]]; then
+        echo "Downloading Precise 0.3.0 binary for $ARCH..."
+        if wget -q --show-progress "$PRECISE_URL" -O "$PRECISE_DIR/precise-engine_0.3.0_${ARCH}.tar.gz"; then
+            echo "Extracting Precise 0.3.0 binary..."
+            tar -xzf "$PRECISE_DIR/precise-engine_0.3.0_${ARCH}.tar.gz" -C "$PRECISE_DIR"
+            
+            if [[ -f "$PRECISE_DIR/precise-engine/precise-engine" ]]; then
+                chmod +x "$PRECISE_DIR/precise-engine/precise-engine"
+                echo "✅ Precise 0.3.0 binary installed successfully"
+                "$PRECISE_DIR/precise-engine/precise-engine" --version
+            else
+                echo "⚠️  Warning: Precise binary extraction may have failed"
+            fi
+        else
+            echo "⚠️  Warning: Failed to download Precise 0.3.0 binary"
+        fi
+    fi
     
-    # Remove any existing binary
-    rm -f "$PRECISE_DIR/precise-engine/precise-engine"
-    
-    # Create symlink to venv version
-    ln -sf "$TOP/.venv/bin/precise-engine" "$PRECISE_DIR/precise-engine/precise-engine"
-    echo "✅ Precise engine symlink created (prevents download override)"
-    
-    echo "✅ TensorFlow and mycroft-precise installed for custom wake words"
+    echo "✅ Precise 0.3.0 installed for custom wake words"
     echo ""
     echo "📖 To use custom wake words, see CUSTOM_WAKE_WORDS.md for configuration examples"
 else
-    echo "ℹ️  Skipping TensorFlow and custom wake word support"
-    echo "   (Default 'hey mycroft' wake word uses pre-built Precise binary with bundled TensorFlow)"
+    echo "ℹ️  Skipping custom wake word support"
+    echo "   (Default 'hey mycroft' wake word uses pre-built Precise binary)"
 fi
 
 # Install GPIO libraries if Raspberry Pi GPIO support is enabled

@@ -1,88 +1,26 @@
 # Custom Wake Word Setup Guide
 
-## Overview
+## Quick Start (TL;DR)
 
-This guide covers setting up custom wake words with Mycroft Precise 0.3.0 on Python 3.11+. 
-
-**⚠️ Important**: This guide is ONLY needed if you want to use **custom wake word models** (like "computer", "jarvis", etc.). The default "hey mycroft" wake word works out-of-the-box without any of these steps.
-
-## When Do You Need This Guide?
-
-**You DON'T need this if:**
-- ✅ Using default "hey mycroft" wake word
-- ✅ You answered "NO" to custom wake words during `dev_setup.sh`
-
-**You DO need this if:**
-- ❌ Using a custom wake word model (`.pb` file)
-- ❌ You answered "YES" to custom wake words during `dev_setup.sh`
-- ❌ You want to train your own wake word
-
-## Prerequisites
-
-- Mycroft installed via `dev_setup.sh` **with custom wake words enabled**
-- Custom wake word model file (`.pb` format)
-- Python 3.11+ virtual environment
-
-## Known Issues & Solutions
-
-### Issue 1: Precise Binary Download Override
-
-**Problem**: Mycroft automatically downloads an old, broken Precise 0.2.0 binary (from 2018) that overwrites any working installation.
-
-**Solution**: Use a symlink to prevent the override:
-
+### 1. Run Setup Script
 ```bash
-# Stop Mycroft
-cd ~/mycroft-core
-./stop-mycroft.sh all
-
-# Remove the broken downloaded binary
-rm -f ~/.local/share/mycroft/precise/precise-engine/precise-engine
-
-# Create symlink to venv version
-ln -s ~/mycroft-core/.venv/bin/precise-engine ~/.local/share/mycroft/precise/precise-engine/precise-engine
-
-# Restart Mycroft
-./start-mycroft.sh all
+./dev_setup.sh
+# Answer YES when asked: "Do you plan to use custom wake word models?"
 ```
 
-### Issue 2: Precise 0.3.0 Dependencies
-
-Precise 0.3.0 requires specific dependencies that aren't automatically installed:
-
+### 2. Add Your Model File
 ```bash
-cd ~/mycroft-core
-source .venv/bin/activate
-
-# Install Precise with all dependencies
-pip install mycroft-precise==0.3.0 --no-deps
-pip install attrs bbopt fitipy pyache sonopy keras speechpy-fast wavio prettyparse==1.0.0
-
-# Patch the prettyparse compatibility issue
-sed -i '18s/from prettyparse import create_parser/from prettyparse import parse_args as create_parser/' \
-  .venv/lib/python3.11/site-packages/precise/scripts/engine.py
+cp /path/to/your/computer.pb ~/.local/share/mycroft/precise/
 ```
 
-**Note**: TensorFlow 2.12.0 works despite Precise claiming it needs 1.13.
-
-### Issue 3: Model File Location
-
-Use the correct path for modern Mycroft installations:
-
-- ✅ **Correct**: `~/.local/share/mycroft/precise/your-model.pb`
-- ❌ **Old/Wrong**: `~/.mycroft/precise/your-model.pb`
-
-## Configuration
-
-### Example 1: Single Custom Wake Word
-
+### 3. Configure Mycroft
 Edit `~/.config/mycroft/mycroft.conf`:
 
 ```json
 {
   "max_allowed_core_version": 21.2,
   "precise": {
-    "executable": "/home/YOUR_USERNAME/mycroft-core/.venv/bin/precise-engine"
+    "executable": "~/.local/share/mycroft/precise/precise-engine/precise-engine"
   },
   "hotwords": {
     "computer": {
@@ -98,13 +36,101 @@ Edit `~/.config/mycroft/mycroft.conf`:
 }
 ```
 
-### Example 2: Multiple Wake Words
+### 4. Start and Test
+```bash
+cd ~/mycroft-core
+./start-mycroft.sh all
 
+# Verify it's working
+ps aux | grep precise-engine
+# Should see: precise-engine /home/user/.local/share/mycroft/precise/computer.pb 2048
+```
+
+Say your wake word and it should respond!
+
+---
+
+## Why This Setup is Needed
+
+**The Problem**: The `mycroft-precise` Python package (0.3.0) requires TensorFlow 1.13, which doesn't work on Python 3.11.
+
+**The Solution**: Use the pre-built Precise 0.3.0 binary, which has TensorFlow bundled inside.
+
+**What Changed from Old Mycroft**:
+- ❌ **OLD**: Install `mycroft-precise` in venv, use Python script
+- ✅ **NEW**: Download pre-built binary, configure Mycroft to use it
+
+---
+
+## Detailed Setup Instructions
+
+### Prerequisites
+
+- Mycroft installed via `dev_setup.sh`
+- Custom wake word model file (`.pb` format)
+- Python 3.11+ virtual environment
+
+### Step 1: Download Precise 0.3.0 Binary
+
+**If you answered YES during setup**, this is already done. Otherwise:
+
+```bash
+cd ~/.local/share/mycroft/precise
+
+# For x86_64 (most desktops/laptops)
+wget https://github.com/MycroftAI/mycroft-precise/releases/download/v0.3.0/precise-engine_0.3.0_x86_64.tar.gz
+tar -xzf precise-engine_0.3.0_x86_64.tar.gz
+
+# For aarch64 (Raspberry Pi)
+wget https://github.com/MycroftAI/mycroft-precise/releases/download/v0.3.0/precise-engine_0.3.0_aarch64.tar.gz
+tar -xzf precise-engine_0.3.0_aarch64.tar.gz
+
+# Verify
+~/.local/share/mycroft/precise/precise-engine/precise-engine --version
+# Should output: 0.3.0
+```
+
+### Step 2: Place Your Model File
+
+```bash
+# Copy your custom wake word model
+cp /path/to/your-model.pb ~/.local/share/mycroft/precise/
+
+# Verify it exists
+ls -lh ~/.local/share/mycroft/precise/*.pb
+```
+
+### Step 3: Configure Mycroft
+
+Edit `~/.config/mycroft/mycroft.conf`:
+
+**Single Custom Wake Word Example**:
 ```json
 {
   "max_allowed_core_version": 21.2,
   "precise": {
-    "executable": "/home/YOUR_USERNAME/mycroft-core/.venv/bin/precise-engine"
+    "executable": "~/.local/share/mycroft/precise/precise-engine/precise-engine"
+  },
+  "hotwords": {
+    "computer": {
+      "module": "precise",
+      "local_model_file": "~/.local/share/mycroft/precise/computer.pb",
+      "sensitivity": 0.31,
+      "trigger_level": 3
+    }
+  },
+  "listener": {
+    "wake_word": "computer"
+  }
+}
+```
+
+**Multiple Wake Words Example**:
+```json
+{
+  "max_allowed_core_version": 21.2,
+  "precise": {
+    "executable": "~/.local/share/mycroft/precise/precise-engine/precise-engine"
   },
   "hotwords": {
     "hey mycroft": {
@@ -126,8 +152,7 @@ Edit `~/.config/mycroft/mycroft.conf`:
 }
 ```
 
-## Configuration Parameters
-
+**Configuration Parameters**:
 - **`module`**: Always `"precise"` for custom wake words
 - **`local_model_file`**: Full path to your `.pb` model file
   - Use `~/.local/share/mycroft/precise/` for model storage
@@ -139,12 +164,104 @@ Edit `~/.config/mycroft/mycroft.conf`:
 - **`trigger_level`**: Consecutive detections needed (1-5)
   - Higher = more reliable, but slower response
   - Recommended: 3
-- **`threshold`**: Alternative to sensitivity (for pocketsphinx compatibility)
-  - Only used if sensitivity not specified
+
+### Step 4: Start Mycroft
+
+```bash
+cd ~/mycroft-core
+./start-mycroft.sh all
+```
+
+### Step 5: Verify It's Working
+
+```bash
+# Check precise-engine is running
+ps aux | grep precise-engine
+# Should see TWO processes:
+# /home/user/.local/share/mycroft/precise/precise-engine/precise-engine /home/user/.local/share/mycroft/precise/computer.pb 2048
+
+# Check logs
+tail -f /var/log/mycroft/voice.log
+# Should see: "Using custom Precise executable: ~/.local/share/mycroft/precise/precise-engine/precise-engine"
+# Should see: "Loading 'computer' wake word via precise"
+# Should see: "Speech client is ready."
+```
+
+---
+
+## Troubleshooting
+
+### Wake Word Not Detected
+
+**Check if precise-engine is running**:
+```bash
+ps aux | grep precise-engine
+```
+Should show 2 processes with your model file path.
+
+**Check logs for errors**:
+```bash
+tail -50 /var/log/mycroft/voice.log
+```
+Look for: `Loading "your-phrase" wake word via precise`
+
+**Verify model file exists**:
+```bash
+ls -la ~/.local/share/mycroft/precise/*.pb
+```
+
+**Test model directly**:
+```bash
+# Speak into mic while this runs
+arecord -f S16_LE -r 16000 -c 1 -t raw | \
+  ~/.local/share/mycroft/precise/precise-engine/precise-engine \
+  ~/.local/share/mycroft/precise/your-model.pb 2048
+```
+Should output confidence scores (0.0 to 1.0) as you speak.
+
+### "Could not create hotword" Error
+
+**For "wake up" stand_up_word**:
+This is expected if pocketsphinx didn't compile on your system. It only affects the secondary "wake up" word, not your main wake word. Safe to ignore.
+
+**For your main wake word**:
+- Check that `"executable"` path is correct in config
+- Verify the binary exists and is executable
+- Check that model file path is correct
+
+### Precise Engine Crashes / Zombie Process
+
+**Symptoms**: `ps aux` shows `[precise-engine] <defunct>`
+
+**Cause**: Using the venv Python package instead of the binary
+
+**Fix**: Make sure your config points to the binary:
+```json
+"precise": {
+  "executable": "~/.local/share/mycroft/precise/precise-engine/precise-engine"
+}
+```
+
+NOT the venv version:
+```json
+"precise": {
+  "executable": "/home/user/mycroft-core/.venv/bin/precise-engine"  // ❌ DON'T USE THIS
+}
+```
+
+### Mycroft Downloads Old 0.2.0 Binary
+
+**Symptoms**: Logs show "Downloading Precise executable..." and it stops working
+
+**Cause**: The `"executable"` config isn't being respected (old Mycroft version)
+
+**Fix**: Make sure you have the updated `hotword_factory.py` with executable config support. This was added as new functionality.
+
+---
 
 ## Training Custom Wake Words
 
-If you want to train your own models:
+If you want to train your own models (requires many audio samples):
 
 ```bash
 cd ~/mycroft-core
@@ -165,86 +282,71 @@ precise-listen your-phrase.pb
 
 **Note**: Training requires significant audio samples and time. Consider using pre-trained models if available.
 
-## Troubleshooting
+---
 
-### Wake Word Not Detected
+## Architecture Support
 
-1. **Check if precise-engine is running**:
-   ```bash
-   ps aux | grep precise-engine
-   ```
-   Should show 2 processes with your model file path.
+- **x86_64**: ✅ Fully supported
+- **aarch64** (Raspberry Pi): ✅ Fully supported  
+- **Other architectures**: May require manual binary compilation
 
-2. **Check logs**:
-   ```bash
-   tail -f /var/log/mycroft/voice.log
-   ```
-   Look for: `Loading "your-phrase" wake word via precise`
+---
 
-3. **Verify model file exists**:
-   ```bash
-   ls -la ~/.local/share/mycroft/precise/*.pb
-   ```
+## Technical Details
 
-4. **Test model directly**:
-   ```bash
-   cd ~/mycroft-core
-   source .venv/bin/activate
-   # Speak into mic while this runs
-   arecord -f S16_LE -r 16000 -c 1 -t raw | \
-     precise-engine ~/.local/share/mycroft/precise/your-model.pb 2048
-   ```
-   Should output confidence scores (0.0 to 1.0) as you speak.
+### Why the Python Package Doesn't Work
 
-### "Could not create hotword" Error
+The `mycroft-precise` Python package (0.3.0) has these dependencies:
+- TensorFlow 1.13 (incompatible with Python 3.11)
+- Uses `tensorflow.GraphDef()` which doesn't exist in TensorFlow 2.x
+- `prettyparse` API changed, breaking imports
 
-This usually means:
-1. Model file path is wrong
-2. Precise dependencies missing
-3. Old binary being used instead of venv version
+The pre-built binary:
+- Has TensorFlow 1.13 bundled inside (isolated from system Python)
+- Works on Python 3.11 systems
+- No dependency conflicts
 
-**Fix**: Follow the symlink solution in Issue 1 above.
+### What dev_setup.sh Does
 
-### Precise Engine Crashes
+When you answer YES to custom wake words:
+1. Downloads Precise 0.3.0 pre-built binary for your architecture
+2. Extracts to `~/.local/share/mycroft/precise/precise-engine/`
+3. Makes it executable
 
-Check for:
-1. TensorFlow compatibility: `pip list | grep tensorflow`
-   - Should be 2.12.0
-2. Missing dependencies: Run the full dependency install from Issue 2
-3. Corrupted model file: Re-download or retrain
+It does NOT:
+- Install `mycroft-precise` Python package
+- Install TensorFlow
+- Create symlinks
 
-## First-Time Setup Checklist
+### Key Code Changes
 
-**If you answered YES to custom wake words during `dev_setup.sh`:**
-- [x] Install Precise dependencies in venv *(done by setup script)*
-- [x] Patch prettyparse compatibility *(done by setup script)*
-- [x] Create symlink to prevent binary override *(done by setup script)*
-- [ ] Copy your custom model file to `~/.local/share/mycroft/precise/`
-- [ ] Update `~/.config/mycroft/mycroft.conf` with model path
-- [ ] Restart Mycroft services
-- [ ] Verify precise-engine is running
-- [ ] Test wake word detection
+**`hotword_factory.py`** (lines 260-276):
+- Added support for `"precise": {"executable": "..."}` config
+- This was NEW functionality - never existed in upstream Mycroft
+- Prevents automatic download/override when custom executable is specified
 
-**If you answered NO but now want custom wake words:**
-- [ ] Follow manual installation steps in "Issue 2" above
-- [ ] Follow remaining checklist items
+**`listener.py`** (lines 377-383):
+- Fixed handling of empty `stand_up_word` when pocketsphinx unavailable
+- Returns `None` instead of trying to load invalid model
 
-## Why These Issues Happen
-
-- **Precise 0.2.0 Download**: Mycroft's default config points to an old repository that has broken binaries
-- **TensorFlow Incompatibility**: Precise was built for TensorFlow 1.13 (Python 3.5/3.6 era), but works with 2.12.0 despite warnings
-- **prettyparse Issue**: The PyPI version of prettyparse changed its API, breaking Precise 0.3.0's imports
-- **Path Changes**: Mycroft moved from `~/.mycroft/` to XDG-compliant `~/.local/share/mycroft/` in newer versions
+---
 
 ## Success Indicators
 
-When everything is working, you should see:
+When everything is working correctly:
 
+**Logs show**:
 ```
-INFO | Loading "your-phrase" wake word via precise
+INFO | Using custom Precise executable: ~/.local/share/mycroft/precise/precise-engine/precise-engine
+INFO | Loading "computer" wake word via precise
 INFO | Speech client is ready.
 INFO | Emitted mycroft.ready event - Mycroft is all loaded and ready to roll!
 ```
 
-And `ps aux | grep precise-engine` should show your model loaded.
+**Process list shows**:
+```bash
+$ ps aux | grep precise-engine
+/home/user/.local/share/mycroft/precise/precise-engine/precise-engine /home/user/.local/share/mycroft/precise/computer.pb 2048
+```
 
+**Wake word detection works**: Say your wake word and Mycroft responds!

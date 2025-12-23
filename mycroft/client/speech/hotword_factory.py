@@ -259,6 +259,16 @@ class PreciseHotword(HotWordEngine):
 
     def update_precise(self, precise_config):
         """Continously try to download precise until successful"""
+        # Check if user specified a custom executable path
+        custom_exe = precise_config.get('executable')
+        if custom_exe:
+            custom_exe = expanduser(custom_exe)
+            if isfile(custom_exe):
+                LOG.info(f'Using custom Precise executable: {custom_exe}')
+                return custom_exe
+            else:
+                LOG.warning(f'Custom Precise executable not found: {custom_exe}, falling back to download')
+        
         precise_exe = None
         while not precise_exe:
             try:
