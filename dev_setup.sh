@@ -1625,9 +1625,20 @@ else
   },'
 fi
 
+# Build Precise configuration if custom wake words enabled (prevents version override)
+if [[ "$INSTALL_TENSORFLOW" == true ]] && [[ -f "$HOME/.local/share/mycroft/precise/precise-engine/precise-engine" ]]; then
+    echo "Configuring Precise 0.3.0 to prevent auto-downgrade..."
+    PRECISE_CONFIG='"precise": {
+    "executable": "~/.local/share/mycroft/precise/precise-engine/precise-engine"
+  },'
+else
+    PRECISE_CONFIG=''
+fi
+
 cat > ~/.config/mycroft/mycroft.conf <<EOF
 {
   "max_allowed_core_version": 21.2,
+  $PRECISE_CONFIG
   "hotwords": {
     "hey mycroft": {
       "module": "precise",
