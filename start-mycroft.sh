@@ -22,6 +22,11 @@ cd -P "$( dirname "$SOURCE" )" || exit 1 # Enter scripts folder or fail!
 DIR="$( pwd )"
 VIRTUALENV_ROOT=${VIRTUALENV_ROOT:-"${DIR}/.venv"}
 
+# Add NVIDIA library paths for GPU acceleration
+# Use system CUDA libraries first, then pip-installed ones as fallback
+NVIDIA_LIB_PATH="${VIRTUALENV_ROOT}/lib/python3.11/site-packages/nvidia"
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${NVIDIA_LIB_PATH}/cudnn/lib:${NVIDIA_LIB_PATH}/cublas/lib:${NVIDIA_LIB_PATH}/cuda_runtime/lib:${LD_LIBRARY_PATH}"
+
 help() {
     echo "${script}:  Mycroft command/service launcher"
     echo "usage: ${script} [COMMAND] [restart] [params]"
