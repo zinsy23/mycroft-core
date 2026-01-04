@@ -536,6 +536,138 @@ pip install -r requirements/requirements.txt
 
 ---
 
+## ⚡ **Performance Optimization (GPU Acceleration)**
+
+### **Understanding the Voice Processing Pipeline**
+
+When you speak to Mycroft, your voice goes through several stages:
+
+1. **🎤 Audio Capture** (PyAudio) - Microphone input, typically ~30ms latency
+2. **👂 Wake Word Detection** (Precise) - Listens for "Hey Mycroft" using a lightweight neural network, ~10-50ms per audio chunk
+3. **🔴 Recording** - Captures your command after wake word detected
+4. **🔇 Voice Activity Detection (VAD)** - Waits for silence (~0.5-1.0s) to know you're done speaking
+5. **💬 Speech-to-Text (STT)** - **BOTTLENECK: ~0.9-1.4s on CPU** - Transcribes audio using FasterWhisper (Whisper neural network)
+6. **🧠 Intent Matching** (Padatious) - Determines what skill to use, ~10-50ms
+7. **🔊 Text-to-Speech (TTS)** (eSpeak) - Generates response audio, ~100-300ms
+
+**The slowest component is Speech-to-Text (STT)**, which runs the Whisper neural network to transcribe your voice command. This is where GPU acceleration makes the biggest difference.
+
+### **GPU Acceleration for Speech-to-Text**
+
+FasterWhisper (the STT engine) can use NVIDIA GPU acceleration to **significantly reduce transcription time**. Performance gains vary depending on your GPU model and the Whisper model size you choose.
+
+#### **Requirements:**
+
+✅ **NVIDIA GPU** with compute capability **6.0+** (Pascal architecture or newer)
+   - ✓ Works: GTX 1000 series, RTX 2000/3000/4000 series, Tesla P/V/A series
+   - ✗ Too old: GTX 700/900 series (Maxwell/Kepler architecture)
+
+✅ **System CUDA libraries** installed at `/usr/local/cuda`
+   - Cannot be installed via pip - must be system-wide installation
+   - Ubuntu/Debian: `sudo apt install nvidia-cuda-toolkit`
+   - Check installation: `nvcc --version` should show CUDA 11.x or 12.x
+
+✅ **Sufficient VRAM** for the model:
+   - `tiny.en` - ~100 MB (fast, lower accuracy)
+   - `base.en` - ~220 MB (default, good balance)
+   - `small.en` - ~500 MB (better accuracy)
+   - `medium.en` - ~870 MB (best accuracy for English)
+
+**Note:** The setup script already includes GPU support in `start-mycroft.sh`. If you don't have NVIDIA/CUDA, the path is simply ignored (no errors).
+
+#### **Setup Steps:**
+
+1. **Verify CUDA installation:**
+   ```bash
+   # Check if CUDA is installed
+   ls /usr/local/cuda/lib64/libcudart.so
+
+   # Check GPU compute capability
+   nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
+   ```
+
+2. **Edit Mycroft configuration** (`~/.config/mycroft/mycroft.conf`):
+   ```json
+   "stt": {
+     "module": "ovos-stt-plugin-fasterwhisper",
+     "ovos-stt-plugin-fasterwhisper": {
+       "model": "base.en",
+       "language": "en",
+       "use_cuda": true
+     }
+   }
+   ```
+
+3. **Restart Mycroft:**
+   ```bash
+   ./stop-mycroft.sh all
+   ./start-mycroft.sh all
+   ```
+
+4. **Verify GPU usage** (say a voice command, then immediately check):
+   ```bash
+   nvidia-smi --query-compute-apps=pid,used_memory --format=csv
+   ```
+
+   You should see the Mycroft voice process using GPU memory (~220 MB for base.en, ~870 MB for medium.en).
+
+#### **Performance Example (RTX 3060):**
+
+Tested on NVIDIA GeForce RTX 3060 with i7-4790 CPU:
+
+| Model | CPU Time | GPU Time | Speedup | Accuracy | VRAM |
+|-------|----------|----------|---------|----------|------|
+| base.en | ~0.9-1.0s | ~0.09-0.11s | ~10x | Good | ~220 MB |
+| medium.en | ~6.0s* | ~0.3-0.5s | ~15x+ | Best | ~870 MB |
+
+*CPU time for medium.en is estimated; actual GPU time was measured at 0.3-0.5s for 2-3 second audio clips.
+
+**Your mileage will vary** based on:
+- GPU model and VRAM
+- CPU speed (affects CPU baseline)
+- Audio length and complexity
+- Background noise and accent clarity
+
+**General guidance:**
+- **Low-end GPUs** (GTX 1050, 1650): Expect 3-5x speedup with base.en
+- **Mid-range GPUs** (GTX 1660, RTX 2060): Expect 5-8x speedup with small.en/medium.en
+- **High-end GPUs** (RTX 3060+, 4070+): Expect 10x+ speedup, can comfortably run medium.en
+
+**Finding Your Balance:**
+
+The best model depends on your GPU and accuracy needs. We recommend experimenting:
+
+1. **Start with `base.en`** - Good baseline for testing GPU acceleration
+2. **Check the speed** - Say a few commands and note the response time
+3. **Evaluate accuracy** - Does it correctly transcribe your commands?
+4. **If happy with speed but want better accuracy** → Try the next larger model (`small.en` → `medium.en`)
+5. **If too slow** → Drop back to the previous smaller model
+6. **Repeat** until you find the sweet spot between speed and accuracy
+
+**Example progression:**
+- `base.en` → Fast but occasionally mishears? → Try `small.en`
+- `small.en` → Good accuracy, still fast? → Try `medium.en`
+- `medium.en` → Noticeably slower? → Stick with `small.en`
+
+The goal is **instant-feeling responses** with **accurate transcription** for your voice/environment.
+
+#### **Troubleshooting:**
+
+**GPU not being used?**
+```bash
+# Check if voice service has correct library path
+ps aux | grep "mycroft.client.speech"  # Get PID
+cat /proc/PID/environ | tr '\0' '\n' | grep LD_LIBRARY_PATH
+# Should include: /usr/local/cuda/lib64
+```
+
+**CUDA errors?**
+- Verify compute capability is 6.0+ with `nvidia-smi`
+- Ensure CUDA version matches driver version
+- Check `/var/log/mycroft/voice.log` for error messages
+
+---
+
 ## 🤝 **Contributing**
 
 This is a **working fork** of Mycroft Core. Contributions are welcome:
