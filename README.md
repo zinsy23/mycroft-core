@@ -2,9 +2,21 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE.md)
 
-## 🎯 **Project Status: FULLY WORKING OFFLINE**
+## 🎯 **Project Status: FULLY WORKING OFFLINE (aside from recent broken OVOS plugin changes currently grabbed at the moment)**
 
 **Mycroft Core has been restored to full functionality** after the Mycroft.ai backend shutdown. This fork provides a **completely offline voice assistant** that works without any external services.
+
+**Note**: There may be errors due to recent updates OVOS underwent that are currently broken, and don't work here. I will fix it when I get more time. In the mean time, I recommend downgrading OVOS dependencies
+by activating the venv (in mycroft-core, running `source .venv/bin/activate` after install), then removing OVOS dependencies via:
+```bash
+pip uninstall -y ovos-plugin-manager ovos-ww-plugin-openwakeword ovos-stt-plugin-fasterwhisper openwakeword ovos-bus-client ovos-config ovos-utils combo-lock langcodes 
+```
+
+Then installing proper versions that won't break via:
+```bash
+pip install ovos-plugin-manager==0.9.0 ovos-ww-plugin-openwakeword==0.4.1 ovos-stt-plugin-fasterwhisper==0.2.0 openwakeword==0.6.0            
+  ovos-bus-client==1.3.7 ovos-config==0.0.12 ovos-utils==0.8.4 combo-lock==0.2.5 langcodes==3.3.0
+```
 
 ### ✨ **What Works Now:**
 - ✅ **Voice Commands**: "Hey Mycroft, tell me a joke"
