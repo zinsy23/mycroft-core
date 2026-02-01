@@ -368,6 +368,151 @@ class PreciseHotword(HotWordEngine):
             self.runner.stop()
 
 
+class OpenWakeWordHotword(HotWordEngine):
+    """OpenWakeWord wake word engine.
+
+    OpenWakeWord is a modern, open-source wake word detection framework
+    that uses pre-trained models and supports custom verifier models for
+    speaker-specific filtering.
+
+    Based on OVOS ovos-ww-plugin-openwakeword implementation.
+    """
+    def __init__(self, key_phrase="hey mycroft", config=None, lang="en-us"):
+        super().__init__(key_phrase, config, lang)
+
+        try:
+            import openwakeword
+            from openwakeword.utils import download_models
+            import numpy as np
+        except ImportError:
+            raise Exception(
+                "OpenWakeWord is not installed. "
+                "Install with: pip install openwakeword"
+            )
+
+        # Download pre-trained models if missing (supports 0.6.0+)
+        download_models()
+
+        # Get configuration
+        oww_config = Configuration.get().get('openwakeword', {})
+        inference_framework = self.config.get(
+            'inference_framework',
+            oww_config.get('inference_framework', 'tflite')
+        )
+
+        # Determine which model(s) to load
+        custom_models = self.config.get('models', [])
+        if custom_models:
+            # Use user-specified models
+            wakeword_models = custom_models
+        else:
+            # Auto-select from pre-trained models matching key_phrase
+            pretrained_models = openwakeword.get_pretrained_model_paths() or []
+            wakeword_models = [m for m in pretrained_models if key_phrase.replace(' ', '_') in m]
+            if not wakeword_models:
+                # Fallback to first available model
+                wakeword_models = pretrained_models[:1] if pretrained_models else []
+
+        if not wakeword_models:
+            raise Exception(
+                f"No OpenWakeWord model found for '{key_phrase}'. "
+                f"Specify a model path in config or use a pre-trained wake word."
+            )
+
+        # Initialize OpenWakeWord model
+        try:
+            LOG.info(f'Loading OpenWakeWord model(s): {wakeword_models}')
+            self.oww_model = openwakeword.Model(
+                wakeword_models=wakeword_models,
+                custom_verifier_models=self.config.get('custom_verifier_models', {}),
+                custom_verifier_threshold=self.config.get('custom_verifier_threshold', 0.1),
+                inference_framework=inference_framework
+            )
+            self.model_names = list(self.oww_model.models.keys())
+        except Exception as e:
+            LOG.error(f'Failed to load OpenWakeWord model: {e}')
+            raise
+
+        # Configuration
+        self.threshold = float(self.config.get('threshold', 0.5))
+        self.has_found = False
+
+        # Audio buffer for 1280-sample chunks required by OpenWakeWord
+        self.audio_buffer = []
+
+        LOG.info(f'OpenWakeWord initialized for "{key_phrase}" '
+                f'(models: {self.model_names}, threshold: {self.threshold})')
+
+    def update(self, chunk):
+        """Process audio chunk with OpenWakeWord.
+
+        OpenWakeWord requires audio in chunks of exactly 1280 samples,
+        so we buffer incoming audio until we have enough.
+
+        Args:
+            chunk (bytes): Audio data chunk (16kHz, 16-bit, mono)
+        """
+        import numpy as np
+
+        # Convert to list and extend buffer
+        audio_frame = np.frombuffer(chunk, dtype=np.int16).tolist()
+        self.audio_buffer.extend(audio_frame)
+
+        # Process when we have enough samples
+        if len(self.audio_buffer) >= 1280:
+            if isinstance(self.audio_buffer, list):
+                self.audio_buffer = np.asarray(self.audio_buffer)
+
+            # Get prediction from OpenWakeWord
+            prediction = self.oww_model.predict(self.audio_buffer)
+
+            # Clear buffer after prediction
+            self.audio_buffer = []
+
+            # Check all models for detection
+            for model_name in self.model_names:
+                if prediction[model_name] >= self.threshold:
+                    self.has_found = True
+                    LOG.debug(f'OpenWakeWord detected "{self.key_phrase}" '
+                             f'(model: {model_name}, score: {prediction[model_name]:.3f})')
+
+                    # Flush internal buffers to prevent re-activations
+                    # (Based on OVOS implementation)
+                    # Use actual buffer shapes instead of hardcoded values for compatibility with different models
+                    n_frames = self.oww_model.model_inputs[model_name]
+
+                    # Raw audio buffer
+                    self.oww_model.preprocessor.raw_data_buffer.extend([0.0]*n_frames*1280)
+
+                    # Feature buffer (get actual column count from buffer shape)
+                    feature_cols = self.oww_model.preprocessor.feature_buffer.shape[1]
+                    self.oww_model.preprocessor.feature_buffer[-n_frames:, :] = np.zeros((n_frames, feature_cols)).astype(np.float32)
+
+                    # Melspectrogram buffer (get actual dimensions from buffer shape)
+                    mel_rows = self.oww_model.preprocessor.melspectrogram_buffer.shape[0]
+                    mel_cols = self.oww_model.preprocessor.melspectrogram_buffer.shape[1]
+                    self.oww_model.preprocessor.melspectrogram_buffer[-mel_rows:, :] = np.zeros((mel_rows, mel_cols)).astype(np.float32)
+                    break
+
+    def found_wake_word(self, frame_data):
+        """Check if wake word was found.
+
+        Args:
+            frame_data (bytes): Deprecated, not used by OpenWakeWord
+
+        Returns:
+            bool: True if wake word was detected
+        """
+        if self.has_found:
+            self.has_found = False
+            return True
+        return False
+
+    def stop(self):
+        """Clean up OpenWakeWord resources."""
+        pass
+
+
 class SnowboyHotWord(HotWordEngine):
     """Snowboy is a thirdparty wake word engine providing an easy training and
     testing interface.
@@ -501,6 +646,7 @@ class HotWordFactory:
     # Build CLASSES dict dynamically - only include pocketsphinx if available
     CLASSES = {
         "precise": PreciseHotword,
+        "openwakeword": OpenWakeWordHotword,
         "snowboy": SnowboyHotWord,
         "porcupine": PorcupineHotWord
     }
