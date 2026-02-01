@@ -557,30 +557,55 @@ echo "==========================================================================
 echo "PHASE 0.5: Setup Configuration Questions"
 echo "=============================================================================="
 
-# Question 1: Custom Wake Word Support (TensorFlow)
+# Question 1: Custom Wake Word Support
+INSTALL_TENSORFLOW=false
+INSTALL_OPENWAKEWORD=false
+
 if [[ "$EXISTING_TENSORFLOW" == true ]]; then
     echo ""
     echo "🎤 CUSTOM WAKE WORD SUPPORT:"
     echo "✅ TensorFlow is already installed in existing virtual environment"
+    echo "   Assuming Precise engine for custom wake words"
     INSTALL_TENSORFLOW=false  # Don't reinstall
+    WAKE_WORD_ENGINE="precise"
 else
     echo ""
     echo "🎤 CUSTOM WAKE WORD SUPPORT:"
-    echo "TensorFlow is required if you want to use OR train custom wake word models."
-    echo "(e.g., 'computer', 'jarvis', etc. instead of 'hey mycroft')"
+    echo "You can use custom wake word models (e.g., 'computer', 'jarvis', etc.)"
+    echo "instead of the default 'hey mycroft'."
     echo ""
-    echo "The default 'hey mycroft' wake word works without TensorFlow."
+    echo "The default 'hey mycroft' wake word works without any additional setup."
     echo ""
-    echo "Do you plan to use custom wake word models? (This requires TensorFlow ~500MB)"
-    read -p "Install TensorFlow for custom wake words? [y/N] (default: no): " -r custom_wake_words
+    read -p "Do you want to use custom wake word models? [y/N] (default: no): " -r custom_wake_words
     CUSTOM_WAKE_WORDS=${custom_wake_words:-N}
 
     if [[ "$CUSTOM_WAKE_WORDS" =~ ^[Yy]$ ]]; then
-        echo "✅ Will install TensorFlow for custom wake word training"
-        INSTALL_TENSORFLOW=true
+        echo ""
+        echo "Choose your wake word engine:"
+        echo ""
+        echo "  1) Precise - Uses TensorFlow (~500MB), trains .pb models"
+        echo "     • Best for: High accuracy, existing Precise models"
+        echo "     • Requires: TensorFlow installation"
+        echo ""
+        echo "  2) OpenWakeWord - Uses ONNX models (~50MB lighter)"
+        echo "     • Best for: Lighter weight, .onnx models"
+        echo "     • Requires: OpenWakeWord + ONNX Runtime"
+        echo ""
+        read -p "Select engine [1=Precise, 2=OpenWakeWord] (default: 1): " -r engine_choice
+        ENGINE_CHOICE=${engine_choice:-1}
+
+        if [[ "$ENGINE_CHOICE" == "2" ]]; then
+            echo "✅ Will install OpenWakeWord for custom wake word training"
+            INSTALL_OPENWAKEWORD=true
+            WAKE_WORD_ENGINE="openwakeword"
+        else
+            echo "✅ Will install Precise (TensorFlow) for custom wake word training"
+            INSTALL_TENSORFLOW=true
+            WAKE_WORD_ENGINE="precise"
+        fi
     else
-        echo "✅ Skipping TensorFlow - using default wake word only"
-        INSTALL_TENSORFLOW=false
+        echo "✅ Skipping custom wake word support - using default wake word only"
+        WAKE_WORD_ENGINE="default"
     fi
 fi
 
@@ -708,7 +733,13 @@ fi
 
 echo ""
 echo "Setup configuration complete:"
-echo "  - Custom wake words: $([ "$INSTALL_TENSORFLOW" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
+if [ "$INSTALL_TENSORFLOW" = true ]; then
+    echo "  - Custom wake words: ✅ Enabled (Precise/TensorFlow)"
+elif [ "$INSTALL_OPENWAKEWORD" = true ]; then
+    echo "  - Custom wake words: ✅ Enabled (OpenWakeWord/ONNX)"
+else
+    echo "  - Custom wake words: ❌ Disabled"
+fi
 echo "  - GPIO support: $([ "$INSTALL_GPIO" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
 echo "  - Python installation: $([ "$INSTALL_PYTHON_VIA_UV" = true ] && echo "✅ Will install 3.11 via uv" || echo "ℹ️  Using $PYTHON_VERSION")"
 echo ""
@@ -1288,8 +1319,55 @@ if [[ "$INSTALL_TENSORFLOW" == true ]]; then
     echo "   - Mycroft will use the standalone binary for optimal performance"
     echo ""
     echo "📖 To use custom wake words, see CUSTOM_WAKE_WORDS.md for configuration examples"
+elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+    echo "Installing OpenWakeWord for custom wake word models..."
+    echo "(Lightweight alternative using ONNX models)"
+    echo ""
+
+    # Install OpenWakeWord packages
+    echo "Installing OpenWakeWord and OVOS plugin..."
+    pip install openwakeword ovos-ww-plugin-openwakeword
+
+    echo "✅ OpenWakeWord packages installed"
+
+    # Create symlinks for training scripts in venv bin
+    if [ -d "openwakeword" ]; then
+        echo ""
+        echo "Creating symlinks for OpenWakeWord training scripts..."
+
+        for script in openwakeword/oww-*.py; do
+            if [ -f "$script" ]; then
+                SCRIPT_NAME=$(basename "$script")
+                # Remove .py extension for cleaner command names
+                LINK_NAME="${SCRIPT_NAME%.py}"
+
+                # Create symlink in venv bin
+                ln -sf "$(pwd)/$script" ".venv/bin/$LINK_NAME"
+                chmod +x "$script"
+                echo "  ✅ $LINK_NAME -> $script"
+            fi
+        done
+
+        echo ""
+        echo "✅ OpenWakeWord training scripts available in venv:"
+        echo "   - oww-collect    (collect wake word samples)"
+        echo "   - oww-train-model (train ONNX models)"
+        echo "   - oww-train-verifier (train verifier models)"
+        echo "   - oww-duplicate-samples (augment training data)"
+        echo "   - oww-listen     (test trained models)"
+    else
+        echo "⚠️  Warning: openwakeword/ directory not found - scripts not linked"
+        echo "   Training tools will need to be run from the openwakeword directory"
+    fi
+
+    echo ""
+    echo "✅ OpenWakeWord setup complete!"
+    echo "   - Runtime: openwakeword + ovos-ww-plugin-openwakeword"
+    echo "   - Training tools: oww-* commands available when venv is active"
+    echo ""
+    echo "📖 To train and use custom wake words, see OPENWAKEWORD_SETUP.md"
 else
-    echo "ℹ️  Skipping TensorFlow and custom wake word support"
+    echo "ℹ️  Skipping custom wake word support"
     echo "   (Default 'hey mycroft' wake word uses pre-built Precise binary with bundled TensorFlow)"
 fi
 
@@ -1675,27 +1753,56 @@ else
   },'
 fi
 
-# Build Precise configuration if custom wake words enabled (prevents version override)
+# Build wake word engine configuration based on user choice
+WAKE_WORD_ENGINE_CONFIG=''
+HOTWORD_CONFIG=''
+
 if [[ "$INSTALL_TENSORFLOW" == true ]] && [[ -f "$HOME/.local/share/mycroft/precise/precise-engine/precise-engine" ]]; then
     echo "Configuring Precise 0.3.0 to prevent auto-downgrade..."
-    PRECISE_CONFIG='"precise": {
+    WAKE_WORD_ENGINE_CONFIG='"precise": {
     "executable": "~/.local/share/mycroft/precise/precise-engine/precise-engine"
   },'
+    HOTWORD_CONFIG='"hey mycroft": {
+      "module": "precise",
+      "phonemes": "HH EY . M AY K R AO F T",
+      "threshold": 1e-90,
+      "lang": "en-us"
+    }'
+elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+    echo "Configuring OpenWakeWord plugin..."
+    WAKE_WORD_ENGINE_CONFIG='"hotwords": {
+      "hey_mycroft": {
+        "module": "ovos-ww-plugin-openwakeword",
+        "model": "hey_mycroft_v0.1",
+        "threshold": 0.5,
+        "lang": "en-us",
+        "listen": true,
+        "sound": "",
+        "debug": false
+      }
+    },'
+    HOTWORD_CONFIG='"hey_mycroft": {
+      "module": "ovos-ww-plugin-openwakeword",
+      "model": "hey_mycroft_v0.1",
+      "threshold": 0.5,
+      "lang": "en-us"
+    }'
 else
-    PRECISE_CONFIG=''
+    # Default Precise configuration (bundled binary)
+    HOTWORD_CONFIG='"hey mycroft": {
+      "module": "precise",
+      "phonemes": "HH EY . M AY K R AO F T",
+      "threshold": 1e-90,
+      "lang": "en-us"
+    }'
 fi
 
 cat > ~/.config/mycroft/mycroft.conf <<EOF
 {
   "max_allowed_core_version": 21.2,
-  $PRECISE_CONFIG
+  $WAKE_WORD_ENGINE_CONFIG
   "hotwords": {
-    "hey mycroft": {
-      "module": "precise",
-      "phonemes": "HH EY . M AY K R AO F T",
-      "threshold": 1e-90,
-      "lang": "en-us"
-    }
+    $HOTWORD_CONFIG
   },
   $LISTENER_CONFIG
   "stt": {
@@ -1728,11 +1835,27 @@ EOF
 
 echo "✅ Created simplified Mycroft configuration (like old working setup)"
 echo "✅ Includes max_allowed_core_version: 21.2 (critical for compatibility)"
-echo "✅ Sets up default 'hey mycroft' wake word with Precise"
+
+if [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+    echo "✅ Sets up default wake word with OpenWakeWord plugin"
+elif [[ "$INSTALL_TENSORFLOW" == true ]]; then
+    echo "✅ Sets up default wake word with Precise 0.3.0 (custom training ready)"
+else
+    echo "✅ Sets up default 'hey mycroft' wake word with Precise"
+fi
+
 echo "✅ Uses simplified audio approach (no complex device detection)"
 echo ""
 echo "Note: This configuration follows the simpler approach that worked in your old setup."
-echo "If you need custom wake words or audio devices, you can edit ~/.config/mycroft/mycroft.conf"
+
+if [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+    echo "For custom OpenWakeWord models, see OPENWAKEWORD_SETUP.md"
+elif [[ "$INSTALL_TENSORFLOW" == true ]]; then
+    echo "For custom Precise models, see CUSTOM_WAKE_WORDS.md"
+else
+    echo "If you need custom wake words or audio devices, you can edit ~/.config/mycroft/mycroft.conf"
+fi
+
 echo "Location configuration can be added later for the weather skill if needed."
 
 echo "=============================================================================="
