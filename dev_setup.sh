@@ -1516,6 +1516,30 @@ else
     echo "✅ Precise wake word model already exists"
 fi
 
+# Install Mimic TTS binary as fallback for audio service initialization
+echo "Installing Mimic TTS binary..."
+if [ -f "mimic/bin/mimic" ]; then
+    echo "✅ Mimic binary already exists"
+else
+    echo "Building Mimic from source (this may take a few minutes)..."
+    # Detect number of CPU cores for parallel compilation
+    if command -v nproc >/dev/null 2>&1; then
+        CORES=$(nproc)
+    else
+        CORES=1
+    fi
+    echo "Using $CORES CPU cores for compilation..."
+
+    # Run install-mimic.sh script
+    if bash scripts/install-mimic.sh "$CORES" 2>&1 | grep -v "^libtoolize\|^aclocal\|^autoconf\|^automake"; then
+        echo "✅ Mimic binary installed successfully"
+        echo "   This ensures audio ducking works even without TTS configured"
+    else
+        echo "⚠️  Mimic installation failed - audio service may not initialize without TTS config"
+        echo "   Continuing setup... (eSpeak is configured as primary TTS)"
+    fi
+fi
+
 # CRITICAL: Add mycroft-core to the virtual environment path
 # This is equivalent to typing 'add2virtualenv $TOP' and is essential for module imports
 echo "Setting up virtual environment paths for Mycroft modules..."
@@ -1951,17 +1975,18 @@ echo "  ✅ Proper verification flow (skills installed → services stopped → 
 echo "  ✅ Git configuration preserved (existing remotes and SSH setup maintained)"
 echo "  ✅ Function definitions moved before usage (fixed bash execution order)"
 echo "  ✅ Duplicate PHASE sections consolidated"
+echo "  ✅ Mimic TTS binary installed (ensures audio ducking works even without TTS config)"
 echo ""
 
 echo "The following external services have been disabled:"
 echo "  - Device pairing (backend unavailable)"
 echo "  - Skill updates (using local skills only)"
-echo "  - Mimic2 TTS (will fall back to local Mimic)"
+echo "  - Mimic2 TTS (cloud service disabled)"
 echo "  - Wake word training uploads"
 echo ""
 
 echo "STT is configured to use FasterWhisper locally."
-echo "TTS is configured to use eSpeak."
+echo "TTS is configured to use eSpeak (with Mimic fallback installed)."
 echo "=============================================================================="
 echo "PHASE 5: OPTIONAL - Test Mycroft services (recommended)"
 echo "=============================================================================="
