@@ -71,6 +71,27 @@ python openwakeword/oww-train-model.py \
 - `--variations`: Number of augmented variations per sample (e.g., 60)
 - `--epochs`: Training epochs (see tips below for optimal range)
 
+### oww-duplicate-samples.py
+Duplicates audio samples for data balancing. Useful for emphasizing critical negative samples during training.
+
+```bash
+python openwakeword/oww-duplicate-samples.py \
+  --sample <path_to_sample.wav> --count <number> \
+  --sample <path_to_another.wav> --count <number>
+```
+
+- Each `--count` adds that many duplicates ON TOP of existing ones
+- Automatically detects existing duplicates and continues numbering
+- Gracefully expands digit width as needed (01-99, then 100-999, etc.)
+- Files created as: `original_name_dup_01.wav`, `original_name_dup_02.wav`, etc.
+
+**Example:**
+```bash
+python openwakeword/oww-duplicate-samples.py \
+  --sample "./not-wake-word/talking_sample.wav" --count 15 \
+  --sample "./not-wake-word/false_positives.wav" --count 80
+```
+
 ### oww-train-verifier.py (Optional)
 Trains a custom verifier model for additional false positive reduction.
 
@@ -151,6 +172,17 @@ If you're experiencing too many false positives, the issue is often data imbalan
 - Duplicate specific problematic phrases that cause false triggers
 
 This emphasizes negative examples during training without requiring more unique audio recordings.
+
+**Using oww-duplicate-samples.py:**
+```bash
+# Duplicate critical negative samples
+python openwakeword/oww-duplicate-samples.py \
+  --sample "./not-wake-word/long_conversation.wav" --count 15 \
+  --sample "./not-wake-word/false_positive_triggers.wav" --count 80 \
+  --sample "./not-wake-word/similar_sounding_words.wav" --count 80
+```
+
+The count adds duplicates on top of any existing ones, so you can run it multiple times to incrementally add more emphasis.
 
 ### Example Training Commands
 
