@@ -575,6 +575,8 @@ FasterWhisper (the STT engine) can use NVIDIA GPU acceleration to **significantl
 
 **Note:** The setup script already includes GPU support in `start-mycroft.sh`. If you don't have NVIDIA/CUDA, the path is simply ignored (no errors).
 
+**For GPU-accelerated training** (custom wake words), see the [GPU Acceleration for Training](#gpu-acceleration-for-training-pytorchcuda) section below.
+
 #### **Setup Steps:**
 
 1. **Verify CUDA installation:**
@@ -665,6 +667,183 @@ cat /proc/PID/environ | tr '\0' '\n' | grep LD_LIBRARY_PATH
 - Verify compute capability is 6.0+ with `nvidia-smi`
 - Ensure CUDA version matches driver version
 - Check `/var/log/mycroft/voice.log` for error messages
+
+---
+
+### **GPU Acceleration for Training (PyTorch/CUDA)**
+
+**Important Distinction:** There are two separate GPU acceleration systems in Mycroft:
+
+| Feature | Runtime Inference (STT) | Training (Wake Words) |
+|---------|------------------------|----------------------|
+| **Status** | ✅ Included by default | ⚠️ Optional (requires setup) |
+| **Library** | `ctranslate2` | `PyTorch` |
+| **Installed?** | Yes (with FasterWhisper) | No (manual installation) |
+| **Purpose** | GPU speech-to-text | Train custom wake word models |
+| **CUDA Source** | System libs (`/usr/lib/`) | Bundled with PyTorch |
+| **Venv Packages** | `faster-whisper`, `ctranslate2` | `torch`, `torchvision`, `torchaudio` |
+| **Config** | `"use_cuda": true` in STT | Install via pip (see below) |
+| **When Needed** | Every voice command | Only when training models |
+
+**Key Points:**
+- ✅ **Runtime STT GPU acceleration works immediately** after enabling in config - no extra packages needed
+- ❌ **Training GPU acceleration requires PyTorch installation** - not included by default
+- 🎯 **If you only use Mycroft (not training), you don't need PyTorch**
+- 📦 **Both can coexist** - ctranslate2 for inference, PyTorch for training
+
+If you want to train custom wake word models (OpenWakeWord or Precise), you'll benefit from GPU acceleration during training. This requires installing **PyTorch with CUDA support**.
+
+#### **Determining Your CUDA Version**
+
+**Step 1: Check your NVIDIA driver version**
+```bash
+nvidia-smi
+```
+
+Look at the top right corner for driver version:
+```
+Driver Version: 535.154.05    CUDA Version: 12.2
+```
+
+**Step 2: Match driver to compatible CUDA versions**
+
+Your **driver version** determines which CUDA versions you can use:
+
+| Driver Version | Supported CUDA Versions | Recommended PyTorch CUDA |
+|----------------|-------------------------|--------------------------|
+| 450.x - 524.x  | CUDA 11.x only          | `cu118` (CUDA 11.8)      |
+| 525.x - 536.x  | CUDA 11.x or 12.x       | `cu121` or `cu124`       |
+| 537.x+         | CUDA 11.x or 12.x       | `cu124` (CUDA 12.4)      |
+
+**Important:** The "CUDA Version" shown by `nvidia-smi` is the **maximum** CUDA version your driver supports, not what's currently installed. You can use any CUDA version up to that maximum.
+
+**Step 3: Check what system CUDA is installed (if any)**
+```bash
+nvcc --version  # Shows installed CUDA toolkit version (if installed)
+```
+
+**Note:** You don't need to match PyTorch's CUDA version with system CUDA. PyTorch bundles its own CUDA runtime libraries.
+
+#### **Installing PyTorch with CUDA**
+
+Activate your virtual environment first:
+```bash
+source .venv/bin/activate
+```
+
+**For modern drivers (525+) - Use CUDA 12.4:**
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+```
+
+**For older drivers (450-524) - Use CUDA 11.8:**
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+```
+
+**For CPU-only (no GPU):**
+```bash
+pip install torch torchvision torchaudio
+```
+
+#### **Verifying PyTorch CUDA Installation**
+
+```bash
+python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda if torch.cuda.is_available() else \"N/A\"}')"
+```
+
+Expected output with GPU:
+```
+PyTorch version: 2.6.0+cu124
+CUDA available: True
+CUDA version: 12.4
+```
+
+#### **Complete Setup for OpenWakeWord Training**
+
+If you want to train custom OpenWakeWord models with GPU acceleration, you need:
+
+**1. Install PyTorch with CUDA** (see instructions above)
+
+**2. Install additional dependencies:**
+```bash
+source .venv/bin/activate
+pip install speechbrain  # Audio processing for training
+```
+
+**3. Copy training scripts** (if not already present):
+```bash
+# Training scripts should be in openwakeword/ directory
+# If missing, you need the oww-train-model.py, oww-collect.py, etc.
+```
+
+**4. Verify GPU is available:**
+```bash
+python -c "import torch; print(f'GPU available: {torch.cuda.is_available()}')"
+# Should print: GPU available: True
+```
+
+**5. Start training:**
+```bash
+# See OPENWAKEWORD_SETUP.md for complete training workflow
+oww-train-model --help
+```
+
+#### **GPU Requirements for Training**
+
+**OpenWakeWord Training (recommended for custom wake words):**
+- **Minimum:** 4GB VRAM (GTX 1650, RTX 2060)
+- **Recommended:** 6GB+ VRAM (RTX 3060, RTX 4060)
+- Training time: 3-10 minutes per 1000 epochs with GPU vs 30-60 minutes on CPU
+- Dependencies: PyTorch + CUDA, speechbrain
+- See `OPENWAKEWORD_SETUP.md` for complete training instructions
+
+**Precise Training (TensorFlow-based):**
+- **Minimum:** 6GB VRAM (GTX 1660, RTX 2060)
+- **Recommended:** 8GB+ VRAM (RTX 3070, RTX 4070)
+- Training time: 10-30 minutes per session with GPU vs 2-4 hours on CPU
+- Dependencies: TensorFlow (installed if you chose Precise during setup)
+- See `CUSTOM_WAKE_WORDS.md` for training instructions
+
+#### **CUDA Version Compatibility Matrix**
+
+| Component | CUDA 11.8 | CUDA 12.1 | CUDA 12.4 | Notes |
+|-----------|-----------|-----------|-----------|-------|
+| **PyTorch 2.6+** | ✅ | ✅ | ✅ | All versions supported |
+| **ONNX Runtime** | ✅ | ✅ | ✅ | Runtime for OpenWakeWord models |
+| **TensorFlow 2.12** | ✅ | ⚠️ | ⚠️ | Prefers CUDA 11.8 (Precise training) |
+| **FasterWhisper** | ✅ | ✅ | ✅ | Uses system CUDA libs, not PyTorch |
+
+**Recommendations:**
+- **New setups with driver 525+:** Use CUDA 12.4 (best performance, latest features)
+- **Older drivers (450-524):** Use CUDA 11.8 (maximum compatibility)
+- **Mixed workloads (Precise + OpenWakeWord):** Use CUDA 11.8 (best TensorFlow compatibility)
+
+#### **Troubleshooting CUDA Installation**
+
+**"CUDA out of memory" errors during training:**
+- Reduce batch size in training scripts
+- Use a smaller model architecture
+- Close other GPU applications (browsers, games)
+- Check VRAM usage: `nvidia-smi`
+
+**PyTorch can't find CUDA:**
+```bash
+# Check if you accidentally installed CPU-only version
+pip show torch | grep Version
+# Should show: Version: 2.6.0+cu124 (or cu118/cu121)
+# If just "2.6.0" with no +cu*, reinstall with correct index URL
+```
+
+**Multiple CUDA versions causing conflicts:**
+- PyTorch bundles its own CUDA runtime - this is normal and expected
+- Different packages can use different CUDA versions without conflicts
+- System CUDA (`/usr/local/cuda`) is only needed for FasterWhisper STT
+
+**AMD GPU users:**
+- AMD GPUs don't support CUDA (NVIDIA proprietary)
+- Limited support via ROCm (experimental, not covered here)
+- Recommend CPU-only training or cloud GPU services
 
 ---
 

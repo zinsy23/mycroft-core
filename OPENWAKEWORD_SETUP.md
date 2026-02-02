@@ -4,6 +4,7 @@ This guide covers training and using OpenWakeWord models in a Mycroft/OVOS envir
 
 ## Table of Contents
 - [Overview](#overview)
+- [Prerequisites](#prerequisites)
 - [Scripts](#scripts)
 - [Training Models](#training-models)
 - [Configuration](#configuration)
@@ -17,6 +18,65 @@ This guide covers training and using OpenWakeWord models in a Mycroft/OVOS envir
 OpenWakeWord uses a pre-trained Google CNN (speech embedding model) that produces audio embeddings, followed by a small feed-forward classifier network that you train. This is fundamentally different from systems like Precise that use MFCCs (mathematical features).
 
 **Key Difference**: Because OpenWakeWord relies on deep learned embeddings, it expects varied/augmented data during training. Raw duplicate samples will cause overfitting and poor generalization.
+
+---
+
+## Prerequisites
+
+### Runtime vs Training Requirements
+
+**Important:** There are two different use cases with different requirements:
+
+#### 1. **Using Pre-trained OpenWakeWord Models (Runtime)**
+✅ Already included in default Mycroft setup - no additional packages needed!
+
+**What you have:**
+- `openwakeword` package (for loading .onnx models)
+- `ovos-ww-plugin-openwakeword` (Mycroft integration)
+- `onnxruntime` (runs trained models efficiently)
+
+**What it's for:**
+- Using existing OpenWakeWord models in Mycroft
+- Real-time wake word detection
+- No GPU required (CPU inference is fast enough)
+
+#### 2. **Training Custom OpenWakeWord Models**
+⚠️ Requires additional packages - **PyTorch with CUDA for GPU acceleration**
+
+**What you need to install:**
+
+```bash
+# Activate your virtual environment
+source .venv/bin/activate
+
+# Install PyTorch with CUDA 12.4 (for modern NVIDIA drivers 525+)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+# For older drivers (450-524), use CUDA 11.8:
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# Install audio processing library
+pip install speechbrain
+
+# Verify GPU is available
+python -c "import torch; print(f'GPU available: {torch.cuda.is_available()}')"
+```
+
+**GPU Recommendations:**
+- **Minimum:** 4GB VRAM (GTX 1650, RTX 2060)
+- **Recommended:** 6GB+ VRAM (RTX 3060, RTX 4060)
+- **Training time:** 3-10 minutes per 1000 epochs with GPU vs 30-60+ minutes on CPU
+
+**Why PyTorch and not ctranslate2?**
+- `ctranslate2` is for **inference** (running trained models) - fast, lightweight
+- `PyTorch` is for **training** (creating models) - includes backpropagation, optimizers, GPU acceleration
+- The OpenWakeWord training scripts use PyTorch's neural network training capabilities
+- After training, models are exported to ONNX format for efficient inference
+
+**See the main README's "GPU Acceleration for Training" section for:**
+- How to determine your CUDA version
+- Detailed driver compatibility
+- Troubleshooting GPU issues
 
 ---
 
@@ -126,6 +186,8 @@ sudo rm /swapfile
 ---
 
 ## Training Models
+
+> **⚠️ Before training:** Make sure you have PyTorch with CUDA installed! See the [Prerequisites](#prerequisites) section above for installation instructions. Training without GPU will be 5-10x slower.
 
 ### Why Augmentation is Required
 
