@@ -583,25 +583,28 @@ else
         echo ""
         echo "Choose your wake word engine:"
         echo ""
-        echo "  1) Precise - Uses TensorFlow (~500MB), trains .pb models"
-        echo "     • Best for: High accuracy, existing Precise models"
-        echo "     • Requires: TensorFlow installation"
+        echo "  1) OpenWakeWord (Recommended) - Train new models"
+        echo "     • Modern, lightweight ONNX models"
+        echo "     • Full training support in this environment"
+        echo "     • GPU training via PyTorch (optional)"
         echo ""
-        echo "  2) OpenWakeWord - Uses ONNX models (~50MB lighter)"
-        echo "     • Best for: Lighter weight, .onnx models"
-        echo "     • Requires: OpenWakeWord + ONNX Runtime"
+        echo "  2) Precise - Use existing .pb model files only"
+        echo "     • For users with existing TensorFlow 1.x Precise models"
+        echo "     • Runtime engine only (no training tools)"
+        echo "     • Note: Training tools require separate TF1 environment"
         echo ""
-        read -p "Select engine [1=Precise, 2=OpenWakeWord] (default: 1): " -r engine_choice
+        read -p "Select engine [1=OpenWakeWord, 2=Precise] (default: 1): " -r engine_choice
         ENGINE_CHOICE=${engine_choice:-1}
 
         if [[ "$ENGINE_CHOICE" == "2" ]]; then
+            echo "✅ Will use Precise runtime (for existing .pb models)"
+            echo "   Note: Place your .pb model in ~/.local/share/mycroft/precise/"
+            INSTALL_TENSORFLOW=false
+            WAKE_WORD_ENGINE="precise"
+        else
             echo "✅ Will install OpenWakeWord for custom wake word training"
             INSTALL_OPENWAKEWORD=true
             WAKE_WORD_ENGINE="openwakeword"
-        else
-            echo "✅ Will install Precise (TensorFlow) for custom wake word training"
-            INSTALL_TENSORFLOW=true
-            WAKE_WORD_ENGINE="precise"
         fi
     else
         echo "✅ Skipping custom wake word support - using default wake word only"
@@ -733,10 +736,10 @@ fi
 
 echo ""
 echo "Setup configuration complete:"
-if [ "$INSTALL_TENSORFLOW" = true ]; then
-    echo "  - Custom wake words: ✅ Enabled (Precise/TensorFlow)"
+if [ "$WAKE_WORD_ENGINE" = "precise" ]; then
+    echo "  - Custom wake words: ✅ Enabled (Precise runtime only)"
 elif [ "$INSTALL_OPENWAKEWORD" = true ]; then
-    echo "  - Custom wake words: ✅ Enabled (OpenWakeWord/ONNX)"
+    echo "  - Custom wake words: ✅ Enabled (OpenWakeWord with training)"
 else
     echo "  - Custom wake words: ❌ Disabled"
 fi
@@ -1253,72 +1256,72 @@ else
     POCKETSPHINX_INSTALLED=false
 fi
 
-# Install TensorFlow if custom wake words are enabled
-if [[ "$INSTALL_TENSORFLOW" == true ]]; then
-    echo "Installing Precise 0.3.0 for custom wake word models..."
-    echo "(Includes both training tools and optimized runtime)"
-
-    # Install TensorFlow and mycroft-precise Python package for training tools
+# Install wake word engine based on user selection
+if [[ "$WAKE_WORD_ENGINE" == "precise" ]]; then
+    echo "=============================================================================="
+    echo "Setting up Precise runtime for existing wake word models..."
+    echo "=============================================================================="
     echo ""
-    echo "Installing training tools (precise-train, precise-collect, etc.)..."
-
-    # Install numpy first with version compatible with TensorFlow 2.12.0
-    pip install 'numpy<1.24,>=1.22'
-
-    # Install TensorFlow
-    pip install tensorflow==2.12.0
-
-    # Install mycroft-precise without dependencies
-    pip install mycroft-precise==0.3.0 --no-deps
-
-    # Install dependencies with version constraints to avoid conflicts
-    # Use older prettyparse (0.2.0) and fitipy (0.1.2) for compatibility
-    pip install attrs 'fitipy<1.0' h5py pyache sonopy keras speechpy-fast wavio 'prettyparse<1.0' typing
-
-    echo "✅ Training tools installed in venv"
+    echo "NOTE: This setup installs RUNTIME ONLY (no training tools)"
+    echo ""
+    echo "To train new Precise models, use a separate Python 3.7 environment:"
+    echo "  1. Clone: https://github.com/MycroftAI/mycroft-precise"
+    echo "  2. Follow: https://github.com/MycroftAI/mycroft-precise/wiki/Training-your-own-wake-word"
+    echo "  3. Use Python 3.7 venv (required for TensorFlow 1.x compatibility)"
+    echo ""
+    echo "Once trained, place your .pb model in ~/.local/share/mycroft/precise/"
+    echo ""
 
     # Download and extract Precise 0.3.0 pre-built binary for runtime
-    echo ""
-    echo "Installing standalone Precise 0.3.0 binary for runtime (faster inference)..."
     PRECISE_DIR="$HOME/.local/share/mycroft/precise"
     mkdir -p "$PRECISE_DIR"
 
-    ARCH=$(uname -m)
-    if [[ "$ARCH" == "x86_64" ]]; then
-        PRECISE_URL="https://github.com/MycroftAI/mycroft-precise/releases/download/v0.3.0/precise-engine_0.3.0_x86_64.tar.gz"
-    elif [[ "$ARCH" == "aarch64" ]]; then
-        PRECISE_URL="https://github.com/MycroftAI/mycroft-precise/releases/download/v0.3.0/precise-engine_0.3.0_aarch64.tar.gz"
+    # Check if precise-engine already exists
+    if [[ -f "$PRECISE_DIR/precise-engine/precise-engine" ]]; then
+        echo "✅ Precise runtime binary already installed"
+        "$PRECISE_DIR/precise-engine/precise-engine" --version 2>/dev/null || true
     else
-        echo "⚠️  Warning: Unsupported architecture $ARCH for Precise 0.3.0"
-        echo "   Custom wake words may not work. Continuing anyway..."
-        PRECISE_URL=""
-    fi
+        echo "Downloading Precise 0.3.0 runtime binary..."
 
-    if [[ -n "$PRECISE_URL" ]]; then
-        echo "Downloading Precise 0.3.0 binary for $ARCH..."
-        if wget -q --show-progress "$PRECISE_URL" -O "$PRECISE_DIR/precise-engine_0.3.0_${ARCH}.tar.gz"; then
-            echo "Extracting Precise 0.3.0 binary..."
-            tar -xzf "$PRECISE_DIR/precise-engine_0.3.0_${ARCH}.tar.gz" -C "$PRECISE_DIR"
-
-            if [[ -f "$PRECISE_DIR/precise-engine/precise-engine" ]]; then
-                chmod +x "$PRECISE_DIR/precise-engine/precise-engine"
-                echo "✅ Precise 0.3.0 runtime binary installed successfully"
-                "$PRECISE_DIR/precise-engine/precise-engine" --version
-            else
-                echo "⚠️  Warning: Precise binary extraction may have failed"
-            fi
+        ARCH=$(uname -m)
+        if [[ "$ARCH" == "x86_64" ]]; then
+            PRECISE_URL="https://github.com/MycroftAI/mycroft-precise/releases/download/v0.3.0/precise-engine_0.3.0_x86_64.tar.gz"
+        elif [[ "$ARCH" == "aarch64" ]]; then
+            PRECISE_URL="https://github.com/MycroftAI/mycroft-precise/releases/download/v0.3.0/precise-engine_0.3.0_aarch64.tar.gz"
+        elif [[ "$ARCH" == "armv7l" ]]; then
+            PRECISE_URL="https://github.com/MycroftAI/mycroft-precise/releases/download/v0.3.0/precise-engine_0.3.0_armv7l.tar.gz"
         else
-            echo "⚠️  Warning: Failed to download Precise 0.3.0 binary"
+            echo "⚠️  Warning: Unsupported architecture $ARCH for Precise 0.3.0"
+            echo "   Supported: x86_64, aarch64, armv7l"
+            echo "   Precise wake words may not work. Continuing anyway..."
+            PRECISE_URL=""
+        fi
+
+        if [[ -n "$PRECISE_URL" ]]; then
+            if wget -q --show-progress "$PRECISE_URL" -O "$PRECISE_DIR/precise-engine_0.3.0_${ARCH}.tar.gz"; then
+                echo "Extracting Precise 0.3.0 binary..."
+                tar -xzf "$PRECISE_DIR/precise-engine_0.3.0_${ARCH}.tar.gz" -C "$PRECISE_DIR"
+
+                if [[ -f "$PRECISE_DIR/precise-engine/precise-engine" ]]; then
+                    chmod +x "$PRECISE_DIR/precise-engine/precise-engine"
+                    echo "✅ Precise 0.3.0 runtime binary installed successfully"
+                    "$PRECISE_DIR/precise-engine/precise-engine" --version
+                else
+                    echo "⚠️  Warning: Precise binary extraction may have failed"
+                fi
+            else
+                echo "⚠️  Warning: Failed to download Precise 0.3.0 binary"
+                echo "   You can manually download and extract to: $PRECISE_DIR"
+            fi
         fi
     fi
 
     echo ""
-    echo "✅ Precise 0.3.0 complete setup finished!"
-    echo "   - Training tools: precise-train, precise-collect, precise-convert, etc."
+    echo "✅ Precise runtime setup complete!"
     echo "   - Runtime binary: ~/.local/share/mycroft/precise/precise-engine/precise-engine"
-    echo "   - Mycroft will use the standalone binary for optimal performance"
+    echo "   - Place your .pb models in: ~/.local/share/mycroft/precise/"
+    echo "   - No training tools installed (use separate Python 3.7 environment)"
     echo ""
-    echo "📖 To use custom wake words, see CUSTOM_WAKE_WORDS.md for configuration examples"
 elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
     echo "Installing OpenWakeWord for custom wake word models..."
     echo "(Lightweight alternative using ONNX models)"
