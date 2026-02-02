@@ -1324,11 +1324,11 @@ elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
     echo "(Lightweight alternative using ONNX models)"
     echo ""
 
-    # Install OpenWakeWord packages
+    # Install OpenWakeWord packages with pinned versions (known-good for mycroft-core)
     echo "Installing OpenWakeWord and OVOS plugin..."
-    pip install openwakeword ovos-ww-plugin-openwakeword
+    pip install openwakeword==0.6.0 ovos-ww-plugin-openwakeword==0.4.1
 
-    echo "✅ OpenWakeWord packages installed"
+    echo "✅ OpenWakeWord packages installed (pinned to known-good versions)"
 
     # Create symlinks for training scripts in venv bin
     if [ -d "openwakeword" ]; then
@@ -1545,9 +1545,10 @@ source .venv/bin/activate
 echo "Installing additional STT requirements..."
 pip install -r requirements/extra-stt.txt || echo "Some STT extras failed, continuing..."
 
-# Install ovos-stt-plugin-fasterwhisper for local STT
-echo "Installing FasterWhisper STT plugin..."
-pip install ovos-stt-plugin-fasterwhisper
+# Verify ovos-stt-plugin-fasterwhisper is installed at pinned version
+# (Already in requirements-offline.txt, this ensures correct version after extra-stt.txt)
+echo "Verifying FasterWhisper STT plugin at correct pinned version..."
+pip install --no-deps ovos-stt-plugin-fasterwhisper==0.2.0
 
 # Pre-download Precise wake word model to avoid runtime download issues
 echo "Pre-downloading Precise wake word model..."

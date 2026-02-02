@@ -31,28 +31,47 @@ Pillow>=8.3.2
 pyee==8.1.0
 
 # Mycroft core components
-lingua-franca>=0.4.2
-msm>=0.8.9
+# Pinned to known-good versions for stability
+lingua-franca==0.4.3
+msm==0.9.0
 # Use older messagebus client to avoid threading issues (will be patched)
 mycroft-messagebus-client==0.9.6
 adapt-parser>=0.3.0
 padaos>=0.1.9
 petact>=0.1.2
-precise-runner
+precise-runner==0.3.1
 
 # Intent parsing (padatious) - critical for skills
 # padatious>=0.4.8  # Installed separately due to fann2 dependency issues
 # xxhash  # Required dependency for padatious, installed separately
 
 # Wake word detection (Precise) - TensorFlow installed conditionally if needed
-precise-runner  # Core Precise engine (works with default wake word)
+# precise-runner already listed above at line 42 with pinned version
 
 # Optional components (may fail on some systems)
 # fann2>=1.0.7  # padatious dependency, will be handled with dummy module
 # msk>=0.3.16
 
-# STT plugin for offline operation
-ovos-stt-plugin-fasterwhisper
+# OVOS packages - pinned to known-good versions for mycroft-core compatibility
+# DO NOT upgrade - newer versions (2.x) are designed for OVOS-core, not mycroft-core
+# These versions have been tested and confirmed working with mycroft-core
+# Ordered: base dependencies first, then packages that depend on them
+ovos-utils==0.8.4
+ovos-config==0.0.12
+ovos-bus-client==1.3.7
+ovos-plugin-manager==0.9.0
+
+# STT dependencies - pinned for stability
+# ctranslate2 is the inference backend, faster-whisper uses it
+ctranslate2==4.6.2
+faster-whisper==1.2.1
+
+# OVOS STT plugin (requires all of the above)
+ovos-stt-plugin-fasterwhisper==0.2.0
+
+# Wake word plugin for OpenWakeWord (optional - installed if selected during setup)
+# ovos-ww-plugin-openwakeword==0.4.1
+# openwakeword==0.6.0
 
 # Dependencies for working skills only
 # ifaddr>=0.1.0        # Was for mycroft-ip (removed)
