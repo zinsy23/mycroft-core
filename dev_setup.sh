@@ -734,6 +734,83 @@ else
     fi
 fi
 
+# Question 4: GPU Acceleration for Speech-to-Text
+echo ""
+echo "🎮 GPU ACCELERATION FOR SPEECH-TO-TEXT:"
+
+# Check if NVIDIA GPU is available
+GPU_AVAILABLE=false
+GPU_COMPUTE_CAP=0
+GPU_NAME=""
+ENABLE_STT_GPU=false
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    # Try to get GPU info
+    GPU_INFO=$(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader 2>/dev/null || echo "")
+    if [ -n "$GPU_INFO" ]; then
+        # Parse first GPU (could be improved to handle multiple GPUs)
+        GPU_NAME=$(echo "$GPU_INFO" | head -1 | cut -d',' -f1 | xargs)
+        GPU_COMPUTE_CAP=$(echo "$GPU_INFO" | head -1 | cut -d',' -f2 | xargs)
+
+        echo "Detected NVIDIA GPU: $GPU_NAME (Compute Capability $GPU_COMPUTE_CAP)"
+        echo ""
+
+        # Check if compute capability is sufficient
+        # Use bc for floating point comparison, fallback to basic check if bc not available
+        if command -v bc >/dev/null 2>&1; then
+            if (( $(echo "$GPU_COMPUTE_CAP >= 7.0" | bc -l) )); then
+                GPU_AVAILABLE=true
+            fi
+        else
+            # Fallback: convert to integer comparison (7.0 -> 70, 8.6 -> 86)
+            GPU_COMPUTE_INT=$(echo "$GPU_COMPUTE_CAP" | tr -d '.' | cut -c1-2)
+            if [ "$GPU_COMPUTE_INT" -ge 70 ]; then
+                GPU_AVAILABLE=true
+            fi
+        fi
+
+        if [ "$GPU_AVAILABLE" = true ]; then
+            echo "✅ GPU is compatible with CUDA acceleration!"
+            echo ""
+            echo "Speech-to-Text (FasterWhisper) can use your GPU for much faster transcription:"
+            echo "  - CPU: ~2-5x realtime (slower than speaking)"
+            echo "  - GPU: ~10-30x realtime (nearly instant)"
+            echo ""
+            echo "Note: This requires ~1.5 GB of CUDA runtime libraries"
+            echo "      (nvidia-cudnn, nvidia-cublas, nvidia-cuda-runtime)"
+            echo ""
+
+            read -p "Enable GPU acceleration for Speech-to-Text? [Y/n] (default: yes): " -r enable_stt_gpu
+            ENABLE_STT_GPU_INPUT=${enable_stt_gpu:-Y}
+
+            if [[ "$ENABLE_STT_GPU_INPUT" =~ ^[Yy]$ ]]; then
+                ENABLE_STT_GPU=true
+                echo "✅ GPU acceleration will be enabled for Speech-to-Text"
+            else
+                ENABLE_STT_GPU=false
+                echo "ℹ️  GPU acceleration disabled - Speech-to-Text will use CPU"
+            fi
+        else
+            echo "⚠️  GPU compute capability $GPU_COMPUTE_CAP is below minimum 7.0"
+            echo ""
+            echo "Modern PyTorch and optimized inference engines require compute capability >= 7.0"
+            echo "Your GPU: $GPU_NAME (CC $GPU_COMPUTE_CAP)"
+            echo "Minimum required: NVIDIA Volta architecture or newer (GTX 1650, RTX series, etc.)"
+            echo ""
+            echo "Speech-to-Text will use CPU (slower but still functional)"
+            ENABLE_STT_GPU=false
+        fi
+    else
+        echo "⚠️  nvidia-smi found but couldn't query GPU info"
+        echo "Speech-to-Text will use CPU"
+        ENABLE_STT_GPU=false
+    fi
+else
+    echo "No NVIDIA GPU detected (nvidia-smi not found)"
+    echo "Speech-to-Text will use CPU"
+    ENABLE_STT_GPU=false
+fi
+
 echo ""
 echo "Setup configuration complete:"
 if [ "$WAKE_WORD_ENGINE" = "precise" ]; then
@@ -745,6 +822,7 @@ else
 fi
 echo "  - GPIO support: $([ "$INSTALL_GPIO" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
 echo "  - Python installation: $([ "$INSTALL_PYTHON_VIA_UV" = true ] && echo "✅ Will install 3.11 via uv" || echo "ℹ️  Using $PYTHON_VERSION")"
+echo "  - GPU acceleration (STT): $([ "$ENABLE_STT_GPU" = true ] && echo "✅ Enabled ($GPU_NAME)" || echo "❌ Disabled (CPU only)")"
 echo ""
 
 # PHASE 1: Virtual Environment Setup (using answers from Phase 0.5)
@@ -1553,6 +1631,20 @@ pip install -r requirements/extra-stt.txt || echo "Some STT extras failed, conti
 echo "Verifying FasterWhisper STT plugin at correct pinned version..."
 pip install --no-deps ovos-stt-plugin-fasterwhisper==0.2.0
 
+# Install CUDA runtime libraries if GPU acceleration was enabled
+if [[ "$ENABLE_STT_GPU" == true ]]; then
+    echo ""
+    echo "Installing NVIDIA CUDA runtime libraries for GPU acceleration..."
+    pip install nvidia-cudnn-cu12>=9.1.0 nvidia-cublas-cu12>=12.4.0 nvidia-cuda-runtime-cu12>=12.4.0
+    if [ $? -eq 0 ]; then
+        echo "✅ CUDA runtime libraries installed successfully"
+    else
+        echo "⚠️  Warning: CUDA runtime library installation failed"
+        echo "   GPU acceleration may not work. You can try installing manually:"
+        echo "   pip install nvidia-cudnn-cu12 nvidia-cublas-cu12 nvidia-cuda-runtime-cu12"
+    fi
+fi
+
 # Pre-download Precise wake word model (only if using Precise or default wake word)
 if [[ "$INSTALL_OPENWAKEWORD" != true ]]; then
     echo "Pre-downloading Precise wake word model..."
@@ -1807,7 +1899,7 @@ cat > ~/.config/mycroft/mycroft.conf <<EOF
     "module": "ovos-stt-plugin-fasterwhisper",
     "ovos-stt-plugin-fasterwhisper": {
       "model": "base.en",
-      "use_cuda": false,
+      "use_cuda": $([ "$ENABLE_STT_GPU" = true ] && echo "true" || echo "false"),
       "language": "en"
     }
   },

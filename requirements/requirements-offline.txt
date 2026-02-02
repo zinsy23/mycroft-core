@@ -66,6 +66,9 @@ ovos-plugin-manager==0.9.0
 ctranslate2==4.6.2
 faster-whisper==1.2.1
 
+# NOTE: CUDA runtime libraries (nvidia-cudnn-cu12, nvidia-cublas-cu12, nvidia-cuda-runtime-cu12)
+# are installed separately by dev_setup.sh if user enables GPU acceleration for STT
+
 # OVOS STT plugin (requires all of the above)
 ovos-stt-plugin-fasterwhisper==0.2.0
 
