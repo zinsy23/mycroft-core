@@ -27,7 +27,8 @@ pkg-config --exists icu-i18n || export LDFLAGS="$LDFLAGS -licui18n -licuuc -licu
 
 # download and install mimic
 if [ ! -d ${MIMIC_DIR} ] ; then
-    git clone --branch ${MIMIC_VERSION} https://github.com/MycroftAI/mimic.git --depth=1
+    # Clone shallow with specific tag (suppress detached HEAD warning)
+    git -c advice.detachedHead=false clone --depth=1 --branch ${MIMIC_VERSION} https://github.com/MycroftAI/mimic.git
     cd ${MIMIC_DIR}
     ./autogen.sh
     ./configure --with-audio=alsa --enable-shared --prefix="$(pwd)"

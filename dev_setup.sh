@@ -1553,12 +1553,13 @@ pip install -r requirements/extra-stt.txt || echo "Some STT extras failed, conti
 echo "Verifying FasterWhisper STT plugin at correct pinned version..."
 pip install --no-deps ovos-stt-plugin-fasterwhisper==0.2.0
 
-# Pre-download Precise wake word model to avoid runtime download issues
-echo "Pre-downloading Precise wake word model..."
-PRECISE_DIR="$HOME/.local/share/mycroft/precise"
-mkdir -p "$PRECISE_DIR"
+# Pre-download Precise wake word model (only if using Precise or default wake word)
+if [[ "$INSTALL_OPENWAKEWORD" != true ]]; then
+    echo "Pre-downloading Precise wake word model..."
+    PRECISE_DIR="$HOME/.local/share/mycroft/precise"
+    mkdir -p "$PRECISE_DIR"
 
-if [ ! -f "$PRECISE_DIR/hey-mycroft.pb" ]; then
+    if [ ! -f "$PRECISE_DIR/hey-mycroft.pb" ]; then
     echo "Downloading 'hey mycroft' wake word model..."
     DOWNLOAD_SUCCESS=false
     
@@ -1594,8 +1595,11 @@ if [ ! -f "$PRECISE_DIR/hey-mycroft.pb" ]; then
         echo "⚠️  Failed to download Precise model - will download at runtime"
         echo "   This is OK - Mycroft will attempt to download it when starting"
     fi
+    else
+        echo "✅ Precise wake word model already exists"
+    fi
 else
-    echo "✅ Precise wake word model already exists"
+    echo "ℹ️  Skipping Precise model download (using OpenWakeWord)"
 fi
 
 # Install Mimic TTS binary as fallback for audio service initialization
@@ -1774,17 +1778,7 @@ if [[ "$INSTALL_TENSORFLOW" == true ]] && [[ -f "$HOME/.local/share/mycroft/prec
     }'
 elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
     echo "Configuring OpenWakeWord plugin..."
-    WAKE_WORD_ENGINE_CONFIG='"hotwords": {
-      "hey_mycroft": {
-        "module": "ovos-ww-plugin-openwakeword",
-        "model": "hey_mycroft_v0.1",
-        "threshold": 0.5,
-        "lang": "en-us",
-        "listen": true,
-        "sound": "",
-        "debug": false
-      }
-    },'
+    WAKE_WORD_ENGINE_CONFIG=''  # No extra config needed
     HOTWORD_CONFIG='"hey_mycroft": {
       "module": "ovos-ww-plugin-openwakeword",
       "model": "hey_mycroft_v0.1",
