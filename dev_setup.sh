@@ -650,7 +650,7 @@ if [[ "$(uname -m)" =~ ^(arm|aarch64|armv7l).*$ ]]; then
     fi
 
     # Method 5: Check /proc/cpuinfo for Broadcom/Pi indicators
-    if [[ -f "/proc/cpuinfo" ]] && $(grep -c "BCM\|Raspberry Pi\|Broadcom" /proc/cpuinfo 2>/dev/null) -gt 0; then
+    if [[ -f "/proc/cpuinfo" ]] && [[ $(grep -c "BCM\|Raspberry Pi\|Broadcom" /proc/cpuinfo 2>/dev/null) -gt 0 ]]; then
         echo "✅ Raspberry Pi detected via CPU information"
         RPI_DETECTED=true
     fi
