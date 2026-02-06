@@ -1440,6 +1440,93 @@ elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
 
     echo "✅ OpenWakeWord packages installed (pinned to known-good versions)"
 
+    # Ask about installing training dependencies
+    INSTALL_OWW_TRAINING=false
+    echo ""
+    echo "🎓 OPENWAKEWORD TRAINING DEPENDENCIES:"
+    echo "To train custom wake word models, you need PyTorch and training libraries (~4-6 GB)."
+    echo ""
+    echo "You can install these now, or later when you run 'oww-train-model' for the first time."
+    echo ""
+
+    if [[ "$GPU_AVAILABLE" == true ]]; then
+        echo "✅ GPU detected - training will be much faster with CUDA support"
+        echo "   Installing now will also ensure GPU STT and training use compatible CUDA libraries."
+        echo ""
+    fi
+
+    read -p "Install training dependencies now? [Y/n] (default: yes): " -r install_training
+    INSTALL_TRAINING_INPUT=${install_training:-Y}
+
+    if [[ "$INSTALL_TRAINING_INPUT" =~ ^[Yy]$ ]]; then
+        INSTALL_OWW_TRAINING=true
+        echo "✅ Will install training dependencies"
+
+        echo ""
+        echo "📦 Installing PyTorch and training dependencies..."
+        echo "   This may take several minutes (~4-6 GB download)..."
+        echo ""
+
+        # Install PyTorch with CUDA support if GPU available
+        if [[ "$GPU_AVAILABLE" == true ]]; then
+            echo "1️⃣  Installing PyTorch with CUDA 12.4 support..."
+            pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+
+            if [ $? -eq 0 ]; then
+                echo "✅ PyTorch with CUDA installed successfully"
+                # Mark that we've installed CUDA libraries via PyTorch
+                CUDA_LIBS_INSTALLED=true
+            else
+                echo "⚠️  Warning: PyTorch installation failed"
+                echo "   Training will still work on CPU, but will be slower"
+            fi
+        else
+            echo "1️⃣  Installing PyTorch (CPU-only)..."
+            pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0
+
+            if [ $? -eq 0 ]; then
+                echo "✅ PyTorch (CPU) installed successfully"
+            else
+                echo "⚠️  Warning: PyTorch installation failed"
+            fi
+        fi
+
+        # Install audio processing libraries (with correct numpy version)
+        echo ""
+        echo "2️⃣  Installing audio processing libraries..."
+        pip install torchinfo==1.8.0 torchmetrics==1.8.2 soundfile==0.13.1 librosa==0.11.0
+
+        # Install audio augmentation libraries (with correct soxr version)
+        echo ""
+        echo "3️⃣  Installing audio augmentation libraries..."
+        pip install audiomentations==0.43.1 torch-audiomentations==0.12.0
+
+        # Install additional training utilities
+        echo ""
+        echo "4️⃣  Installing additional training utilities..."
+        pip install speechbrain==1.0.3 pronouncing==0.2.0 webrtcvad==2.0.10
+        pip install pydub==0.25.1 mutagen==1.47.0 acoustics==0.2.6
+        pip install matplotlib==3.10.8 pandas==3.0.0
+
+        echo ""
+        echo "✅ All training dependencies installed successfully!"
+
+        # Verify PyTorch installation
+        python3 << 'VERIFY_EOF'
+import sys
+try:
+    import torch
+    cuda_available = torch.cuda.is_available()
+    print(f"\n✓ PyTorch {torch.__version__} ({'CUDA' if cuda_available else 'CPU'})")
+    if cuda_available:
+        print(f"✓ CUDA device: {torch.cuda.get_device_name(0)}")
+except Exception as e:
+    print(f"\n⚠️  Warning: Could not verify PyTorch: {e}", file=sys.stderr)
+VERIFY_EOF
+    else
+        echo "⏭️  Skipping training dependencies - you can install them later with 'oww-train-model'"
+    fi
+
     # Create symlinks for training scripts in venv bin
     if [ -d "openwakeword" ]; then
         echo ""
@@ -1473,6 +1560,11 @@ elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
     echo ""
     echo "✅ OpenWakeWord setup complete!"
     echo "   - Runtime: openwakeword + ovos-ww-plugin-openwakeword"
+    if [[ "$INSTALL_OWW_TRAINING" == true ]]; then
+        echo "   - Training: PyTorch + all dependencies installed"
+    else
+        echo "   - Training: Dependencies can be installed later with 'oww-train-model'"
+    fi
     echo "   - Training tools: oww-* commands available when venv is active"
     echo ""
     echo "📖 To train and use custom wake words, see OPENWAKEWORD_SETUP.md"
@@ -1661,16 +1753,23 @@ echo "Verifying FasterWhisper STT plugin at correct pinned version..."
 pip install --no-deps ovos-stt-plugin-fasterwhisper==0.2.0
 
 # Install CUDA runtime libraries if GPU acceleration was enabled
+# Skip if PyTorch already installed them (from OpenWakeWord training setup)
 if [[ "$ENABLE_STT_GPU" == true ]]; then
-    echo ""
-    echo "Installing NVIDIA CUDA runtime libraries for GPU acceleration..."
-    pip install "nvidia-cudnn-cu12>=9.1.0" "nvidia-cublas-cu12>=12.4.0" "nvidia-cuda-runtime-cu12>=12.4.0"
-    if [ $? -eq 0 ]; then
-        echo "✅ CUDA runtime libraries installed successfully"
+    if [[ "$CUDA_LIBS_INSTALLED" == true ]]; then
+        echo ""
+        echo "ℹ️  CUDA libraries already installed via PyTorch - skipping separate installation"
+        echo "   GPU acceleration for STT and training will use the same CUDA 12.4 libraries"
     else
-        echo "⚠️  Warning: CUDA runtime library installation failed"
-        echo "   GPU acceleration may not work. You can try installing manually:"
-        echo "   pip install nvidia-cudnn-cu12 nvidia-cublas-cu12 nvidia-cuda-runtime-cu12"
+        echo ""
+        echo "Installing NVIDIA CUDA runtime libraries for GPU acceleration..."
+        pip install "nvidia-cudnn-cu12>=9.1.0" "nvidia-cublas-cu12>=12.4.0" "nvidia-cuda-runtime-cu12>=12.4.0"
+        if [ $? -eq 0 ]; then
+            echo "✅ CUDA runtime libraries installed successfully"
+        else
+            echo "⚠️  Warning: CUDA runtime library installation failed"
+            echo "   GPU acceleration may not work. You can try installing manually:"
+            echo "   pip install nvidia-cudnn-cu12 nvidia-cublas-cu12 nvidia-cuda-runtime-cu12"
+        fi
     fi
 fi
 
@@ -2237,6 +2336,9 @@ echo "  ✅ Git configuration preserved (existing remotes and SSH setup maintain
 echo "  ✅ Function definitions moved before usage (fixed bash execution order)"
 echo "  ✅ Duplicate PHASE sections consolidated"
 echo "  ✅ Mimic TTS binary installed (ensures audio ducking works even without TTS config)"
+if [[ "$INSTALL_OWW_TRAINING" == true ]] && [[ "$ENABLE_STT_GPU" == true ]]; then
+    echo "  ✅ Unified CUDA libraries for GPU STT and wake word training (PyTorch 2.6.0 CUDA 12.4)"
+fi
 echo ""
 
 echo "The following external services have been disabled:"

@@ -25,9 +25,7 @@ import sys
 from pathlib import Path
 
 def check_dependencies():
-    """Check if all required dependencies are installed, and offer to install if missing."""
-    import subprocess
-
+    """Check if all required dependencies are installed."""
     # Check if dependencies are already installed
     try:
         import torch
@@ -38,99 +36,28 @@ def check_dependencies():
         return True
     except ImportError as e:
         print(f"⚠️  Missing training dependency: {e}")
-        print("\nOpenWakeWord training requires PyTorch and additional dependencies.")
-        print("These are large packages (~4-6 GB) but only needed for training custom wake words.")
         print()
-
-        # Check if NVIDIA GPU is available for acceleration
-        gpu_available = False
-        try:
-            result = subprocess.run(['nvidia-smi', '--query-gpu=name,compute_cap', '--format=csv,noheader'],
-                                  capture_output=True, text=True, timeout=5)
-            if result.returncode == 0 and result.stdout.strip():
-                gpu_info = result.stdout.strip().split('\n')
-                print("🎮 NVIDIA GPU(s) detected:")
-                for gpu in gpu_info:
-                    name, compute_cap = gpu.rsplit(',', 1)
-                    compute_cap = float(compute_cap.strip())
-                    print(f"   • {name.strip()} (Compute Capability {compute_cap})")
-                    if compute_cap >= 7.0:
-                        gpu_available = True
-
-                if gpu_available:
-                    print("\n✅ GPU acceleration supported! Training will be much faster with CUDA.")
-                else:
-                    print("\n⚠️  GPU compute capability < 7.0 - PyTorch requires 7.0+ for CUDA support.")
-                    print("   Training will use CPU only.")
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            print("ℹ️  No NVIDIA GPU detected - training will use CPU (slower).")
-
+        print("❌ OpenWakeWord training requires PyTorch and additional dependencies.")
         print()
-        response = input("Install training dependencies now? [Y/n]: ").strip().lower()
-        if response == 'n':
-            print("❌ Training dependencies required. Exiting.")
-            return False
-
-        print("\n📦 Installing training dependencies...")
-        print("   This may take several minutes...")
-
-        try:
-            # Install PyTorch with CUDA support if GPU available
-            if gpu_available:
-                print("\n1️⃣  Installing PyTorch with CUDA 12.4 support...")
-                subprocess.check_call([
-                    sys.executable, '-m', 'pip', 'install',
-                    'torch', 'torchvision', 'torchaudio',
-                    '--index-url', 'https://download.pytorch.org/whl/cu124'
-                ])
-            else:
-                print("\n1️⃣  Installing PyTorch (CPU-only)...")
-                subprocess.check_call([
-                    sys.executable, '-m', 'pip', 'install',
-                    'torch', 'torchvision', 'torchaudio'
-                ])
-
-            # Install training-specific dependencies
-            print("\n2️⃣  Installing audio processing libraries...")
-            subprocess.check_call([
-                sys.executable, '-m', 'pip', 'install',
-                'torchinfo', 'torchmetrics', 'soundfile', 'librosa'
-            ])
-
-            print("\n3️⃣  Installing audio augmentation libraries...")
-            subprocess.check_call([
-                sys.executable, '-m', 'pip', 'install',
-                'audiomentations', 'torch-audiomentations'
-            ])
-
-            print("\n4️⃣  Installing additional training utilities...")
-            subprocess.check_call([
-                sys.executable, '-m', 'pip', 'install',
-                'speechbrain', 'pronouncing', 'webrtcvad',
-                'pydub', 'mutagen', 'acoustics', 'matplotlib', 'pandas'
-            ])
-
-            print("\n✅ All dependencies installed successfully!")
-
-            # Verify installation
-            import torch
-            print(f"\n✓ PyTorch {torch.__version__} ({'CUDA' if torch.cuda.is_available() else 'CPU'})")
-            if gpu_available and not torch.cuda.is_available():
-                print("\n⚠️  Warning: GPU was detected but PyTorch can't access CUDA.")
-                print("   Make sure NVIDIA drivers are installed and CUDA runtime libraries are available.")
-                print("   Training will continue on CPU.")
-
-            return True
-
-        except subprocess.CalledProcessError as e:
-            print(f"\n❌ Installation failed: {e}")
-            print("\nYou can try installing manually with:")
-            print("  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124")
-            print("  pip install torchinfo torchmetrics soundfile librosa")
-            print("  pip install audiomentations torch-audiomentations")
-            print("  pip install speechbrain pronouncing webrtcvad")
-            print("  pip install pydub mutagen acoustics matplotlib pandas")
-            return False
+        print("To install training dependencies, re-run the setup script:")
+        print("  cd ~/mycroft-core")
+        print("  bash dev_setup.sh")
+        print()
+        print("When prompted about OpenWakeWord, choose 'Yes' and then 'Yes' to install training dependencies.")
+        print()
+        print("Alternatively, you can install manually (CPU only):")
+        print("  pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0")
+        print("  pip install torchinfo==1.8.0 torchmetrics==1.8.2 soundfile==0.13.1 librosa==0.11.0")
+        print("  pip install audiomentations==0.43.1 torch-audiomentations==0.12.0")
+        print("  pip install speechbrain==1.0.3 pronouncing==0.2.0 webrtcvad==2.0.10")
+        print("  pip install pydub==0.25.1 mutagen==1.47.0 acoustics==0.2.6")
+        print("  pip install matplotlib==3.10.8 pandas==3.0.0")
+        print()
+        print("For GPU support (CUDA 12.4), use:")
+        print("  pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 \\")
+        print("    --index-url https://download.pytorch.org/whl/cu124")
+        print()
+        return False
 
 def prepare_training_data(positive_dir, negative_dir, wake_word, clip_length=3,
                          augmentation_type='full', variations_per_sample=1):
@@ -668,15 +595,72 @@ Examples:
         sys.exit(1)
 
     # Interactive or command-line mode
-    if not all([args.wake_word, args.positive_dir, args.negative_dir]):
-        wake_word, positive_dir, negative_dir, clip_length, n_epochs, output_path, augmentation_type, variations_per_sample = interactive_mode()
+    # Check if required arguments are provided (not None)
+    missing_args = []
+    if args.wake_word is None:
+        missing_args.append('--wake-word')
+    if args.positive_dir is None:
+        missing_args.append('--positive-dir')
+    if args.negative_dir is None:
+        missing_args.append('--negative-dir')
+
+    if missing_args:
+        # Enter interactive mode for missing arguments only
+        print(f"\n⚠️  Missing required arguments: {', '.join(missing_args)}")
+        print("Entering interactive mode...\n")
+
+        # Get wake word (prompt if missing, use provided if available)
+        if args.wake_word is None:
+            wake_word = input("Wake word phrase: ").strip()
+            if not wake_word:
+                print("ERROR: Wake word is required")
+                sys.exit(1)
+        else:
+            wake_word = args.wake_word
+            print(f"Wake word: {wake_word}")
+
+        # Get positive directory (prompt if missing, use provided if available)
+        if args.positive_dir is None:
+            positive_dir = input(f"Path to '{wake_word}' positive samples directory: ").strip()
+            positive_dir = os.path.expanduser(positive_dir)
+            if not os.path.isdir(positive_dir):
+                print(f"ERROR: Directory not found: {positive_dir}")
+                sys.exit(1)
+        else:
+            positive_dir = args.positive_dir
+            print(f"Positive samples: {positive_dir}")
+
+        # Get negative directory (prompt if missing, use provided if available)
+        if args.negative_dir is None:
+            negative_dir = input(f"Path to negative/background samples directory: ").strip()
+            negative_dir = os.path.expanduser(negative_dir)
+            if not os.path.isdir(negative_dir):
+                print(f"ERROR: Directory not found: {negative_dir}")
+                sys.exit(1)
+        else:
+            negative_dir = args.negative_dir
+            print(f"Negative samples: {negative_dir}")
+
+        # Use optional arguments from command line or defaults
+        clip_length = args.clip_length
+        n_epochs = args.epochs
+        output_path = args.output if args.output else f"{wake_word.replace(' ', '_')}.onnx"
+        augmentation_type = args.augmentation
+        variations_per_sample = args.variations
+
+        print(f"\nUsing settings:")
+        print(f"  Output: {output_path}")
+        print(f"  Augmentation: {augmentation_type}")
+        print(f"  Variations: {variations_per_sample}")
+        print(f"  Epochs: {n_epochs}")
     else:
+        # All required arguments provided - use command line mode
         wake_word = args.wake_word
         positive_dir = args.positive_dir
         negative_dir = args.negative_dir
         clip_length = args.clip_length
         n_epochs = args.epochs
-        output_path = args.output
+        output_path = args.output if args.output else f"{wake_word.replace(' ', '_')}.onnx"
         augmentation_type = args.augmentation
         variations_per_sample = args.variations
 
