@@ -743,33 +743,63 @@ GPU_AVAILABLE=false
 GPU_COMPUTE_CAP=0
 GPU_NAME=""
 ENABLE_STT_GPU=false
+COMPATIBLE_GPU_NAME=""
+BEST_COMPUTE_CAP=0
 
 if command -v nvidia-smi >/dev/null 2>&1; then
-    # Try to get GPU info
+    # Try to get GPU info for ALL GPUs
     GPU_INFO=$(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader 2>/dev/null || echo "")
     if [ -n "$GPU_INFO" ]; then
-        # Parse first GPU (could be improved to handle multiple GPUs)
-        GPU_NAME=$(echo "$GPU_INFO" | head -1 | cut -d',' -f1 | xargs)
-        GPU_COMPUTE_CAP=$(echo "$GPU_INFO" | head -1 | cut -d',' -f2 | xargs)
+        echo "Detected NVIDIA GPU(s):"
 
-        echo "Detected NVIDIA GPU: $GPU_NAME (Compute Capability $GPU_COMPUTE_CAP)"
+        # Check each GPU and find the best compatible one
+        while IFS= read -r gpu_line; do
+            GPU_NAME=$(echo "$gpu_line" | cut -d',' -f1 | xargs)
+            GPU_COMPUTE_CAP=$(echo "$gpu_line" | cut -d',' -f2 | xargs)
+
+            echo "  • $GPU_NAME (Compute Capability $GPU_COMPUTE_CAP)"
+
+            # Check if this GPU meets minimum requirements
+            GPU_MEETS_REQ=false
+            if command -v bc >/dev/null 2>&1; then
+                if (( $(echo "$GPU_COMPUTE_CAP >= 7.0" | bc -l) )); then
+                    GPU_MEETS_REQ=true
+                fi
+            else
+                # Fallback: convert to integer comparison (7.0 -> 70, 8.6 -> 86)
+                GPU_COMPUTE_INT=$(echo "$GPU_COMPUTE_CAP" | tr -d '.' | cut -c1-2)
+                if [ "$GPU_COMPUTE_INT" -ge 70 ]; then
+                    GPU_MEETS_REQ=true
+                fi
+            fi
+
+            # Track the best compatible GPU
+            if [ "$GPU_MEETS_REQ" = true ]; then
+                # Compare compute capabilities
+                if command -v bc >/dev/null 2>&1; then
+                    if (( $(echo "$GPU_COMPUTE_CAP > $BEST_COMPUTE_CAP" | bc -l) )); then
+                        BEST_COMPUTE_CAP=$GPU_COMPUTE_CAP
+                        COMPATIBLE_GPU_NAME=$GPU_NAME
+                        GPU_AVAILABLE=true
+                    fi
+                else
+                    # Fallback integer comparison
+                    GPU_CAP_INT=$(echo "$GPU_COMPUTE_CAP" | tr -d '.')
+                    BEST_CAP_INT=$(echo "$BEST_COMPUTE_CAP" | tr -d '.')
+                    if [ "$GPU_CAP_INT" -gt "$BEST_CAP_INT" ]; then
+                        BEST_COMPUTE_CAP=$GPU_COMPUTE_CAP
+                        COMPATIBLE_GPU_NAME=$GPU_NAME
+                        GPU_AVAILABLE=true
+                    fi
+                fi
+            fi
+        done <<< "$GPU_INFO"
+
         echo ""
 
-        # Check if compute capability is sufficient
-        # Use bc for floating point comparison, fallback to basic check if bc not available
-        if command -v bc >/dev/null 2>&1; then
-            if (( $(echo "$GPU_COMPUTE_CAP >= 7.0" | bc -l) )); then
-                GPU_AVAILABLE=true
-            fi
-        else
-            # Fallback: convert to integer comparison (7.0 -> 70, 8.6 -> 86)
-            GPU_COMPUTE_INT=$(echo "$GPU_COMPUTE_CAP" | tr -d '.' | cut -c1-2)
-            if [ "$GPU_COMPUTE_INT" -ge 70 ]; then
-                GPU_AVAILABLE=true
-            fi
-        fi
-
         if [ "$GPU_AVAILABLE" = true ]; then
+            echo "✅ Compatible GPU found: $COMPATIBLE_GPU_NAME (CC $BEST_COMPUTE_CAP)"
+            echo ""
             echo "✅ GPU is compatible with CUDA acceleration!"
             echo ""
             echo "Speech-to-Text (FasterWhisper) can use your GPU for much faster transcription:"
@@ -791,10 +821,9 @@ if command -v nvidia-smi >/dev/null 2>&1; then
                 echo "ℹ️  GPU acceleration disabled - Speech-to-Text will use CPU"
             fi
         else
-            echo "⚠️  GPU compute capability $GPU_COMPUTE_CAP is below minimum 7.0"
+            echo "⚠️  No compatible GPU found (all GPUs have compute capability < 7.0)"
             echo ""
             echo "Modern PyTorch and optimized inference engines require compute capability >= 7.0"
-            echo "Your GPU: $GPU_NAME (CC $GPU_COMPUTE_CAP)"
             echo "Minimum required: NVIDIA Volta architecture or newer (GTX 1650, RTX series, etc.)"
             echo ""
             echo "Speech-to-Text will use CPU (slower but still functional)"
@@ -822,7 +851,7 @@ else
 fi
 echo "  - GPIO support: $([ "$INSTALL_GPIO" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
 echo "  - Python installation: $([ "$INSTALL_PYTHON_VIA_UV" = true ] && echo "✅ Will install 3.11 via uv" || echo "ℹ️  Using $PYTHON_VERSION")"
-echo "  - GPU acceleration (STT): $([ "$ENABLE_STT_GPU" = true ] && echo "✅ Enabled ($GPU_NAME)" || echo "❌ Disabled (CPU only)")"
+echo "  - GPU acceleration (STT): $([ "$ENABLE_STT_GPU" = true ] && echo "✅ Enabled ($COMPATIBLE_GPU_NAME)" || echo "❌ Disabled (CPU only)")"
 echo ""
 
 # PHASE 1: Virtual Environment Setup (using answers from Phase 0.5)
@@ -1842,6 +1871,7 @@ if [ "$POCKETSPHINX_INSTALLED" = true ]; then
     LISTENER_CONFIG='"listener": {
     "wake_word": "hey mycroft",
     "stand_up_word": "wake up",
+    "mute_during_output": true,
     "sample_rate": 16000
   },'
 else
@@ -1849,6 +1879,7 @@ else
     LISTENER_CONFIG='"listener": {
     "wake_word": "hey mycroft",
     "stand_up_word": "",
+    "mute_during_output": true,
     "sample_rate": 16000
   },'
 fi
@@ -1871,9 +1902,10 @@ if [[ "$INSTALL_TENSORFLOW" == true ]] && [[ -f "$HOME/.local/share/mycroft/prec
 elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
     echo "Configuring OpenWakeWord plugin..."
     WAKE_WORD_ENGINE_CONFIG=''  # No extra config needed
-    HOTWORD_CONFIG='"hey_mycroft": {
+    HOTWORD_CONFIG='"hey mycroft": {
       "module": "ovos-ww-plugin-openwakeword",
-      "model": "hey_mycroft_v0.1",
+      "models": ["hey_mycroft"],
+      "inference_framework": "onnx",
       "threshold": 0.5,
       "lang": "en-us"
     }'
@@ -1898,7 +1930,7 @@ cat > ~/.config/mycroft/mycroft.conf <<EOF
   "stt": {
     "module": "ovos-stt-plugin-fasterwhisper",
     "ovos-stt-plugin-fasterwhisper": {
-      "model": "base.en",
+      "model": "$([ "$ENABLE_STT_GPU" = true ] && echo "medium.en" || echo "base.en")",
       "use_cuda": $([ "$ENABLE_STT_GPU" = true ] && echo "true" || echo "false"),
       "language": "en"
     }
