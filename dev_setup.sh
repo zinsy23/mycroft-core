@@ -863,6 +863,47 @@ else
     ENABLE_STT_GPU=false
 fi
 
+# Question 5: Training Dependencies (only if OpenWakeWord selected)
+INSTALL_OWW_TRAINING=false
+if [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+    echo ""
+    echo "🎓 WAKE WORD TRAINING DEPENDENCIES (OpenWakeWord):"
+    echo "To train custom wake word models, you need PyTorch and training libraries."
+    echo ""
+    echo "Download size: ~4-6 GB"
+    echo ""
+
+    if [[ "$GPU_AVAILABLE" == true ]] && [[ "$ENABLE_STT_GPU" == true ]]; then
+        echo "✅ GPU acceleration will be used for both STT and training:"
+        echo "   • Speech-to-Text: ~10-30x realtime (nearly instant)"
+        echo "   • Wake Word Training: 3-10 min per 1000 epochs (vs 30-60 min on CPU)"
+        echo ""
+        echo "💡 Installing now ensures compatible CUDA libraries for both."
+        echo "   Recommended: Install now to take full advantage of your GPU."
+    elif [[ "$GPU_AVAILABLE" == true ]]; then
+        echo "✅ GPU available - training will use GPU acceleration:"
+        echo "   • Wake Word Training: 3-10 min per 1000 epochs (vs 30-60 min on CPU)"
+        echo ""
+        echo "💡 Note: You declined GPU for STT, but training will still use GPU."
+    else
+        echo "ℹ️  No compatible GPU - training will use CPU (slower but functional):"
+        echo "   • Wake Word Training: 30-60+ min per 1000 epochs"
+    fi
+    echo ""
+    echo "You can skip this now and install later when you run 'oww-train-model'."
+    echo ""
+
+    read -p "Install training dependencies now? [Y/n] (default: yes): " -r install_training
+    INSTALL_TRAINING_INPUT=${install_training:-Y}
+
+    if [[ "$INSTALL_TRAINING_INPUT" =~ ^[Yy]$ ]]; then
+        INSTALL_OWW_TRAINING=true
+        echo "✅ Will install training dependencies (~4-6 GB download during setup)"
+    else
+        echo "⏭️  Skipping training dependencies - you can install them later with 'oww-train-model'"
+    fi
+fi
+
 echo ""
 echo "Setup configuration complete:"
 if [ "$WAKE_WORD_ENGINE" = "precise" ]; then
@@ -875,6 +916,9 @@ fi
 echo "  - GPIO support: $([ "$INSTALL_GPIO" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
 echo "  - Python installation: $([ "$INSTALL_PYTHON_VIA_UV" = true ] && echo "✅ Will install 3.11 via uv" || echo "ℹ️  Using $PYTHON_VERSION")"
 echo "  - GPU acceleration (STT): $([ "$ENABLE_STT_GPU" = true ] && echo "✅ Enabled ($COMPATIBLE_GPU_NAME)" || echo "❌ Disabled (CPU only)")"
+if [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+    echo "  - Training dependencies: $([ "$INSTALL_OWW_TRAINING" = true ] && echo "✅ Will install during setup" || echo "⏭️  Skip (install later)")"
+fi
 echo ""
 
 # PHASE 1: Virtual Environment Setup (using answers from Phase 0.5)
@@ -1463,28 +1507,8 @@ elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
 
     echo "✅ OpenWakeWord packages installed (pinned to known-good versions)"
 
-    # Ask about installing training dependencies
-    INSTALL_OWW_TRAINING=false
-    echo ""
-    echo "🎓 OPENWAKEWORD TRAINING DEPENDENCIES:"
-    echo "To train custom wake word models, you need PyTorch and training libraries (~4-6 GB)."
-    echo ""
-    echo "You can install these now, or later when you run 'oww-train-model' for the first time."
-    echo ""
-
-    if [[ "$GPU_AVAILABLE" == true ]]; then
-        echo "✅ GPU detected - training will be much faster with CUDA support"
-        echo "   Installing now will also ensure GPU STT and training use compatible CUDA libraries."
-        echo ""
-    fi
-
-    read -p "Install training dependencies now? [Y/n] (default: yes): " -r install_training
-    INSTALL_TRAINING_INPUT=${install_training:-Y}
-
-    if [[ "$INSTALL_TRAINING_INPUT" =~ ^[Yy]$ ]]; then
-        INSTALL_OWW_TRAINING=true
-        echo "✅ Will install training dependencies"
-
+    # Install training dependencies if user requested them earlier
+    if [[ "$INSTALL_OWW_TRAINING" == true ]]; then
         echo ""
         echo "📦 Installing PyTorch and training dependencies..."
         echo "   This may take several minutes (~4-6 GB download)..."
