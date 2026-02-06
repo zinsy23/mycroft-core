@@ -1763,30 +1763,6 @@ except Exception as e:
     print("   This is OK - Mycroft will attempt to download it when starting")
 ENDPYTHON
 
-# Install Mimic TTS binary as fallback for audio service initialization
-echo "Installing Mimic TTS binary..."
-if [ -f "mimic/bin/mimic" ]; then
-    echo "✅ Mimic binary already exists"
-else
-    echo "Building Mimic from source (this may take a few minutes)..."
-    # Detect number of CPU cores for parallel compilation
-    if command -v nproc >/dev/null 2>&1; then
-        CORES=$(nproc)
-    else
-        CORES=1
-    fi
-    echo "Using $CORES CPU cores for compilation..."
-
-    # Run install-mimic.sh script
-    if bash scripts/install-mimic.sh "$CORES" 2>&1 | grep -v "^libtoolize\|^aclocal\|^autoconf\|^automake"; then
-        echo "✅ Mimic binary installed successfully"
-        echo "   This ensures audio ducking works even without TTS configured"
-    else
-        echo "⚠️  Mimic installation failed - audio service may not initialize without TTS config"
-        echo "   Continuing setup... (eSpeak is configured as primary TTS)"
-    fi
-fi
-
 # CRITICAL: Add mycroft-core to the virtual environment path
 # This is equivalent to typing 'add2virtualenv $TOP' and is essential for module imports
 echo "Setting up virtual environment paths for Mycroft modules..."
