@@ -34,7 +34,7 @@ pyee==8.1.0
 # Pinned to known-good versions for stability
 lingua-franca==0.4.3
 msm==0.9.0
-msk==0.3.16
+msk==0.4.0
 # Use older messagebus client to avoid threading issues (will be patched)
 mycroft-messagebus-client==0.9.6
 adapt-parser>=0.3.0
