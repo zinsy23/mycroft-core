@@ -734,9 +734,13 @@ else
     fi
 fi
 
-# Question 4: GPU Acceleration for Speech-to-Text
+# Question 4: GPU Acceleration
 echo ""
-echo "🎮 GPU ACCELERATION FOR SPEECH-TO-TEXT:"
+if [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+    echo "🎮 GPU ACCELERATION (Speech-to-Text & Wake Word Training):"
+else
+    echo "🎮 GPU ACCELERATION FOR SPEECH-TO-TEXT:"
+fi
 
 # Check if NVIDIA GPU is available
 GPU_AVAILABLE=false
@@ -802,15 +806,34 @@ if command -v nvidia-smi >/dev/null 2>&1; then
             echo ""
             echo "✅ GPU is compatible with CUDA acceleration!"
             echo ""
-            echo "Speech-to-Text (FasterWhisper) can use your GPU for much faster transcription:"
-            echo "  - CPU: ~2-5x realtime (slower than speaking)"
-            echo "  - GPU: ~10-30x realtime (nearly instant)"
+
+            # Customize message based on what GPU will be used for
+            if [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+                echo "GPU can accelerate both Speech-to-Text and wake word training:"
+                echo ""
+                echo "Speech-to-Text (FasterWhisper):"
+                echo "  - CPU: ~2-5x realtime (slower than speaking)"
+                echo "  - GPU: ~10-30x realtime (nearly instant)"
+                echo ""
+                echo "Wake Word Training (if you install training dependencies later):"
+                echo "  - CPU: 30-60+ minutes per 1000 epochs"
+                echo "  - GPU: 3-10 minutes per 1000 epochs"
+            else
+                echo "Speech-to-Text (FasterWhisper) can use your GPU for much faster transcription:"
+                echo "  - CPU: ~2-5x realtime (slower than speaking)"
+                echo "  - GPU: ~10-30x realtime (nearly instant)"
+            fi
+
             echo ""
             echo "Note: This requires ~1.5 GB of CUDA runtime libraries"
             echo "      (nvidia-cudnn, nvidia-cublas, nvidia-cuda-runtime)"
             echo ""
 
-            read -p "Enable GPU acceleration for Speech-to-Text? [Y/n] (default: yes): " -r enable_stt_gpu
+            if [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+                read -p "Enable GPU acceleration? [Y/n] (default: yes): " -r enable_stt_gpu
+            else
+                read -p "Enable GPU acceleration for Speech-to-Text? [Y/n] (default: yes): " -r enable_stt_gpu
+            fi
             ENABLE_STT_GPU_INPUT=${enable_stt_gpu:-Y}
 
             if [[ "$ENABLE_STT_GPU_INPUT" =~ ^[Yy]$ ]]; then
