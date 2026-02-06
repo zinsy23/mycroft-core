@@ -123,10 +123,63 @@ This setup takes longer than the original Mycroft installation because we're bui
 ## 🎵 **Current Technology Stack**
 
 ### **Speech-to-Text (STT)**
-- **Engine**: OVOS FasterWhisper
-- **Model**: Whisper (local, ~300MB)
+- **Engine**: OVOS FasterWhisper (default)
+- **Model**: Whisper base.en (~140MB) or medium.en with GPU (~1.5GB)
 - **Quality**: High accuracy, offline operation
 - **Language**: English (expandable)
+
+#### **Alternative STT: Google Cloud Speech API**
+
+Speech-to-Text (STT) is the component that **transcribes your spoken commands into text** after the wake word is detected. When you say "Hey Mycroft, what time is it", the STT engine converts "what time is it" into text so Mycroft can understand and process your command.
+
+By default, this uses **FasterWhisper** running locally on your device. However, for systems with limited resources (like Raspberry Pi), you can use **Google's cloud-based STT service** instead, which offloads the speech transcription processing to Google's servers.
+
+**When to use Google STT:**
+- Low-power devices (Raspberry Pi) where local Whisper transcription is slow
+- When you have reliable internet connectivity
+- When you want faster speech-to-text transcription without local processing
+
+**Requirements:**
+- Internet connection
+- Google Cloud account with Speech-to-Text API enabled (for `googlecloud` module)
+- API credentials (JSON key file) for `googlecloud` module
+- The Google API client library is already installed by default
+
+**Configuration** (`~/.config/mycroft/mycroft.conf`):
+
+For basic Google STT (uses free API):
+```json
+{
+  "stt": {
+    "module": "google",
+    "google": {
+      "lang": "en-US"
+    }
+  }
+}
+```
+
+For Google Cloud STT with service account (requires credentials):
+```json
+{
+  "stt": {
+    "module": "googlecloud",
+    "googlecloud": {
+      "lang": "en-US",
+      "credential": {
+        "json": "/path/to/service-account-key.json"
+      }
+    }
+  }
+}
+```
+
+**Trade-offs:**
+- ✅ **Faster transcription** than CPU-based Whisper on low-power devices
+- ✅ **Offloads processing** to cloud (saves local resources)
+- ❌ **Requires internet** (won't work offline)
+- ❌ **Privacy concern** (audio sent to Google servers)
+- ❌ **May incur costs** beyond free tier limits
 
 ### **Text-to-Speech (TTS)**
 - **Engine**: eSpeak
@@ -233,6 +286,277 @@ This setup takes longer than the original Mycroft installation because we're bui
 
 # List installed skills
 ./bin/mycroft-msk list
+```
+
+---
+
+## 🛠️ **Creating Custom Skills**
+
+Mycroft's skill system allows you to add custom voice commands and functionality. Skills are automatically loaded from `/opt/mycroft/skills/`.
+
+### **Quick Start: Creating a New Skill**
+
+**Method 1: Using mycroft-msk (recommended)**
+```bash
+cd ~/mycroft-core
+./bin/mycroft-msk create my-custom-skill
+```
+
+**Method 2: Using msk directly (in virtual environment)**
+```bash
+cd ~/mycroft-core
+source .venv/bin/activate
+msk create my-custom-skill
+```
+
+Both methods create a skill template in `/opt/mycroft/skills/my-custom-skill/` with the following structure:
+
+```
+my-custom-skill/
+├── __init__.py           # Main skill code (your Python logic goes here)
+├── locale/               # Language-specific files
+│   └── en-us/            # English (US) - create other locales as needed
+│       ├── *.intent      # Voice command patterns that trigger the skill
+│       └── *.dialog      # Response templates for text-to-speech
+├── manifest.yml          # External dependencies (pip packages, system packages)
+├── settingsmeta.yaml     # Optional: Web UI settings configuration
+└── README.md             # Skill documentation
+```
+
+### **Skill File Structure Explained**
+
+#### **1. `__init__.py` - Main Skill Logic**
+
+This is where your skill's Python code lives. It defines what happens when voice commands are triggered.
+
+**Key components:**
+- Import `MycroftSkill` base class and decorators
+- Define your skill class (inherits from `MycroftSkill`)
+- Use `@intent_handler()` decorators to link intents to handler methods
+- Use `self.speak()` to respond with speech
+- Use `self.speak_dialog()` to use dialog templates
+
+**Example structure:**
+```python
+from mycroft import MycroftSkill, intent_handler
+
+class MyCustomSkill(MycroftSkill):
+    def __init__(self):
+        super().__init__()
+
+    @intent_handler('command.name.intent')
+    def handle_command(self, message):
+        # Your logic here
+        self.speak_dialog('response.name')
+
+def create_skill():
+    return MyCustomSkill()
+```
+
+#### **2. `locale/en-us/*.intent` - Voice Command Patterns**
+
+Intent files define the voice command patterns that trigger your skill. Each line is a pattern with optional variations.
+
+**Syntax:**
+- `[word1|word2]` - Optional alternatives (matches either word1 OR word2)
+- `[word|]` - Optional word (matches with or without the word)
+- `{variable}` - Capture variable data from the command
+
+**Example (`my.command.intent`):**
+```
+do something [cool|awesome]
+[please|] do the thing
+make it {action}
+```
+
+This matches:
+- "do something cool"
+- "do something awesome"
+- "please do the thing"
+- "do the thing"
+- "make it work" (captures "work" as `action`)
+
+#### **3. `locale/en-us/*.dialog` - Response Templates**
+
+Dialog files contain response templates that Mycroft speaks back to you. Each line is a possible response (randomly selected).
+
+**Example (`success.dialog`):**
+```
+Done
+Task completed successfully
+All set
+```
+
+When you call `self.speak_dialog('success')`, Mycroft randomly picks one of these responses.
+
+**Using variables in dialogs:**
+```
+The temperature is {temp} degrees
+Setting brightness to {percent} percent
+```
+
+In code: `self.speak_dialog('temperature', {'temp': 72})`
+
+#### **4. `manifest.yml` - External Dependencies**
+
+Lists any Python packages or system dependencies your skill needs. Mycroft automatically installs these when the skill loads.
+
+**Example:**
+```yaml
+dependencies:
+  # Python packages from PyPI
+  python:
+    - requests
+    - phue
+    - python-dateutil
+
+  # System packages (optional)
+  system:
+    apt-get: libffi-dev
+
+  # Required executables (optional)
+  exes:
+    - ffmpeg
+```
+
+**Note:** Built-in Python modules (like `os`, `sys`, `json`) don't need to be listed.
+
+### **Development Workflow**
+
+1. **Create the skill structure:**
+   ```bash
+   ./bin/mycroft-msk create my-skill
+   cd /opt/mycroft/skills/my-skill/
+   ```
+
+2. **Define voice commands** in `locale/en-us/*.intent`:
+   ```
+   tell me a [random|] fact
+   what [is|do you know about] {topic}
+   ```
+
+3. **Define responses** in `locale/en-us/*.dialog`:
+   ```
+   Here's an interesting fact
+   Did you know that
+   ```
+
+4. **Write the skill logic** in `__init__.py`:
+   ```python
+   @intent_handler('fact.intent')
+   def handle_fact(self, message):
+       topic = message.data.get('topic')
+       if topic:
+           self.speak(f"Here's a fact about {topic}")
+       else:
+           self.speak_dialog('fact')
+   ```
+
+5. **Add dependencies** (if needed) in `manifest.yml`:
+   ```yaml
+   dependencies:
+     python:
+       - requests
+   ```
+
+6. **Reload skills** to test changes:
+   ```bash
+   # Restart skills service
+   ./stop-mycroft.sh skills
+   ./start-mycroft.sh skills
+
+   # Or restart everything
+   ./stop-mycroft.sh all
+   ./start-mycroft.sh all
+   ```
+
+7. **Test with voice commands:**
+   ```
+   "Hey Mycroft, tell me a fact"
+   "Hey Mycroft, what do you know about Python"
+   ```
+
+### **Skill Development Tips**
+
+- **Multiple locales**: Create `locale/es-es/`, `locale/fr-fr/`, etc. for other languages
+- **Intent patterns**: Start with simple patterns, then add variations based on testing
+- **Dialog variety**: Add multiple dialog responses to make interactions feel natural
+- **Variables**: Use `{variable}` in intents to capture user input, access via `message.data.get('variable')`
+- **Logging**: Use `self.log.info()`, `self.log.error()` for debugging (logs go to `/var/log/mycroft/skills.log`)
+- **Settings**: Use `settingsmeta.yaml` to create web UI configuration options
+- **Testing**: Check `/var/log/mycroft/skills.log` if your skill doesn't load or respond
+
+### **Common Intent Patterns**
+
+```
+# Simple command
+turn [on|off] the lights
+
+# With optional words
+[please|] [can you|] set [the|] timer
+
+# With captured variables
+set timer [for|to] {duration}
+what is {number} plus {number}
+
+# Multiple variations
+[tell me|what is|give me] [a|the] [weather|forecast]
+```
+
+### **Common Dialog Patterns**
+
+```
+# Simple responses
+Done
+Okay
+Got it
+
+# With variables
+The answer is {result}
+Setting {device} to {value}
+
+# Questions
+Would you like me to continue?
+What would you like to do next?
+```
+
+### **Example: Complete Simple Skill**
+
+**File: `locale/en-us/greet.user.intent`**
+```
+greet [me|]
+say hello [to me|]
+```
+
+**File: `locale/en-us/greeting.dialog`**
+```
+Hello there
+Hi, how can I help you
+Greetings
+```
+
+**File: `__init__.py`**
+```python
+from mycroft import MycroftSkill, intent_handler
+
+class GreetingSkill(MycroftSkill):
+    @intent_handler('greet.user.intent')
+    def handle_greeting(self, message):
+        self.speak_dialog('greeting')
+
+def create_skill():
+    return GreetingSkill()
+```
+
+**File: `manifest.yml`**
+```yaml
+# No external dependencies needed for this simple skill
+```
+
+**Usage:**
+```
+"Hey Mycroft, greet me"
+→ "Hello there" (or other random greeting)
 ```
 
 ---
