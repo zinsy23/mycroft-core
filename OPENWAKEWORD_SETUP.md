@@ -136,9 +136,25 @@ python openwakeword/oww-listen.py <model.onnx> [--sensitivity 0.5]
 ### oww-train-model.py
 Main training script for OpenWakeWord models.
 
+**Interactive Mode:** Run without arguments to be prompted for all settings:
+```bash
+oww-train-model
+```
+
+**Partial Interactive Mode:** Provide some arguments and be prompted only for missing ones:
+```bash
+# Forgot --wake-word? It will ask only for that
+oww-train-model --positive-dir ./wake-word --negative-dir ./not-wake-word
+
+# Have directories but want to set wake word interactively
+oww-train-model --positive-dir ./wake-word --negative-dir ./not-wake-word
+```
+
+**Command-line Mode:** Provide all three required arguments to skip interactive prompts entirely:
 ```bash
 # With venv activated (from any directory)
 oww-train-model \
+  --wake-word <wake_word_phrase> \
   --positive-dir <path_to_positive_samples> \
   --negative-dir <path_to_negative_samples> \
   --output <output_model_name.onnx> \
@@ -148,6 +164,7 @@ oww-train-model \
 
 # Or run directly
 python openwakeword/oww-train-model.py \
+  --wake-word <wake_word_phrase> \
   --positive-dir <path_to_positive_samples> \
   --negative-dir <path_to_negative_samples> \
   --output <output_model_name.onnx> \
@@ -156,7 +173,8 @@ python openwakeword/oww-train-model.py \
   --epochs <number>
 ```
 
-**Required Parameters:**
+**Required Parameters (all required to avoid interactive mode):**
+- `--wake-word`: Wake word phrase (e.g., "computer", "hey jarvis")
 - `--positive-dir`: Directory containing wake word samples (16kHz, 16-bit WAV files)
 - `--negative-dir`: Directory containing non-wake-word samples
 - `--output`: Output model filename (e.g., `my_wakeword.onnx`)
@@ -255,6 +273,7 @@ Based on extensive testing, here are the settings that work well:
 ```bash
 # With venv activated (can run from any directory)
 oww-train-model \
+  --wake-word "computer" \
   --positive-dir ./wake-word \
   --negative-dir ./not-wake-word \
   --output my_wakeword_simple_60x_2000ep.onnx \
@@ -306,6 +325,7 @@ The count adds duplicates on top of any existing ones, so you can run it multipl
 ```bash
 # With venv activated
 oww-train-model \
+  --wake-word "computer" \
   --positive-dir ./wake-word \
   --negative-dir ./not-wake-word \
   --output my_wakeword_2000ep.onnx \
@@ -318,6 +338,7 @@ oww-train-model \
 ```bash
 # With venv activated
 oww-train-model \
+  --wake-word "computer" \
   --positive-dir ./wake-word \
   --negative-dir ./not-wake-word \
   --output my_wakeword_3000ep.onnx \
@@ -481,6 +502,7 @@ If experiencing frequent false positives:
 4. **Train model**:
    ```bash
    oww-train-model \
+     --wake-word "computer" \
      --positive-dir ./wake-word \
      --negative-dir ./not-wake-word \
      --output my_wakeword.onnx \
