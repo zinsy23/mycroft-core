@@ -82,10 +82,34 @@ python -c "import torch; print(f'GPU available: {torch.cuda.is_available()}')"
 
 ## Scripts
 
+After running `dev_setup.sh`, the OpenWakeWord scripts are available as standalone commands when the virtual environment is activated. You can run them from **any directory**.
+
+**Usage:**
+```bash
+# Activate the virtual environment (from your mycroft-core directory)
+source .venv/bin/activate
+
+# Now you can run commands from anywhere
+oww-collect <output_directory>
+oww-train-model --help
+# etc.
+```
+
+Alternatively, you can run the scripts directly from the mycroft-core directory:
+```bash
+python openwakeword/oww-collect.py <output_directory>
+```
+
+---
+
 ### oww-collect.py
 Records audio samples with auto-numbering, similar to `precise-collect`.
 
 ```bash
+# With venv activated (from any directory)
+oww-collect <output_directory>
+
+# Or run directly
 python openwakeword/oww-collect.py <output_directory>
 ```
 
@@ -97,6 +121,10 @@ python openwakeword/oww-collect.py <output_directory>
 Live testing tool that mimics `precise-listen` behavior with a scrolling bar graph.
 
 ```bash
+# With venv activated (from any directory)
+oww-listen <model.onnx> [--sensitivity 0.5]
+
+# Or run directly
 python openwakeword/oww-listen.py <model.onnx> [--sensitivity 0.5]
 ```
 
@@ -109,6 +137,16 @@ python openwakeword/oww-listen.py <model.onnx> [--sensitivity 0.5]
 Main training script for OpenWakeWord models.
 
 ```bash
+# With venv activated (from any directory)
+oww-train-model \
+  --positive-dir <path_to_positive_samples> \
+  --negative-dir <path_to_negative_samples> \
+  --output <output_model_name.onnx> \
+  --augmentation <none|simple|full> \
+  --variations <number> \
+  --epochs <number>
+
+# Or run directly
 python openwakeword/oww-train-model.py \
   --positive-dir <path_to_positive_samples> \
   --negative-dir <path_to_negative_samples> \
@@ -135,6 +173,12 @@ python openwakeword/oww-train-model.py \
 Duplicates audio samples for data balancing. Useful for emphasizing critical negative samples during training.
 
 ```bash
+# With venv activated (from any directory)
+oww-duplicate-samples \
+  --sample <path_to_sample.wav> --count <number> \
+  --sample <path_to_another.wav> --count <number>
+
+# Or run directly
 python openwakeword/oww-duplicate-samples.py \
   --sample <path_to_sample.wav> --count <number> \
   --sample <path_to_another.wav> --count <number>
@@ -147,7 +191,8 @@ python openwakeword/oww-duplicate-samples.py \
 
 **Example:**
 ```bash
-python openwakeword/oww-duplicate-samples.py \
+# With venv activated
+oww-duplicate-samples \
   --sample "./not-wake-word/talking_sample.wav" --count 15 \
   --sample "./not-wake-word/false_positives.wav" --count 80
 ```
@@ -156,6 +201,14 @@ python openwakeword/oww-duplicate-samples.py \
 Trains a custom verifier model for additional false positive reduction.
 
 ```bash
+# With venv activated (from any directory)
+oww-train-verifier \
+  --model <base_model.onnx> \
+  --positive-dir <path_to_positive_samples> \
+  --negative-dir <path_to_negative_samples> \
+  --output <verifier_model.pkl>
+
+# Or run directly
 python openwakeword/oww-train-verifier.py \
   --model <base_model.onnx> \
   --positive-dir <path_to_positive_samples> \
@@ -200,7 +253,8 @@ OpenWakeWord's embedding model (Google's pre-trained CNN) expects varied audio d
 Based on extensive testing, here are the settings that work well:
 
 ```bash
-python openwakeword/oww-train-model.py \
+# With venv activated (can run from any directory)
+oww-train-model \
   --positive-dir ./wake-word \
   --negative-dir ./not-wake-word \
   --output my_wakeword_simple_60x_2000ep.onnx \
@@ -237,8 +291,8 @@ This emphasizes negative examples during training without requiring more unique 
 
 **Using oww-duplicate-samples.py:**
 ```bash
-# Duplicate critical negative samples
-python openwakeword/oww-duplicate-samples.py \
+# With venv activated
+oww-duplicate-samples \
   --sample "./not-wake-word/long_conversation.wav" --count 15 \
   --sample "./not-wake-word/false_positive_triggers.wav" --count 80 \
   --sample "./not-wake-word/similar_sounding_words.wav" --count 80
@@ -250,7 +304,8 @@ The count adds duplicates on top of any existing ones, so you can run it multipl
 
 **Basic model (2000 epochs):**
 ```bash
-python openwakeword/oww-train-model.py \
+# With venv activated
+oww-train-model \
   --positive-dir ./wake-word \
   --negative-dir ./not-wake-word \
   --output my_wakeword_2000ep.onnx \
@@ -261,7 +316,8 @@ python openwakeword/oww-train-model.py \
 
 **Higher epochs for better false positive rejection:**
 ```bash
-python openwakeword/oww-train-model.py \
+# With venv activated
+oww-train-model \
   --positive-dir ./wake-word \
   --negative-dir ./not-wake-word \
   --output my_wakeword_3000ep.onnx \
@@ -409,16 +465,22 @@ If experiencing frequent false positives:
 
 ### Typical Workflow
 
-1. **Collect positive samples**:
+1. **Activate virtual environment**:
    ```bash
-   python openwakeword/oww-collect.py ./wake-word
+   cd /path/to/mycroft-core
+   source .venv/bin/activate
    ```
 
-2. **Collect/gather negative samples** (non-wake-word speech)
-
-3. **Train model**:
+2. **Collect positive samples** (from any directory):
    ```bash
-   python openwakeword/oww-train-model.py \
+   oww-collect ./wake-word
+   ```
+
+3. **Collect/gather negative samples** (non-wake-word speech)
+
+4. **Train model**:
+   ```bash
+   oww-train-model \
      --positive-dir ./wake-word \
      --negative-dir ./not-wake-word \
      --output my_wakeword.onnx \
@@ -427,14 +489,14 @@ If experiencing frequent false positives:
      --epochs 2000
    ```
 
-4. **Test with oww-listen.py**:
+5. **Test with oww-listen**:
    ```bash
-   python openwakeword/oww-listen.py my_wakeword.onnx --sensitivity 0.5
+   oww-listen my_wakeword.onnx --sensitivity 0.5
    ```
 
-5. **Configure in mycroft.conf** and restart Mycroft
+6. **Configure in mycroft.conf** and restart Mycroft
 
-6. **Iterate**: Adjust data, epochs, or threshold based on real-world performance
+7. **Iterate**: Adjust data, epochs, or threshold based on real-world performance
 
 ---
 

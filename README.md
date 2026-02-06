@@ -1109,8 +1109,13 @@ python -c "import torch; print(f'GPU available: {torch.cuda.is_available()}')"
 
 **5. Start training:**
 ```bash
-# See OPENWAKEWORD_SETUP.md for complete training workflow
+# Activate the virtual environment (from your mycroft-core directory)
+source .venv/bin/activate
+
+# Now you can run training commands from any directory
 oww-train-model --help
+
+# See OPENWAKEWORD_SETUP.md for complete training workflow
 ```
 
 #### **GPU Requirements for Training**
