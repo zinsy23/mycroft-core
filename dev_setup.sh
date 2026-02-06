@@ -1664,7 +1664,7 @@ pip install --no-deps ovos-stt-plugin-fasterwhisper==0.2.0
 if [[ "$ENABLE_STT_GPU" == true ]]; then
     echo ""
     echo "Installing NVIDIA CUDA runtime libraries for GPU acceleration..."
-    pip install nvidia-cudnn-cu12>=9.1.0 nvidia-cublas-cu12>=12.4.0 nvidia-cuda-runtime-cu12>=12.4.0
+    pip install "nvidia-cudnn-cu12>=9.1.0" "nvidia-cublas-cu12>=12.4.0" "nvidia-cuda-runtime-cu12>=12.4.0"
     if [ $? -eq 0 ]; then
         echo "✅ CUDA runtime libraries installed successfully"
     else
@@ -1720,8 +1720,48 @@ if [[ "$INSTALL_OPENWAKEWORD" != true ]]; then
         echo "✅ Precise wake word model already exists"
     fi
 else
-    echo "ℹ️  Skipping Precise model download (using OpenWakeWord)"
+    echo "Pre-downloading OpenWakeWord models..."
+    python3 << 'ENDPYTHON'
+try:
+    from openwakeword.utils import download_models
+    print("Downloading OpenWakeWord models (~19 MB total)...")
+    download_models()
+    print("✅ OpenWakeWord models downloaded successfully")
+except Exception as e:
+    print(f"⚠️  Warning: Failed to pre-download OpenWakeWord models: {e}")
+    print("   This is OK - Mycroft will attempt to download them when starting")
+ENDPYTHON
 fi
+
+# Pre-download Faster-Whisper STT model (conditional based on GPU setting)
+echo "Pre-downloading Faster-Whisper STT model..."
+if [[ "$ENABLE_STT_GPU" == true ]]; then
+    WHISPER_MODEL="medium.en"
+    echo "Using GPU-optimized model: $WHISPER_MODEL (~1.5 GB)..."
+else
+    WHISPER_MODEL="base.en"
+    echo "Using CPU-optimized model: $WHISPER_MODEL (~140 MB)..."
+fi
+
+python3 << ENDPYTHON
+try:
+    from faster_whisper import WhisperModel
+    import os
+    from pathlib import Path
+
+    model_name = "${WHISPER_MODEL}"
+    cache_dir = str(Path.home() / ".cache" / "huggingface")
+
+    print(f"Downloading Whisper {model_name} model to {cache_dir}...")
+
+    # Initialize the model which triggers download if not present
+    model = WhisperModel(model_name, device="cpu", compute_type="int8")
+
+    print(f"✅ Faster-Whisper {model_name} model downloaded successfully")
+except Exception as e:
+    print(f"⚠️  Warning: Failed to pre-download Faster-Whisper model: {e}")
+    print("   This is OK - Mycroft will attempt to download it when starting")
+ENDPYTHON
 
 # Install Mimic TTS binary as fallback for audio service initialization
 echo "Installing Mimic TTS binary..."

@@ -13,6 +13,7 @@
 # limitations under the License.
 #
 from threading import Lock
+import os
 
 from mycroft import dialog
 from mycroft.enclosure.api import EnclosureAPI
@@ -34,6 +35,22 @@ bus = None  # Mycroft messagebus connection
 lock = Lock()
 loop = None
 config = None
+
+
+def _initialize_mic_level_file_early():
+    """Initialize the mic level file before engine loading so CLI can display it immediately."""
+    try:
+        mic_level_file = "/tmp/mycroft/ipc/mic_level"
+        os.makedirs(os.path.dirname(mic_level_file), exist_ok=True)
+
+        # Write initial mic level data with default threshold
+        # Format matches ResponsiveRecognizer._initialize_mic_level_file()
+        with open(mic_level_file, 'w') as f:
+            f.write('Energy:  cur=0 thresh={:.3f} muted=0'.format(1000))
+
+        LOG.debug("Initialized mic level file early for CLI display")
+    except Exception as e:
+        LOG.debug(f"Could not initialize mic level file early: {e}")
 
 
 def handle_record_begin():
@@ -235,6 +252,10 @@ def main(ready_hook=on_ready, error_hook=on_error, stopping_hook=on_stopping,
         reset_sigint_handler()
         PIDLock("voice")
         config = Configuration.get()
+
+        # Initialize mic level file early so CLI can display it immediately
+        _initialize_mic_level_file_early()
+
         bus = start_message_bus_client("VOICE")
         connect_bus_events(bus)
         callbacks = StatusCallbackMap(on_ready=ready_hook, on_error=error_hook,
