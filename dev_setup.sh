@@ -893,8 +893,14 @@ if [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
     echo "You can skip this now and install later when you run 'oww-train-model'."
     echo ""
 
-    read -p "Install training dependencies now? [Y/n] (default: yes): " -r install_training
-    INSTALL_TRAINING_INPUT=${install_training:-Y}
+    # Default to 'no' if user declined STT GPU (more intuitive UX)
+    if [[ "$ENABLE_STT_GPU" == false ]]; then
+        read -p "Install training dependencies now? [y/N] (default: no): " -r install_training
+        INSTALL_TRAINING_INPUT=${install_training:-N}
+    else
+        read -p "Install training dependencies now? [Y/n] (default: yes): " -r install_training
+        INSTALL_TRAINING_INPUT=${install_training:-Y}
+    fi
 
     if [[ "$INSTALL_TRAINING_INPUT" =~ ^[Yy]$ ]]; then
         INSTALL_OWW_TRAINING=true
@@ -1541,7 +1547,7 @@ elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
         # Install audio processing libraries (with correct numpy version)
         echo ""
         echo "2️⃣  Installing audio processing libraries..."
-        pip install torchinfo==1.8.0 torchmetrics==1.8.2 soundfile==0.13.1 librosa==0.11.0
+        pip install scipy==1.17.0 tqdm==4.67.2 torchinfo==1.8.0 torchmetrics==1.8.2 soundfile==0.13.1 librosa==0.11.0
 
         # Install audio augmentation libraries (with correct soxr version)
         echo ""

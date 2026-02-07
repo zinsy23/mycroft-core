@@ -63,6 +63,8 @@ ovos-plugin-manager==0.9.0
 
 # STT dependencies - pinned for stability
 # ctranslate2 is the inference backend, faster-whisper uses it
+# Pin numpy to avoid version conflicts with training dependencies (torch requires <2.4)
+numpy>=2.3.0,<2.4
 ctranslate2==4.6.2
 faster-whisper==1.2.1
 

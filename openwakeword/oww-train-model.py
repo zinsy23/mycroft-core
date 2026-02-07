@@ -32,6 +32,8 @@ def check_dependencies():
         import openwakeword.train
         import librosa
         import soundfile
+        import scipy.io.wavfile
+        import tqdm
         print(f"✓ PyTorch {torch.__version__} ({'CUDA' if torch.cuda.is_available() else 'CPU'})")
         return True
     except ImportError as e:
@@ -48,6 +50,7 @@ def check_dependencies():
         print("Step 2a: Install with GPU support (recommended if you have compatible NVIDIA GPU):")
         print("  pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 \\")
         print("    --index-url https://download.pytorch.org/whl/cu124")
+        print("  pip install scipy==1.17.0 tqdm==4.67.2")
         print("  pip install torchinfo==1.8.0 torchmetrics==1.8.2 soundfile==0.13.1 librosa==0.11.0")
         print("  pip install audiomentations==0.43.1 torch-audiomentations==0.12.0")
         print("  pip install speechbrain==1.0.3 pronouncing==0.2.0 webrtcvad==2.0.10")
@@ -55,6 +58,7 @@ def check_dependencies():
         print()
         print("Step 2b: OR install CPU-only (if no GPU):")
         print("  pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0")
+        print("  pip install scipy==1.17.0 tqdm==4.67.2")
         print("  pip install torchinfo==1.8.0 torchmetrics==1.8.2 soundfile==0.13.1 librosa==0.11.0")
         print("  pip install audiomentations==0.43.1 torch-audiomentations==0.12.0")
         print("  pip install speechbrain==1.0.3 pronouncing==0.2.0 webrtcvad==2.0.10")
