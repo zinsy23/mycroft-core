@@ -880,11 +880,12 @@ if [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
         echo ""
         echo "💡 Installing now ensures compatible CUDA libraries for both."
         echo "   Recommended: Install now to take full advantage of your GPU."
-    elif [[ "$GPU_AVAILABLE" == true ]]; then
-        echo "✅ GPU available - training will use GPU acceleration:"
-        echo "   • Wake Word Training: 3-10 min per 1000 epochs (vs 30-60 min on CPU)"
+    elif [[ "$GPU_AVAILABLE" == true ]] && [[ "$ENABLE_STT_GPU" == false ]]; then
+        echo "ℹ️  GPU available but you declined GPU for STT - training will also use CPU:"
+        echo "   • Wake Word Training: 30-60+ min per 1000 epochs"
         echo ""
-        echo "💡 Note: You declined GPU for STT, but training will still use GPU."
+        echo "💡 Note: Training will match your STT choice (CPU-only)"
+        echo "   You can switch to GPU training later using: oww-train-model --gpu"
     else
         echo "ℹ️  No compatible GPU - training will use CPU (slower but functional):"
         echo "   • Wake Word Training: 30-60+ min per 1000 epochs"
