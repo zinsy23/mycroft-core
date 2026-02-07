@@ -1,20 +1,26 @@
 # Custom Wake Word Setup Guide
 
+This guide covers using **existing Precise `.pb` model files** with Mycroft.
+
+For **training new wake words**, see [OPENWAKEWORD_SETUP.md](OPENWAKEWORD_SETUP.md) (recommended - works in Python 3.11).
+
 ## Quick Start (TL;DR)
 
 ### 1. Run Setup Script
 ```bash
 ./dev_setup.sh
 # Answer YES when asked: "Do you plan to use custom wake word models?"
+# Select "Precise" if you have an existing .pb model file
 ```
 
 ### 2. Add Your Model File
 ```bash
+# Replace "computer" with your custom wake word phrase (e.g., "jarvis", "hey robot", etc.)
 cp /path/to/your/computer.pb ~/.local/share/mycroft/precise/
 ```
 
 ### 3. Configure Mycroft
-Edit `~/.config/mycroft/mycroft.conf`:
+Edit `~/.config/mycroft/mycroft.conf` (replace "computer" with your wake word):
 
 ```json
 {
@@ -36,17 +42,19 @@ Edit `~/.config/mycroft/mycroft.conf`:
 }
 ```
 
+**Note**: Replace all instances of `"computer"` with your custom wake word phrase.
+
 ### 4. Start and Test
 ```bash
 cd ~/mycroft-core
 ./start-mycroft.sh all
 
-# Verify it's working
+# Verify it's working (replace "computer" with your wake word)
 ps aux | grep precise-engine
 # Should see: precise-engine /home/user/.local/share/mycroft/precise/computer.pb 2048
 ```
 
-Say your wake word and it should respond!
+Say your custom wake word and it should respond!
 
 ---
 
@@ -102,7 +110,7 @@ ls -lh ~/.local/share/mycroft/precise/*.pb
 
 ### Step 3: Configure Mycroft
 
-Edit `~/.config/mycroft/mycroft.conf`:
+Edit `~/.config/mycroft/mycroft.conf` (replace "computer" with your custom wake word):
 
 **Single Custom Wake Word Example**:
 ```json
@@ -125,7 +133,7 @@ Edit `~/.config/mycroft/mycroft.conf`:
 }
 ```
 
-**Multiple Wake Words Example**:
+**Multiple Wake Words Example** (using both default "hey mycroft" and custom "computer"):
 ```json
 {
   "max_allowed_core_version": 21.2,
@@ -151,6 +159,8 @@ Edit `~/.config/mycroft/mycroft.conf`:
   }
 }
 ```
+
+**Note**: In both examples, replace `"computer"` with your custom wake word phrase.
 
 **Configuration Parameters**:
 - **`module`**: Always `"precise"` for custom wake words
@@ -261,26 +271,56 @@ NOT the venv version:
 
 ## Training Custom Wake Words
 
-If you want to train your own models (requires many audio samples):
+⚠️ **IMPORTANT**: Precise training is NOT supported in the Python 3.11 Mycroft environment.
 
+### Why Precise Training Doesn't Work Here
+
+The Precise training tools (`precise-train`, `precise-collect`, `precise-convert`) require:
+- Python 3.7 (or 3.6-3.8)
+- TensorFlow 1.13 (incompatible with Python 3.11)
+
+The Mycroft environment uses Python 3.11+ with only the Precise **runtime** binary (no training tools).
+
+### Options for Training Precise Models
+
+**Option 1: Use OpenWakeWord Instead (Recommended)**
+
+OpenWakeWord fully supports training in the Python 3.11 environment with GPU acceleration:
 ```bash
 cd ~/mycroft-core
 source .venv/bin/activate
-
-# Collect audio samples (need ~50+ recordings of wake word)
-precise-collect
-
-# Train the model
-precise-train -e 60 your-phrase.net /path/to/audio/samples/
-
-# Convert to .pb format
-precise-convert your-phrase.net
-
-# Test the model
-precise-listen your-phrase.pb
+oww-train-model  # Interactive mode, prompts for all parameters
 ```
 
-**Note**: Training requires significant audio samples and time. Consider using pre-trained models if available.
+See [OPENWAKEWORD_SETUP.md](OPENWAKEWORD_SETUP.md) for complete training guide.
+
+**Option 2: Separate Python 3.7 Environment for Precise Training (Advanced)**
+
+If you specifically need to train Precise models, you'll need a separate Python 3.7 environment.
+
+See the official Precise training repository:
+- **GitHub**: https://github.com/MycroftAI/mycroft-precise
+- **Training Guide**: https://github.com/MycroftAI/mycroft-precise/wiki/Training-your-own-wake-word
+
+Basic setup outline:
+```bash
+# Create separate Python 3.7 environment (outside mycroft-core)
+cd ~
+python3.7 -m venv precise-training-env
+source precise-training-env/bin/activate
+
+# Install Precise training tools
+pip install mycroft-precise==0.3.0
+
+# Now you can use training commands
+precise-collect
+precise-train -e 60 your-phrase.net /path/to/audio/samples/
+precise-convert your-phrase.net
+```
+
+Once trained, copy the `.pb` model to `~/.local/share/mycroft/precise/` and configure it in mycroft.conf.
+
+**Note**: This requires Python 3.7 installation, which may not be available on modern systems. OpenWakeWord is recommended for most users.
 
 ---
 

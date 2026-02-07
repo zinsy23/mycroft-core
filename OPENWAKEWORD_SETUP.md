@@ -82,11 +82,14 @@ python -c "import torch; print(f'GPU available: {torch.cuda.is_available()}')"
 
 ## Scripts
 
+💡 **Important**: All OpenWakeWord commands require the virtual environment to be activated first.
+
 After running `dev_setup.sh`, the OpenWakeWord scripts are available as standalone commands when the virtual environment is activated. You can run them from **any directory**.
 
 **Usage:**
 ```bash
 # Activate the virtual environment (from your mycroft-core directory)
+cd mycroft-core
 source .venv/bin/activate
 
 # Now you can run commands from anywhere
@@ -187,6 +190,51 @@ python openwakeword/oww-train-model.py \
 - `--variations`: Number of augmented variations per sample (e.g., 60)
 - `--epochs`: Training epochs (see tips below for optimal range)
 
+**GPU Control Flags:**
+- `--gpu`: Force GPU acceleration (automatically installs/upgrades to GPU PyTorch if needed)
+- `--no-gpu`: Force CPU-only training (skips GPU prompts/upgrades)
+
+**GPU Flag Behavior:**
+
+When you run the training script, it automatically detects your hardware and training dependencies:
+
+1. **No flags provided** (default behavior):
+   - If training dependencies already installed: Uses existing PyTorch (CPU or GPU)
+   - If GPU hardware detected but CPU PyTorch installed: Prompts to upgrade to GPU
+   - If no GPU hardware: Continues with CPU training
+   - If dependencies missing: Prompts to install (defaults to CPU, offers GPU choice)
+
+2. **With `--gpu` flag**:
+   - Automatically installs GPU PyTorch if dependencies missing (no prompts)
+   - Automatically upgrades CPU → GPU PyTorch if needed (no prompts)
+   - Falls back to CPU if no GPU hardware detected (with warning)
+   - Use this for automated GPU setup
+
+3. **With `--no-gpu` flag**:
+   - Forces CPU training mode even if GPU available
+   - Automatically installs CPU PyTorch if dependencies missing (no prompts)
+   - Skips all GPU upgrade prompts
+   - Use this to explicitly stay on CPU
+
+**Example with GPU flag:**
+```bash
+# Automatically use/install GPU acceleration without prompting
+oww-train-model --gpu \
+  --wake-word "computer" \
+  --positive-dir ./wake-word \
+  --negative-dir ./not-wake-word \
+  --output computer.onnx
+
+# Explicitly force CPU-only training
+oww-train-model --no-gpu \
+  --wake-word "computer" \
+  --positive-dir ./wake-word \
+  --negative-dir ./not-wake-word \
+  --output computer.onnx
+```
+
+**Note:** The flags control both dependency installation (if needed) and which PyTorch version to use. If you already installed dependencies during `dev_setup.sh`, the script respects that choice but allows you to switch using these flags.
+
 ### oww-duplicate-samples.py
 Duplicates audio samples for data balancing. Useful for emphasizing critical negative samples during training.
 
@@ -272,6 +320,7 @@ Based on extensive testing, here are the settings that work well:
 
 ```bash
 # With venv activated (can run from any directory)
+# Example: Training "computer" wake word (replace with your custom phrase)
 oww-train-model \
   --wake-word "computer" \
   --positive-dir ./wake-word \
@@ -320,6 +369,8 @@ oww-duplicate-samples \
 The count adds duplicates on top of any existing ones, so you can run it multiple times to incrementally add more emphasis.
 
 ### Example Training Commands
+
+**Note**: Replace "computer" with your custom wake word phrase in all examples below.
 
 **Basic model (2000 epochs):**
 ```bash
@@ -488,7 +539,7 @@ If experiencing frequent false positives:
 
 1. **Activate virtual environment**:
    ```bash
-   cd /path/to/mycroft-core
+   cd mycroft-core  # Navigate to your mycroft-core directory
    source .venv/bin/activate
    ```
 
@@ -499,7 +550,7 @@ If experiencing frequent false positives:
 
 3. **Collect/gather negative samples** (non-wake-word speech)
 
-4. **Train model**:
+4. **Train model** (replace "computer" with your wake word):
    ```bash
    oww-train-model \
      --wake-word "computer" \
@@ -556,7 +607,7 @@ For automated synthetic training without local scripts:
 
 ### Alternative Configuration Format
 
-Some setups may use this configuration style:
+Some setups may use this configuration style (replace "computer" with your wake word):
 
 ```json
 {

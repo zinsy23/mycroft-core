@@ -10,7 +10,7 @@
 - ✅ **Voice Commands**: "Hey Mycroft, tell me a joke"
 - ✅ **Local STT**: OVOS FasterWhisper (Whisper model)
 - ✅ **Local TTS**: eSpeak (reliable offline speech)
-- ✅ **Wake Word**: Precise engine (default "hey mycroft")
+- ✅ **Wake Word**: Precise runtime (default "hey mycroft") or OpenWakeWord (custom training)
 - ✅ **Skills**: Offline-compatible skills auto-installed
 - ✅ **No Backend**: Completely independent operation
 
@@ -18,22 +18,22 @@
 - **Backend Bypass**: All Mycroft.ai API calls bypassed
 - **Threading Issues**: Python 3.11+ compatibility restored
 - **Service Readiness**: Enclosure service timeout resolved
-- **Dependencies**: Local alternatives for all external services
+- **Dependencies**: Local alternatives for all externaVl services
 
 ### ℹ️ **Known Installation Notes:**
 - **Pocketsphinx**: May fail on x86_64 with modern GCC (C23 issue) - this is OK, Precise wake word engine is used instead
 - **Python 3.11+**: Installed via `uv` if not present (no system packages needed)
-- **TensorFlow**: Optional, only needed for custom wake word training
+- **Training Dependencies**: Optional PyTorch (OpenWakeWord) or TensorFlow (Precise) - only needed if training custom wake word models
 - **Precise Model**: Pre-downloaded during setup to avoid runtime network issues
 
 ---
 
 ## 🚀 **Quick Start (Offline Setup)**
 
-### **1. Clone and Setup**
+### **1. Clone and Setup (for this Mycroft fork)**
 ```bash
 cd ~/
-git clone --depth=1 https://github.com/YOUR_USERNAME/mycroft-core.git
+git clone --depth=1 https://github.com/zinsy23/mycroft-core.git
 cd mycroft-core
 bash dev_setup.sh
 ```
@@ -67,7 +67,9 @@ Say: **"Hey Mycroft, tell me a joke"**
 The setup script handles everything automatically:
 
 #### **Phase 0: Configuration Questions**
-- 🎤 **Custom Wake Words**: Install TensorFlow for training custom models?
+- 🎤 **Wake Word Engine**: Precise runtime, OpenWakeWord, or neither?
+- 🎓 **Training Dependencies** (if OpenWakeWord selected): Install PyTorch for custom wake word training?
+- ⚡ **GPU Acceleration** (if GPU detected): Enable GPU for speech-to-text?
 - 🔄 **GPIO Support**: Install Raspberry Pi hardware libraries?
 - 🐍 **Python 3.11+**: Install DeadSnakes PPA for Ubuntu users?
 
@@ -188,10 +190,10 @@ For Google Cloud STT with service account (requires credentials):
 - **Offline**: Completely local
 
 ### **Wake Word Detection**
-- **Engine**: Precise (Mycroft's neural network)
-- **Default**: "Hey Mycroft"
-- **Custom**: Train your own (requires TensorFlow)
-- **Accuracy**: High with proper training
+- **Engine**: Precise runtime (default) or OpenWakeWord (for custom training)
+- **Default**: "Hey Mycroft" (works out-of-box)
+- **Custom Training**: OpenWakeWord recommended (PyTorch-based, GPU support)
+- **Precise Models**: Runtime support only (training requires separate Python 3.7 + TF1 environment)
 
 ### **Skills System**
 - **Manager**: MSM (Mycroft Skills Manager)
@@ -233,15 +235,25 @@ For Google Cloud STT with service account (requires credentials):
 
 ### **Custom Wake Word Configuration**
 
-⚠️ **IMPORTANT**: Custom wake words require special setup on Python 3.11+.
+⚠️ **IMPORTANT**: Wake word training requirements have changed for Python 3.11+.
 
-**See [CUSTOM_WAKE_WORDS.md](CUSTOM_WAKE_WORDS.md)** for complete setup instructions, including:
-- Quick start guide (TL;DR)
-- Step-by-step setup
-- Configuration examples
-- Troubleshooting
+**Available Wake Word Engines:**
 
-#### **Quick Configuration Example**
+- **OpenWakeWord (Recommended for Custom Training)**
+  - ✅ Full training support in this environment (Python 3.11+)
+  - ✅ GPU acceleration available (optional, via PyTorch)
+  - ✅ Complete workflow: Collect samples → Train → Deploy
+  - 📖 See [OPENWAKEWORD_SETUP.md](OPENWAKEWORD_SETUP.md) for complete guide
+  - 💡 Optional flags: `--gpu` (force GPU) or `--no-gpu` (force CPU) for dependency control
+
+- **Precise (Runtime Only)**
+  - ✅ Runtime support for existing `.pb` model files
+  - ❌ Training not supported in Python 3.11 environment (requires Python 3.7 + TensorFlow 1.x)
+  - 📖 See [CUSTOM_WAKE_WORDS.md](CUSTOM_WAKE_WORDS.md) for runtime setup
+
+#### **Quick Configuration Example (Precise)**
+
+Example configuration for a custom wake word "computer" (replace with your wake word):
 
 ```json
 {
@@ -262,7 +274,10 @@ For Google Cloud STT with service account (requires credentials):
 }
 ```
 
-**Note**: The old path `/home/pi/.mycroft/precise/` is deprecated. Use `~/.local/share/mycroft/precise/` instead.
+**Notes**:
+- Replace `"computer"` with your custom wake word phrase
+- The `.pb` file must exist at the path specified in `local_model_file`
+- The old path `/home/pi/.mycroft/precise/` is deprecated. Use `~/.local/share/mycroft/precise/` instead
 
 ### **Configuration Management**
 ```bash
@@ -704,10 +719,11 @@ Mycroft uses **two separate systems** for voice recognition:
 
 ### **Available Wake Word Engines**
 
-#### **1. Precise (Default - Recommended)** ✅
-- **Status**: Fully working, installed by default
-- **Quality**: Excellent accuracy for "hey mycroft"
-- **Requirements**: precise-runner (automatically installed)
+#### **1. Precise Runtime (Default)** ✅
+- **Status**: Fully working, installed by default for "hey mycroft"
+- **Quality**: Excellent accuracy for pre-trained "hey mycroft" model
+- **Use Case**: Default wake word, or if you have existing `.pb` model files
+- **Training**: Not supported in Python 3.11 environment (requires separate Python 3.7 + TF1 setup)
 - **Configuration**: Already configured in `~/.config/mycroft/mycroft.conf`
 
 ```json
@@ -719,7 +735,14 @@ Mycroft uses **two separate systems** for voice recognition:
 }
 ```
 
-#### **2. Pocketsphinx (Fallback)** ⚠️
+#### **2. OpenWakeWord (Recommended for Custom Training)** ✅
+- **Status**: Optional, installed if you select it during setup
+- **Quality**: Excellent accuracy with proper training
+- **Use Case**: Training your own custom wake words (e.g., "computer", "jarvis")
+- **Training**: Full support with GPU acceleration (Python 3.11+ compatible)
+- **See**: [OPENWAKEWORD_SETUP.md](OPENWAKEWORD_SETUP.md) for complete guide
+
+#### **3. Pocketsphinx (Fallback)** ⚠️
 - **Status**: Optional, may fail on modern x86_64 systems
 - **Quality**: Fair accuracy, higher false positive rate
 - **Known Issue**: Fails to compile on x86_64 with GCC 13+ (C23 `bool` typedef conflict)
@@ -739,14 +762,13 @@ Impact: Installation fails on x86_64 Debian/Ubuntu with GCC 13+
 - ✅ On Raspberry Pi, pocketsphinx installs successfully as backup
 - ✅ Mycroft works perfectly with just Precise
 
-#### **3. Alternative Wake Word Engines**
+#### **4. Other Alternatives**
 
-If Precise doesn't work for you, consider these alternatives:
+If you need additional wake word options:
 
-| Engine | License | Quality | Installation |
-|--------|---------|---------|--------------|
-| **Porcupine** | Free tier available | Excellent | `pip install pvporcupine` |
-| **openWakeWord** | Open source | Excellent | `pip install openwakeword` |
+| Engine | License | Quality | Notes |
+|--------|---------|---------|-------|
+| **Porcupine** | Free tier available | Excellent | Requires API key |
 | **Snowboy** | Deprecated | Good | No longer maintained |
 
 ### **Wake Word Engine Fallback Chain**
@@ -812,14 +834,39 @@ During setup, you'll see one of these messages:
 ## 🌟 **Advanced Features**
 
 ### **Custom Wake Word Training**
-If you installed TensorFlow during setup:
-```bash
-# Train custom wake word
-precise-train -w "your phrase" /path/to/audio/samples
 
-# Test wake word
-precise-listen -w "your phrase" /path/to/model.pb
+**OpenWakeWord (Recommended)**
+
+💡 **Note**: All `oww-` commands require the virtual environment to be activated first:
+```bash
+cd mycroft-core  # Navigate to your mycroft-core directory
+source .venv/bin/activate
 ```
+You only need to do this once per terminal session.
+
+If you installed training dependencies during setup, you can start training immediately:
+```bash
+source .venv/bin/activate
+
+# Example: Training a custom wake word "computer"
+# (Replace "computer" with your desired wake word phrase like "hey robot", "jarvis", etc.)
+oww-train-model \
+  --wake-word "computer" \
+  --positive-dir ~/samples/wake-word \
+  --negative-dir ~/samples/not-wake-word
+```
+
+Optional GPU control flags (only needed to override your setup choice):
+- `--gpu`: Force GPU acceleration (auto-installs/upgrades if needed)
+- `--no-gpu`: Force CPU-only training
+
+**Note**: All `oww-` commands require the venv to be activated (shown above).
+
+See [OPENWAKEWORD_SETUP.md](OPENWAKEWORD_SETUP.md) for complete training guide.
+
+**Precise Models**
+
+Runtime support only. Training requires a separate Python 3.7 + TensorFlow 1.x environment. See [CUSTOM_WAKE_WORDS.md](CUSTOM_WAKE_WORDS.md) for details.
 
 ### **GPIO Integration (Raspberry Pi)**
 If you installed GPIO support:
@@ -1085,37 +1132,90 @@ CUDA version: 12.4
 
 #### **Complete Setup for OpenWakeWord Training**
 
-If you want to train custom OpenWakeWord models with GPU acceleration, you need:
+💡 **Important**: All OpenWakeWord commands require activating the virtual environment first:
+```bash
+cd mycroft-core  # Navigate to your mycroft-core directory
+source .venv/bin/activate
+```
+Activate once per terminal session, then all commands below will work.
+
+**If You Installed Training Dependencies During Setup:**
+
+You're already set! Just activate the venv and start training:
+
+```bash
+source .venv/bin/activate
+
+# Interactive mode - prompts for any missing parameters
+oww-train-model
+
+# Or provide all parameters on command line (replace "computer" with your custom wake word)
+oww-train-model --wake-word "computer" --positive-dir ./samples --negative-dir ./negative
+
+# Partial parameters - prompts only for what's missing
+oww-train-model --wake-word "computer"  # Will ask for directories
+```
+
+**Note**: Replace `"computer"` with your desired custom wake word (e.g., "jarvis", "hey robot", "assistant").
+
+The script automatically enters interactive mode if you're missing required parameters (wake word, positive samples directory, negative samples directory).
+
+**Optional GPU control flags** (only needed to override your setup):
+- `--gpu`: Force GPU (auto-upgrades CPU→GPU PyTorch if needed)
+- `--no-gpu`: Force CPU (even if GPU available)
+
+**If You Skipped Training Dependencies During Setup:**
+
+The training script can install them automatically when you first run it:
+
+```bash
+source .venv/bin/activate
+
+# Run without parameters - script will prompt for everything (interactive mode)
+oww-train-model
+
+# Or provide parameters and let it handle dependencies
+oww-train-model --wake-word "computer" --positive-dir ./samples --negative-dir ./negative
+
+# Or use --gpu flag to auto-install GPU version without prompts
+oww-train-model --gpu
+```
+
+The script will detect missing dependencies and offer to install them before prompting for training parameters.
+
+**Option B: Manual Setup**
+
+If you prefer to install dependencies yourself:
 
 **1. Install PyTorch with CUDA** (see instructions above)
 
 **2. Install additional dependencies:**
 ```bash
 source .venv/bin/activate
-pip install speechbrain  # Audio processing for training
+pip install scipy==1.16.2 tqdm==4.67.2 torchinfo==1.8.0 torchmetrics==1.8.2
+pip install soundfile==0.13.1 librosa==0.11.0
+pip install audiomentations==0.43.1 torch-audiomentations==0.12.0
+pip install speechbrain==1.0.3 pronouncing==0.2.0 webrtcvad==2.0.10
+pip install pydub==0.25.1 mutagen==1.47.0 acoustics==0.2.6
+pip install matplotlib==3.10.8 pandas==3.0.0
 ```
 
-**3. Copy training scripts** (if not already present):
-```bash
-# Training scripts should be in openwakeword/ directory
-# If missing, you need the oww-train-model.py, oww-collect.py, etc.
-```
-
-**4. Verify GPU is available:**
+**3. Verify GPU is available:**
 ```bash
 python -c "import torch; print(f'GPU available: {torch.cuda.is_available()}')"
 # Should print: GPU available: True
 ```
 
-**5. Start training:**
+**4. Start training:**
 ```bash
-# Activate the virtual environment (from your mycroft-core directory)
-source .venv/bin/activate
-
-# Now you can run training commands from any directory
+# With venv activated, you can run training commands from any directory
 oww-train-model --help
 
-# See OPENWAKEWORD_SETUP.md for complete training workflow
+# GPU acceleration flags (requires venv activation - see above):
+oww-train-model --gpu [...]     # Force GPU acceleration (auto-install/upgrade if needed)
+oww-train-model --no-gpu [...]  # Force CPU-only training (skip GPU prompts)
+
+# See OPENWAKEWORD_SETUP.md for complete training workflow and flag details
 ```
 
 #### **GPU Requirements for Training**
@@ -1188,8 +1288,8 @@ This is a **working fork** of Mycroft Core. Contributions are welcome:
 
 ### **Development Setup**
 ```bash
-# Clone your fork
-git clone --depth=1 https://github.com/YOUR_USERNAME/mycroft-core.git
+# Clone your fork (after forking)
+git clone --depth=1 https://github.com/YOUR_GITHUB_USER/mycroft-core.git
 cd mycroft-core
 
 # Setup development environment
