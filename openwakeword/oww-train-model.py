@@ -130,8 +130,13 @@ def check_gpu_upgrade_opportunity(force_gpu=None):
         print(f"Note: GPU check failed ({e}), continuing with available PyTorch")
         return True
 
-def check_dependencies():
-    """Check if all required dependencies are installed."""
+def check_dependencies(force_gpu=None):
+    """
+    Check if all required dependencies are installed, offer to install if missing.
+
+    Args:
+        force_gpu: True to force GPU install, False to force CPU, None to prompt
+    """
     # Check if dependencies are already installed
     try:
         import torch
@@ -143,36 +148,213 @@ def check_dependencies():
         print(f"✓ PyTorch {torch.__version__} ({'CUDA' if torch.cuda.is_available() else 'CPU'})")
         return True
     except ImportError as e:
+        import subprocess
+
         print(f"⚠️  Missing training dependency: {e}")
         print()
         print("❌ OpenWakeWord training requires PyTorch and additional dependencies.")
         print()
-        print("To install training dependencies, activate the virtual environment and install manually:")
-        print()
-        print("Step 1: Activate the virtual environment")
-        print("  cd ~/mycroft-core")
-        print("  source .venv/bin/activate")
-        print()
-        print("Step 2a: Install with GPU support (recommended if you have compatible NVIDIA GPU):")
-        print("  pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 \\")
-        print("    --index-url https://download.pytorch.org/whl/cu124")
-        print("  pip install scipy==1.17.0 tqdm==4.67.2")
-        print("  pip install torchinfo==1.8.0 torchmetrics==1.8.2 soundfile==0.13.1 librosa==0.11.0")
-        print("  pip install audiomentations==0.43.1 torch-audiomentations==0.12.0")
-        print("  pip install speechbrain==1.0.3 pronouncing==0.2.0 webrtcvad==2.0.10")
-        print("  pip install pydub==0.25.1 mutagen==1.47.0 acoustics==0.2.6 matplotlib==3.10.8 pandas==3.0.0")
-        print()
-        print("Step 2b: OR install CPU-only (if no GPU):")
-        print("  pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0")
-        print("  pip install scipy==1.17.0 tqdm==4.67.2")
-        print("  pip install torchinfo==1.8.0 torchmetrics==1.8.2 soundfile==0.13.1 librosa==0.11.0")
-        print("  pip install audiomentations==0.43.1 torch-audiomentations==0.12.0")
-        print("  pip install speechbrain==1.0.3 pronouncing==0.2.0 webrtcvad==2.0.10")
-        print("  pip install pydub==0.25.1 mutagen==1.47.0 acoustics==0.2.6 matplotlib==3.10.8 pandas==3.0.0")
-        print()
-        print("Total download: ~4-6 GB")
-        print()
-        return False
+
+        # Detect if GPU is available
+        has_nvidia_gpu = subprocess.run(['nvidia-smi'], capture_output=True, stderr=subprocess.DEVNULL).returncode == 0
+
+        # Determine what to install based on flags and hardware
+        install_gpu = False
+        install_cpu = False
+
+        # Handle --gpu flag
+        if force_gpu is True:
+            if has_nvidia_gpu:
+                print("🎯 --gpu flag provided: Installing GPU training dependencies automatically")
+                print()
+                print("Download size: ~4-6 GB (includes PyTorch with CUDA)")
+                print()
+                install_gpu = True
+            else:
+                print("⚠️  --gpu flag provided but no NVIDIA GPU detected")
+                print("   Installing CPU-only version instead")
+                print()
+                install_cpu = True
+
+        # Handle --no-gpu flag
+        elif force_gpu is False:
+            print("ℹ️  --no-gpu flag provided: Installing CPU-only training dependencies")
+            print()
+            print("Download size: ~4-6 GB")
+            print()
+            install_cpu = True
+
+        # No flags: Prompt user
+        else:
+            if has_nvidia_gpu:
+                print("🎯 NVIDIA GPU detected!")
+                print()
+                print("GPU training is ~6-10x faster:")
+                print("  • CPU: 30-60 minutes per 1000 epochs")
+                print("  • GPU: 3-10 minutes per 1000 epochs")
+                print()
+                print("Download size: ~4-6 GB (includes PyTorch with CUDA)")
+                print()
+                print("💡 Note: You can install CPU-only now and upgrade to GPU later using:")
+                print("   oww-train-model --gpu")
+                print()
+
+                install_choice = input("Install training dependencies with GPU support now? [y/N]: ").strip().lower()
+                if not install_choice:
+                    install_choice = 'n'
+
+                if install_choice in ['y', 'yes']:
+                    install_gpu = True
+                else:
+                    # User declined GPU, offer CPU
+                    print()
+                    print("💡 Installing CPU-only version instead")
+                    print()
+                    cpu_choice = input("Install training dependencies (CPU-only) now? [Y/n]: ").strip().lower()
+                    if not cpu_choice:
+                        cpu_choice = 'y'
+                    if cpu_choice in ['y', 'yes']:
+                        install_cpu = True
+            else:
+                # No GPU hardware
+                print("ℹ️  No NVIDIA GPU detected - will install CPU-only version")
+                print()
+                print("CPU training is slower but functional:")
+                print("  • CPU: 30-60 minutes per 1000 epochs")
+                print()
+                print("Download size: ~4-6 GB")
+                print()
+
+                install_choice = input("Install training dependencies (CPU-only) now? [Y/n]: ").strip().lower()
+                if not install_choice:
+                    install_choice = 'y'
+                if install_choice in ['y', 'yes']:
+                    install_cpu = True
+
+        # Helper function to install common packages (audio libs, augmentation, utilities)
+        def install_common_packages():
+            """Install audio processing, augmentation, and training utilities."""
+            # Install audio processing libraries
+            print()
+            print("2️⃣  Installing audio processing libraries...")
+            result = subprocess.run([
+                sys.executable, '-m', 'pip', 'install',
+                'scipy==1.16.2', 'tqdm==4.67.2', 'torchinfo==1.8.0', 'torchmetrics==1.8.2',
+                'soundfile==0.13.1', 'librosa==0.11.0'
+            ])
+            if result.returncode != 0:
+                print("❌ Audio libraries installation failed")
+                return False
+
+            # Install audio augmentation
+            print()
+            print("3️⃣  Installing audio augmentation libraries...")
+            result = subprocess.run([
+                sys.executable, '-m', 'pip', 'install',
+                'audiomentations==0.43.1', 'torch-audiomentations==0.12.0'
+            ])
+            if result.returncode != 0:
+                print("❌ Audio augmentation installation failed")
+                return False
+
+            # Install training utilities
+            print()
+            print("4️⃣  Installing training utilities...")
+            result = subprocess.run([
+                sys.executable, '-m', 'pip', 'install',
+                'speechbrain==1.0.3', 'pronouncing==0.2.0', 'webrtcvad==2.0.10',
+                'pydub==0.25.1', 'mutagen==1.47.0', 'acoustics==0.2.6',
+                'matplotlib==3.10.8', 'pandas==3.0.0'
+            ])
+            if result.returncode != 0:
+                print("❌ Training utilities installation failed")
+                return False
+
+            return True
+
+        # Perform GPU installation
+        if install_gpu:
+            print()
+            print("📦 Installing training dependencies with GPU support...")
+            print("   This will take several minutes...")
+            print()
+
+            # Install GPU PyTorch
+            print("1️⃣  Installing PyTorch with CUDA 12.4 support...")
+            result = subprocess.run([
+                sys.executable, '-m', 'pip', 'install',
+                'torch==2.6.0+cu124', 'torchvision==0.21.0+cu124', 'torchaudio==2.6.0+cu124',
+                '--index-url', 'https://download.pytorch.org/whl/cu124'
+            ])
+
+            if result.returncode != 0:
+                print("❌ PyTorch installation failed")
+                return False
+
+            # Install common packages
+            if not install_common_packages():
+                return False
+
+            print()
+            print("✅ All training dependencies installed successfully!")
+            print("   Please re-run this script to start training")
+            print()
+            return False  # Exit so user can restart with new packages
+
+        # Perform CPU installation
+        elif install_cpu:
+            print()
+            print("📦 Installing training dependencies (CPU-only)...")
+            print("   This will take several minutes...")
+            print()
+
+            # Install CPU PyTorch
+            print("1️⃣  Installing PyTorch (CPU-only)...")
+            result = subprocess.run([
+                sys.executable, '-m', 'pip', 'install',
+                'torch==2.6.0', 'torchvision==0.21.0', 'torchaudio==2.6.0'
+            ])
+
+            if result.returncode != 0:
+                print("❌ PyTorch installation failed")
+                return False
+
+            # Install common packages
+            if not install_common_packages():
+                return False
+
+            print()
+            print("✅ All training dependencies installed successfully!")
+            print("   Please re-run this script to start training")
+            print()
+            if has_nvidia_gpu:
+                print("💡 Tip: You can upgrade to GPU later using: oww-train-model --gpu")
+                print()
+            return False  # Exit so user can restart with new packages
+
+        # User declined installation (neither install_gpu nor install_cpu was set)
+        else:
+            print()
+            print("ℹ️  Installation declined. You can install manually later:")
+            print()
+            print("Activate virtual environment:")
+            print("  cd ~/mycroft-core")
+            print("  source .venv/bin/activate")
+            print()
+            if has_nvidia_gpu:
+                print("Then install with GPU support:")
+                print("  pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 \\")
+                print("    --index-url https://download.pytorch.org/whl/cu124")
+            else:
+                print("Then install CPU-only:")
+                print("  pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0")
+            print("  pip install scipy==1.16.2 tqdm==4.67.2")
+            print("  pip install torchinfo==1.8.0 torchmetrics==1.8.2 soundfile==0.13.1 librosa==0.11.0")
+            print("  pip install audiomentations==0.43.1 torch-audiomentations==0.12.0")
+            print("  pip install speechbrain==1.0.3 pronouncing==0.2.0 webrtcvad==2.0.10")
+            print("  pip install pydub==0.25.1 mutagen==1.47.0 acoustics==0.2.6 matplotlib==3.10.8 pandas==3.0.0")
+            print()
+            return False
 
 def prepare_training_data(positive_dir, negative_dir, wake_word, clip_length=3,
                          augmentation_type='full', variations_per_sample=1, force_cpu=False):
@@ -728,16 +910,16 @@ Examples:
     print("OpenWakeWord Full Model Training")
     print("=" * 60)
 
-    # Check dependencies
-    if not check_dependencies():
-        sys.exit(1)
-
     # Check for GPU upgrade opportunity (before training starts)
     force_gpu = None
     if args.gpu:
         force_gpu = True
     elif args.no_gpu:
         force_gpu = False
+
+    # Check dependencies (pass force_gpu to handle --gpu flag when deps missing)
+    if not check_dependencies(force_gpu=force_gpu):
+        sys.exit(1)
 
     if not check_gpu_upgrade_opportunity(force_gpu=force_gpu):
         # User chose to upgrade, script will exit so they can restart

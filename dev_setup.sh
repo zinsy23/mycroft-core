@@ -1554,7 +1554,7 @@ elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
         # Install audio processing libraries (with correct numpy version)
         echo ""
         echo "2️⃣  Installing audio processing libraries..."
-        pip install scipy==1.17.0 tqdm==4.67.2 torchinfo==1.8.0 torchmetrics==1.8.2 soundfile==0.13.1 librosa==0.11.0
+        pip install scipy==1.16.2 tqdm==4.67.2 torchinfo==1.8.0 torchmetrics==1.8.2 soundfile==0.13.1 librosa==0.11.0
 
         # Install audio augmentation libraries (with correct soxr version)
         echo ""
