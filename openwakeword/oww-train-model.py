@@ -24,6 +24,112 @@ import os
 import sys
 from pathlib import Path
 
+def check_gpu_upgrade_opportunity(force_gpu=None):
+    """
+    Check if user has GPU hardware but CPU-only PyTorch, offer to upgrade.
+
+    Args:
+        force_gpu: True to force GPU, False to force CPU, None to prompt if eligible
+
+    Returns:
+        True if should continue, False if user wants to exit to upgrade manually
+    """
+    try:
+        import torch
+        import subprocess
+
+        # Check if GPU hardware exists but CUDA is not available in PyTorch
+        has_nvidia_gpu = subprocess.run(['nvidia-smi'], capture_output=True, stderr=subprocess.DEVNULL).returncode == 0
+        cuda_available = torch.cuda.is_available()
+
+        # Handle --gpu flag when no GPU hardware exists
+        if force_gpu is True and not has_nvidia_gpu:
+            print()
+            print("⚠️  --gpu flag provided but no NVIDIA GPU detected")
+            print("   Continuing with CPU training")
+            print()
+            return True
+
+        # Handle --gpu flag when GPU already enabled
+        if force_gpu is True and cuda_available:
+            print()
+            print("✓ GPU acceleration already enabled")
+            print()
+            return True
+
+        # Handle --no-gpu flag when GPU is available
+        if force_gpu is False and cuda_available:
+            print()
+            print("ℹ️  --no-gpu flag provided: Forcing CPU training (GPU available but not being used)")
+            print()
+            return True
+
+        if has_nvidia_gpu and not cuda_available:
+            # GPU hardware exists but PyTorch is CPU-only
+            print()
+            print("=" * 60)
+            print("🎯 GPU Acceleration Available!")
+            print("=" * 60)
+            print(f"Current PyTorch: {torch.__version__} (CPU-only)")
+            print("NVIDIA GPU detected but not being used for training")
+            print()
+            print("GPU training is ~6-10x faster:")
+            print("  • CPU: 30-60 minutes per 1000 epochs")
+            print("  • GPU: 3-10 minutes per 1000 epochs")
+            print()
+
+            # Handle --gpu / --no-gpu flags
+            if force_gpu is True:
+                print("--gpu flag provided: Switching to GPU PyTorch...")
+                upgrade_choice = 'y'
+            elif force_gpu is False:
+                print("--no-gpu flag provided: Continuing with CPU training")
+                print()
+                return True
+            else:
+                # Ask user
+                upgrade_choice = input("Switch to GPU-accelerated PyTorch now? [Y/n]: ").strip().lower()
+                if not upgrade_choice:
+                    upgrade_choice = 'y'
+
+            if upgrade_choice in ['y', 'yes']:
+                print()
+                print("Installing PyTorch with CUDA 12.4 support...")
+                print("(This will take a few minutes - ~2-3 GB download)")
+                print()
+
+                result = subprocess.run([
+                    sys.executable, '-m', 'pip', 'install',
+                    'torch==2.6.0+cu124', 'torchvision==0.21.0+cu124', 'torchaudio==2.6.0+cu124',
+                    '--index-url', 'https://download.pytorch.org/whl/cu124'
+                ])
+
+                if result.returncode == 0:
+                    print()
+                    print("✅ GPU PyTorch installed successfully!")
+                    print("   Please re-run this script to use GPU acceleration")
+                    print()
+                    return False  # Exit so user can restart with GPU
+                else:
+                    print()
+                    print("⚠️  PyTorch GPU installation failed")
+                    if force_gpu is True:
+                        print("   --gpu flag was provided but installation failed")
+                        print("   Possible causes: network issue, incompatible CUDA version, disk space")
+                    print("   Continuing with CPU training...")
+                    print()
+            else:
+                print()
+                print("Continuing with CPU training")
+                print("(You can switch to GPU later by re-running with --gpu flag)")
+                print()
+
+        return True
+    except Exception as e:
+        # If anything fails, just continue
+        print(f"Note: GPU check failed ({e}), continuing with available PyTorch")
+        return True
+
 def check_dependencies():
     """Check if all required dependencies are installed."""
     # Check if dependencies are already installed
@@ -69,7 +175,7 @@ def check_dependencies():
         return False
 
 def prepare_training_data(positive_dir, negative_dir, wake_word, clip_length=3,
-                         augmentation_type='full', variations_per_sample=1):
+                         augmentation_type='full', variations_per_sample=1, force_cpu=False):
     """
     Prepare training data from positive and negative samples.
 
@@ -80,6 +186,7 @@ def prepare_training_data(positive_dir, negative_dir, wake_word, clip_length=3,
         clip_length: Length of clips in seconds (default: 3)
         augmentation_type: 'full' (all augmentations), 'simple' (mix_clips_batch like notebook), or 'none'
         variations_per_sample: How many augmented variations to generate per sample (default: 1)
+        force_cpu: If True, force CPU mode even if GPU is available (default: False)
 
     Returns:
         Tuple of (positive_features_file, negative_features_file)
@@ -139,8 +246,12 @@ def prepare_training_data(positive_dir, negative_dir, wake_word, clip_length=3,
 
     # Initialize audio feature extractor with GPU acceleration
     import torch
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"\nFeature extraction device: {device}")
+    if force_cpu:
+        device = "cpu"
+        print(f"\nFeature extraction device: cpu (forced by --no-gpu flag)")
+    else:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"\nFeature extraction device: {device}")
 
     F = openwakeword.utils.AudioFeatures(
         device=device,
@@ -340,7 +451,7 @@ def prepare_training_data(positive_dir, negative_dir, wake_word, clip_length=3,
 
     return positive_features_file, negative_features_file
 
-def train_model(positive_features, negative_features, wake_word, n_epochs=10, output_path=None):
+def train_model(positive_features, negative_features, wake_word, n_epochs=10, output_path=None, force_cpu=False):
     """
     Train the wake word detection model.
 
@@ -350,6 +461,7 @@ def train_model(positive_features, negative_features, wake_word, n_epochs=10, ou
         wake_word: The wake word phrase
         n_epochs: Number of training epochs (default: 10)
         output_path: Where to save the final model
+        force_cpu: If True, force CPU mode even if GPU is available (default: False)
     """
     import torch
     from torch import nn
@@ -360,8 +472,12 @@ def train_model(positive_features, negative_features, wake_word, n_epochs=10, ou
     print(f"\n=== Training Model ===")
     print(f"Epochs: {n_epochs}")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
+    if force_cpu:
+        device = "cpu"
+        print(f"Using device: cpu (forced by --no-gpu flag)")
+    else:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Using device: {device}")
 
     # Load training features
     print(f"\nLoading features...")
@@ -579,6 +695,12 @@ Examples:
       --negative-dir ~/samples/not-wake-word \\
       --output computer.onnx \\
       --epochs 10
+
+  # Force GPU acceleration (auto-install GPU PyTorch if needed)
+  python train_oww_model.py --gpu --wake-word "computer" ...
+
+  # Force CPU-only training (skip GPU prompt)
+  python train_oww_model.py --no-gpu --wake-word "computer" ...
         """
     )
 
@@ -593,6 +715,13 @@ Examples:
                        help='Variations to generate per sample (default: 10)')
     parser.add_argument('--output', help='Output model file path')
 
+    # GPU control flags
+    gpu_group = parser.add_mutually_exclusive_group()
+    gpu_group.add_argument('--gpu', action='store_true',
+                          help='Force GPU acceleration (automatically install GPU PyTorch if needed)')
+    gpu_group.add_argument('--no-gpu', action='store_true',
+                          help='Force CPU-only training (skip GPU upgrade prompt)')
+
     args = parser.parse_args()
 
     print("=" * 60)
@@ -602,6 +731,20 @@ Examples:
     # Check dependencies
     if not check_dependencies():
         sys.exit(1)
+
+    # Check for GPU upgrade opportunity (before training starts)
+    force_gpu = None
+    if args.gpu:
+        force_gpu = True
+    elif args.no_gpu:
+        force_gpu = False
+
+    if not check_gpu_upgrade_opportunity(force_gpu=force_gpu):
+        # User chose to upgrade, script will exit so they can restart
+        sys.exit(0)
+
+    # Determine if we should force CPU mode
+    force_cpu = (force_gpu == False)  # True if --no-gpu was specified
 
     # Interactive or command-line mode
     # Check if required arguments are provided (not None)
@@ -676,12 +819,12 @@ Examples:
     # Prepare training data
     positive_features, negative_features = prepare_training_data(
         positive_dir, negative_dir, wake_word, clip_length,
-        augmentation_type, variations_per_sample
+        augmentation_type, variations_per_sample, force_cpu=force_cpu
     )
 
     # Train model
     onnx_path, tflite_path = train_model(
-        positive_features, negative_features, wake_word, n_epochs, output_path
+        positive_features, negative_features, wake_word, n_epochs, output_path, force_cpu=force_cpu
     )
 
     print("\n" + "=" * 60)

@@ -1520,8 +1520,9 @@ elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
         echo "   This may take several minutes (~4-6 GB download)..."
         echo ""
 
-        # Install PyTorch with CUDA support if GPU available
-        if [[ "$GPU_AVAILABLE" == true ]]; then
+        # Install PyTorch - follow STT GPU decision for consistency
+        # (User can switch to GPU training later by reinstalling PyTorch with CUDA)
+        if [[ "$ENABLE_STT_GPU" == true ]]; then
             echo "1️⃣  Installing PyTorch with CUDA 12.4 support..."
             pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
 
@@ -1537,10 +1538,15 @@ elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
             echo "1️⃣  Installing PyTorch (CPU-only)..."
             pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0
 
-            if [ $? -eq 0 ]; then
+            if [[ "$GPU_AVAILABLE" == true ]]; then
                 echo "✅ PyTorch (CPU) installed successfully"
+                echo ""
+                echo "💡 Note: GPU detected but CPU-only PyTorch installed (matching your STT choice)"
+                echo "   The training script will offer to switch to GPU when you first run it"
+                echo "   Or use: oww-train-model --gpu  (to force GPU upgrade)"
+                echo "           oww-train-model --no-gpu  (to skip GPU prompt)"
             else
-                echo "⚠️  Warning: PyTorch installation failed"
+                echo "✅ PyTorch (CPU) installed successfully"
             fi
         fi
 
