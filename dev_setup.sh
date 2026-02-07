@@ -1508,20 +1508,16 @@ elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
     echo "(Lightweight alternative using ONNX models)"
     echo ""
 
-    # Install OpenWakeWord packages with pinned versions (known-good for mycroft-core)
-    echo "Installing OpenWakeWord and OVOS plugin..."
-    pip install openwakeword==0.6.0 ovos-ww-plugin-openwakeword==0.4.1
-
-    echo "✅ OpenWakeWord packages installed (pinned to known-good versions)"
-
     # Install training dependencies if user requested them earlier
+    # IMPORTANT: Install training deps BEFORE OpenWakeWord to avoid version downgrades
     if [[ "$INSTALL_OWW_TRAINING" == true ]]; then
         echo ""
         echo "📦 Installing PyTorch and training dependencies..."
         echo "   This may take several minutes (~4-6 GB download)..."
         echo ""
 
-        # Install PyTorch - follow STT GPU decision for consistency
+        # Install PyTorch FIRST - follow STT GPU decision for consistency
+        # This pins sympy==1.13.1 which OpenWakeWord will accept
         # (User can switch to GPU training later by reinstalling PyTorch with CUDA)
         if [[ "$ENABLE_STT_GPU" == true ]]; then
             echo "1️⃣  Installing PyTorch with CUDA 12.4 support..."
@@ -1551,15 +1547,17 @@ elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
             fi
         fi
 
-        # Install audio processing libraries (with correct numpy version)
+        # Install audio augmentation libraries BEFORE librosa
+        # This pins soxr==0.5.0.post1 which librosa will accept
         echo ""
-        echo "2️⃣  Installing audio processing libraries..."
-        pip install scipy==1.16.2 tqdm==4.67.2 torchinfo==1.8.0 torchmetrics==1.8.2 soundfile==0.13.1 librosa==0.11.0
-
-        # Install audio augmentation libraries (with correct soxr version)
-        echo ""
-        echo "3️⃣  Installing audio augmentation libraries..."
+        echo "2️⃣  Installing audio augmentation libraries..."
         pip install audiomentations==0.43.1 torch-audiomentations==0.12.0
+
+        # Install audio processing libraries (with correct scipy version)
+        # This pins scipy==1.16.2 and tqdm==4.67.2 which OpenWakeWord will accept
+        echo ""
+        echo "3️⃣  Installing audio processing libraries..."
+        pip install scipy==1.16.2 tqdm==4.67.2 torchinfo==1.8.0 torchmetrics==1.8.2 soundfile==0.13.1 librosa==0.11.0
 
         # Install additional training utilities
         echo ""
@@ -1583,8 +1581,22 @@ try:
 except Exception as e:
     print(f"\n⚠️  Warning: Could not verify PyTorch: {e}", file=sys.stderr)
 VERIFY_EOF
-    else
-        echo "⏭️  Skipping training dependencies - you can install them later with 'oww-train-model'"
+    fi
+
+    # Install OpenWakeWord packages AFTER training deps (if installed)
+    # This way OpenWakeWord accepts the pinned versions from training:
+    # - sympy 1.13.1 (from PyTorch)
+    # - scipy 1.16.2 (from training)
+    # - tqdm 4.67.2 (from training)
+    # - soxr 0.5.0.post1 (from augmentation)
+    echo ""
+    echo "Installing OpenWakeWord and OVOS plugin..."
+    pip install openwakeword==0.6.0 ovos-ww-plugin-openwakeword==0.4.1
+
+    echo "✅ OpenWakeWord packages installed (pinned to known-good versions)"
+
+    if [[ "$INSTALL_OWW_TRAINING" != true ]]; then
+        echo "⏭️  Training dependencies not installed - you can install them later with 'oww-train-model'"
     fi
 
     # Create symlinks for training scripts in venv bin

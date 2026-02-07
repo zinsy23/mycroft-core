@@ -43,10 +43,10 @@ def _initialize_mic_level_file_early():
         mic_level_file = "/tmp/mycroft/ipc/mic_level"
         os.makedirs(os.path.dirname(mic_level_file), exist_ok=True)
 
-        # Write initial mic level data with default threshold
+        # Write initial mic level data with default threshold (300 from speech_recognition.Recognizer)
         # Format matches ResponsiveRecognizer._initialize_mic_level_file()
         with open(mic_level_file, 'w') as f:
-            f.write('Energy:  cur=0 thresh={:.3f} muted=0'.format(1000))
+            f.write('Energy:  cur=0 thresh={:.3f} muted=0'.format(300))
 
         LOG.debug("Initialized mic level file early for CLI display")
     except Exception as e:
