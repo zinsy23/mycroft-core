@@ -11,45 +11,74 @@ requests-futures==0.9.5
 # Audio processing
 PyAudio==0.2.11
 SpeechRecognition==3.8.1
-pocketsphinx==0.1.0
+# pocketsphinx==0.1.0  # Optional: Only needed for pocketsphinx wake word engine
+                       # Fails on x86_64 with GCC 13+ (C23 bool typedef issue)
+                       # Works on ARM/Pi - provides "wake up" alternative wake word
+                       # Not needed for primary functionality (Precise + FasterWhisper)
 
 # System utilities
 pyserial==3.0
-psutil>=5.6.6
-python-dateutil~=2.6.0
-fasteners>=0.14.1
-PyYAML>=5.4
-pyxdg>=0.27
+psutil>=5.6.6,<8.0
+# Pin to version compatible with pandas/matplotlib (require >=2.7)
+# lingua-franca will be installed separately with --no-deps to avoid conflict
+python-dateutil>=2.7,<3.0
+fasteners>=0.14.1,<1.0
+PyYAML>=5.4,<7.0
+pyxdg>=0.27,<0.29
 
 # Image processing
-Pillow>=8.3.2
+Pillow>=8.3.2,<13.0
 
 # Event handling - match mycroft-messagebus-client dependency
 pyee==8.1.0
 
 # Mycroft core components
-lingua-franca>=0.4.2
-msm>=0.8.9
+# Pinned to known-good versions for stability
+# lingua-franca==0.4.3  # Installed separately with --no-deps (conflicts with python-dateutil)
+msm==0.9.0
+msk==0.4.0
 # Use older messagebus client to avoid threading issues (will be patched)
 mycroft-messagebus-client==0.9.6
-adapt-parser>=0.3.0
-padaos>=0.1.9
-petact>=0.1.2
-precise-runner
+adapt-parser>=0.3.0,<2.0
+padaos>=0.1.9,<0.2
+petact>=0.1.2,<0.2
+precise-runner==0.3.1
 
 # Intent parsing (padatious) - critical for skills
 # padatious>=0.4.8  # Installed separately due to fann2 dependency issues
 # xxhash  # Required dependency for padatious, installed separately
 
 # Wake word detection (Precise) - TensorFlow installed conditionally if needed
-precise-runner  # Core Precise engine (works with default wake word)
+# precise-runner already listed above at line 42 with pinned version
 
 # Optional components (may fail on some systems)
 # fann2>=1.0.7  # padatious dependency, will be handled with dummy module
-# msk>=0.3.16
 
-# STT plugin for offline operation
-ovos-stt-plugin-fasterwhisper
+# OVOS packages - pinned to known-good versions for mycroft-core compatibility
+# DO NOT upgrade - newer versions (2.x) are designed for OVOS-core, not mycroft-core
+# These versions have been tested and confirmed working with mycroft-core
+# Ordered: base dependencies first, then packages that depend on them
+ovos-utils==0.8.4
+ovos-config==0.0.12
+ovos-bus-client==1.3.7
+ovos-plugin-manager==0.9.0
+
+# STT dependencies - pinned for stability
+# ctranslate2 is the inference backend, faster-whisper uses it
+# Pin numpy to avoid version conflicts with training dependencies (torch requires <2.4)
+numpy>=2.3.0,<2.4
+ctranslate2==4.6.2
+faster-whisper==1.2.1
+
+# NOTE: CUDA runtime libraries (nvidia-cudnn-cu12, nvidia-cublas-cu12, nvidia-cuda-runtime-cu12)
+# are installed separately by dev_setup.sh if user enables GPU acceleration for STT
+
+# OVOS STT plugin (requires all of the above)
+ovos-stt-plugin-fasterwhisper==0.2.0
+
+# Wake word plugin for OpenWakeWord (optional - installed if selected during setup)
+# ovos-ww-plugin-openwakeword==0.4.1
+# openwakeword==0.6.0
 
 # Dependencies for working skills only
 # ifaddr>=0.1.0        # Was for mycroft-ip (removed)

@@ -22,7 +22,7 @@ pip install ovos-plugin-manager==0.9.0 ovos-ww-plugin-openwakeword==0.4.1 ovos-s
 - ✅ **Voice Commands**: "Hey Mycroft, tell me a joke"
 - ✅ **Local STT**: OVOS FasterWhisper (Whisper model)
 - ✅ **Local TTS**: eSpeak (reliable offline speech)
-- ✅ **Wake Word**: Precise engine (default "hey mycroft")
+- ✅ **Wake Word**: Precise runtime (default "hey mycroft") or OpenWakeWord (custom training)
 - ✅ **Skills**: Offline-compatible skills auto-installed
 - ✅ **No Backend**: Completely independent operation
 
@@ -30,16 +30,22 @@ pip install ovos-plugin-manager==0.9.0 ovos-ww-plugin-openwakeword==0.4.1 ovos-s
 - **Backend Bypass**: All Mycroft.ai API calls bypassed
 - **Threading Issues**: Python 3.11+ compatibility restored
 - **Service Readiness**: Enclosure service timeout resolved
-- **Dependencies**: Local alternatives for all external services
+- **Dependencies**: Local alternatives for all externaVl services
+
+### ℹ️ **Known Installation Notes:**
+- **Pocketsphinx**: May fail on x86_64 with modern GCC (C23 issue) - this is OK, Precise wake word engine is used instead
+- **Python 3.11+**: Installed via `uv` if not present (no system packages needed)
+- **Training Dependencies**: Optional PyTorch (OpenWakeWord) or TensorFlow (Precise) - only needed if training custom wake word models
+- **Precise Model**: Pre-downloaded during setup to avoid runtime network issues
 
 ---
 
 ## 🚀 **Quick Start (Offline Setup)**
 
-### **1. Clone and Setup**
+### **1. Clone and Setup (for this Mycroft fork)**
 ```bash
 cd ~/
-git clone --depth=1 https://github.com/YOUR_USERNAME/mycroft-core.git
+git clone --depth=1 https://github.com/zinsy23/mycroft-core.git
 cd mycroft-core
 bash dev_setup.sh
 ```
@@ -73,7 +79,9 @@ Say: **"Hey Mycroft, tell me a joke"**
 The setup script handles everything automatically:
 
 #### **Phase 0: Configuration Questions**
-- 🎤 **Custom Wake Words**: Install TensorFlow for training custom models?
+- 🎤 **Wake Word Engine**: Precise runtime, OpenWakeWord, or neither?
+- 🎓 **Training Dependencies** (if OpenWakeWord selected): Install PyTorch for custom wake word training?
+- ⚡ **GPU Acceleration** (if GPU detected): Enable GPU for speech-to-text?
 - 🔄 **GPIO Support**: Install Raspberry Pi hardware libraries?
 - 🐍 **Python 3.11+**: Install DeadSnakes PPA for Ubuntu users?
 
@@ -129,10 +137,63 @@ This setup takes longer than the original Mycroft installation because we're bui
 ## 🎵 **Current Technology Stack**
 
 ### **Speech-to-Text (STT)**
-- **Engine**: OVOS FasterWhisper
-- **Model**: Whisper (local, ~300MB)
+- **Engine**: OVOS FasterWhisper (default)
+- **Model**: Whisper base.en (~140MB) or medium.en with GPU (~1.5GB)
 - **Quality**: High accuracy, offline operation
 - **Language**: English (expandable)
+
+#### **Alternative STT: Google Cloud Speech API**
+
+Speech-to-Text (STT) is the component that **transcribes your spoken commands into text** after the wake word is detected. When you say "Hey Mycroft, what time is it", the STT engine converts "what time is it" into text so Mycroft can understand and process your command.
+
+By default, this uses **FasterWhisper** running locally on your device. However, for systems with limited resources (like Raspberry Pi), you can use **Google's cloud-based STT service** instead, which offloads the speech transcription processing to Google's servers.
+
+**When to use Google STT:**
+- Low-power devices (Raspberry Pi) where local Whisper transcription is slow
+- When you have reliable internet connectivity
+- When you want faster speech-to-text transcription without local processing
+
+**Requirements:**
+- Internet connection
+- Google Cloud account with Speech-to-Text API enabled (for `googlecloud` module)
+- API credentials (JSON key file) for `googlecloud` module
+- The Google API client library is already installed by default
+
+**Configuration** (`~/.config/mycroft/mycroft.conf`):
+
+For basic Google STT (uses free API):
+```json
+{
+  "stt": {
+    "module": "google",
+    "google": {
+      "lang": "en-US"
+    }
+  }
+}
+```
+
+For Google Cloud STT with service account (requires credentials):
+```json
+{
+  "stt": {
+    "module": "googlecloud",
+    "googlecloud": {
+      "lang": "en-US",
+      "credential": {
+        "json": "/path/to/service-account-key.json"
+      }
+    }
+  }
+}
+```
+
+**Trade-offs:**
+- ✅ **Faster transcription** than CPU-based Whisper on low-power devices
+- ✅ **Offloads processing** to cloud (saves local resources)
+- ❌ **Requires internet** (won't work offline)
+- ❌ **Privacy concern** (audio sent to Google servers)
+- ❌ **May incur costs** beyond free tier limits
 
 ### **Text-to-Speech (TTS)**
 - **Engine**: eSpeak
@@ -141,10 +202,10 @@ This setup takes longer than the original Mycroft installation because we're bui
 - **Offline**: Completely local
 
 ### **Wake Word Detection**
-- **Engine**: Precise (Mycroft's neural network)
-- **Default**: "Hey Mycroft"
-- **Custom**: Train your own (requires TensorFlow)
-- **Accuracy**: High with proper training
+- **Engine**: Precise runtime (default) or OpenWakeWord (for custom training)
+- **Default**: "Hey Mycroft" (works out-of-box)
+- **Custom Training**: OpenWakeWord recommended (PyTorch-based, GPU support)
+- **Precise Models**: Runtime support only (training requires separate Python 3.7 + TF1 environment)
 
 ### **Skills System**
 - **Manager**: MSM (Mycroft Skills Manager)
@@ -186,26 +247,35 @@ This setup takes longer than the original Mycroft installation because we're bui
 
 ### **Custom Wake Word Configuration**
 
-If you installed TensorFlow during setup, you can train and use custom wake words. Here's how to configure them:
+⚠️ **IMPORTANT**: Wake word training requirements have changed for Python 3.11+.
 
-#### **Training Custom Wake Words**
-```bash
-# Train a custom wake word (requires audio samples)
-precise-train -w "your phrase" /path/to/audio/samples
+**Available Wake Word Engines:**
 
-# Test the trained model
-precise-listen -w "your phrase" /path/to/model.pb
-```
+- **OpenWakeWord (Recommended for Custom Training)**
+  - ✅ Full training support in this environment (Python 3.11+)
+  - ✅ GPU acceleration available (optional, via PyTorch)
+  - ✅ Complete workflow: Collect samples → Train → Deploy
+  - 📖 See [OPENWAKEWORD_SETUP.md](OPENWAKEWORD_SETUP.md) for complete guide
+  - 💡 Optional flags: `--gpu` (force GPU) or `--no-gpu` (force CPU) for dependency control
 
-#### **Configuration Examples**
+- **Precise (Runtime Only)**
+  - ✅ Runtime support for existing `.pb` model files
+  - ❌ Training not supported in Python 3.11 environment (requires Python 3.7 + TensorFlow 1.x)
+  - 📖 See [CUSTOM_WAKE_WORDS.md](CUSTOM_WAKE_WORDS.md) for runtime setup
 
-**Example 1: "Computer" Wake Word**
+#### **Quick Configuration Example (Precise)**
+
+Example configuration for a custom wake word "computer" (replace with your wake word):
+
 ```json
 {
+  "precise": {
+    "executable": "~/.local/share/mycroft/precise/precise-engine/precise-engine"
+  },
   "hotwords": {
     "computer": {
       "module": "precise",
-      "local_model_file": "/home/pi/.mycroft/precise/computer.pb",
+      "local_model_file": "~/.local/share/mycroft/precise/computer.pb",
       "sensitivity": 0.31,
       "trigger_level": 3
     }
@@ -216,39 +286,10 @@ precise-listen -w "your phrase" /path/to/model.pb
 }
 ```
 
-**Example 2: Multiple Wake Words**
-```json
-{
-  "hotwords": {
-    "hey mycroft": {
-      "module": "precise",
-      "phonemes": "HH EY . M AY K R AO F T",
-      "threshold": 1e-90
-    },
-    "computer": {
-      "module": "precise",
-      "local_model_file": "/home/pi/.mycroft/precise/computer.pb",
-      "sensitivity": 0.31,
-      "trigger_level": 3
-    }
-  },
-  "listener": {
-    "wake_word": "computer"
-  }
-}
-```
-
-#### **Configuration Parameters**
-- **`module`**: Always "precise" for custom wake words
-- **`local_model_file`**: Path to your trained .pb model file
-- **`sensitivity`**: Lower values = more sensitive (0.1 to 1.0)
-- **`trigger_level`**: Number of consecutive detections needed (1-5)
-- **`threshold`**: Detection threshold (lower = more sensitive)
-
-#### **Model File Locations**
-- **Default models**: `~/.local/share/mycroft/precise/`
-- **Custom models**: `~/.mycroft/precise/` or custom path
-- **File format**: `.pb` (Protocol Buffer)
+**Notes**:
+- Replace `"computer"` with your custom wake word phrase
+- The `.pb` file must exist at the path specified in `local_model_file`
+- The old path `/home/pi/.mycroft/precise/` is deprecated. Use `~/.local/share/mycroft/precise/` instead
 
 ### **Configuration Management**
 ```bash
@@ -272,6 +313,277 @@ precise-listen -w "your phrase" /path/to/model.pb
 
 # List installed skills
 ./bin/mycroft-msk list
+```
+
+---
+
+## 🛠️ **Creating Custom Skills**
+
+Mycroft's skill system allows you to add custom voice commands and functionality. Skills are automatically loaded from `/opt/mycroft/skills/`.
+
+### **Quick Start: Creating a New Skill**
+
+**Method 1: Using mycroft-msk (recommended)**
+```bash
+cd ~/mycroft-core
+./bin/mycroft-msk create my-custom-skill
+```
+
+**Method 2: Using msk directly (in virtual environment)**
+```bash
+cd ~/mycroft-core
+source .venv/bin/activate
+msk create my-custom-skill
+```
+
+Both methods create a skill template in `/opt/mycroft/skills/my-custom-skill/` with the following structure:
+
+```
+my-custom-skill/
+├── __init__.py           # Main skill code (your Python logic goes here)
+├── locale/               # Language-specific files
+│   └── en-us/            # English (US) - create other locales as needed
+│       ├── *.intent      # Voice command patterns that trigger the skill
+│       └── *.dialog      # Response templates for text-to-speech
+├── manifest.yml          # External dependencies (pip packages, system packages)
+├── settingsmeta.yaml     # Optional: Web UI settings configuration
+└── README.md             # Skill documentation
+```
+
+### **Skill File Structure Explained**
+
+#### **1. `__init__.py` - Main Skill Logic**
+
+This is where your skill's Python code lives. It defines what happens when voice commands are triggered.
+
+**Key components:**
+- Import `MycroftSkill` base class and decorators
+- Define your skill class (inherits from `MycroftSkill`)
+- Use `@intent_handler()` decorators to link intents to handler methods
+- Use `self.speak()` to respond with speech
+- Use `self.speak_dialog()` to use dialog templates
+
+**Example structure:**
+```python
+from mycroft import MycroftSkill, intent_handler
+
+class MyCustomSkill(MycroftSkill):
+    def __init__(self):
+        super().__init__()
+
+    @intent_handler('command.name.intent')
+    def handle_command(self, message):
+        # Your logic here
+        self.speak_dialog('response.name')
+
+def create_skill():
+    return MyCustomSkill()
+```
+
+#### **2. `locale/en-us/*.intent` - Voice Command Patterns**
+
+Intent files define the voice command patterns that trigger your skill. Each line is a pattern with optional variations.
+
+**Syntax:**
+- `[word1|word2]` - Optional alternatives (matches either word1 OR word2)
+- `[word|]` - Optional word (matches with or without the word)
+- `{variable}` - Capture variable data from the command
+
+**Example (`my.command.intent`):**
+```
+do something [cool|awesome]
+[please|] do the thing
+make it {action}
+```
+
+This matches:
+- "do something cool"
+- "do something awesome"
+- "please do the thing"
+- "do the thing"
+- "make it work" (captures "work" as `action`)
+
+#### **3. `locale/en-us/*.dialog` - Response Templates**
+
+Dialog files contain response templates that Mycroft speaks back to you. Each line is a possible response (randomly selected).
+
+**Example (`success.dialog`):**
+```
+Done
+Task completed successfully
+All set
+```
+
+When you call `self.speak_dialog('success')`, Mycroft randomly picks one of these responses.
+
+**Using variables in dialogs:**
+```
+The temperature is {temp} degrees
+Setting brightness to {percent} percent
+```
+
+In code: `self.speak_dialog('temperature', {'temp': 72})`
+
+#### **4. `manifest.yml` - External Dependencies**
+
+Lists any Python packages or system dependencies your skill needs. Mycroft automatically installs these when the skill loads.
+
+**Example:**
+```yaml
+dependencies:
+  # Python packages from PyPI
+  python:
+    - requests
+    - phue
+    - python-dateutil
+
+  # System packages (optional)
+  system:
+    apt-get: libffi-dev
+
+  # Required executables (optional)
+  exes:
+    - ffmpeg
+```
+
+**Note:** Built-in Python modules (like `os`, `sys`, `json`) don't need to be listed.
+
+### **Development Workflow**
+
+1. **Create the skill structure:**
+   ```bash
+   ./bin/mycroft-msk create my-skill
+   cd /opt/mycroft/skills/my-skill/
+   ```
+
+2. **Define voice commands** in `locale/en-us/*.intent`:
+   ```
+   tell me a [random|] fact
+   what [is|do you know about] {topic}
+   ```
+
+3. **Define responses** in `locale/en-us/*.dialog`:
+   ```
+   Here's an interesting fact
+   Did you know that
+   ```
+
+4. **Write the skill logic** in `__init__.py`:
+   ```python
+   @intent_handler('fact.intent')
+   def handle_fact(self, message):
+       topic = message.data.get('topic')
+       if topic:
+           self.speak(f"Here's a fact about {topic}")
+       else:
+           self.speak_dialog('fact')
+   ```
+
+5. **Add dependencies** (if needed) in `manifest.yml`:
+   ```yaml
+   dependencies:
+     python:
+       - requests
+   ```
+
+6. **Reload skills** to test changes:
+   ```bash
+   # Restart skills service
+   ./stop-mycroft.sh skills
+   ./start-mycroft.sh skills
+
+   # Or restart everything
+   ./stop-mycroft.sh all
+   ./start-mycroft.sh all
+   ```
+
+7. **Test with voice commands:**
+   ```
+   "Hey Mycroft, tell me a fact"
+   "Hey Mycroft, what do you know about Python"
+   ```
+
+### **Skill Development Tips**
+
+- **Multiple locales**: Create `locale/es-es/`, `locale/fr-fr/`, etc. for other languages
+- **Intent patterns**: Start with simple patterns, then add variations based on testing
+- **Dialog variety**: Add multiple dialog responses to make interactions feel natural
+- **Variables**: Use `{variable}` in intents to capture user input, access via `message.data.get('variable')`
+- **Logging**: Use `self.log.info()`, `self.log.error()` for debugging (logs go to `/var/log/mycroft/skills.log`)
+- **Settings**: Use `settingsmeta.yaml` to create web UI configuration options
+- **Testing**: Check `/var/log/mycroft/skills.log` if your skill doesn't load or respond
+
+### **Common Intent Patterns**
+
+```
+# Simple command
+turn [on|off] the lights
+
+# With optional words
+[please|] [can you|] set [the|] timer
+
+# With captured variables
+set timer [for|to] {duration}
+what is {number} plus {number}
+
+# Multiple variations
+[tell me|what is|give me] [a|the] [weather|forecast]
+```
+
+### **Common Dialog Patterns**
+
+```
+# Simple responses
+Done
+Okay
+Got it
+
+# With variables
+The answer is {result}
+Setting {device} to {value}
+
+# Questions
+Would you like me to continue?
+What would you like to do next?
+```
+
+### **Example: Complete Simple Skill**
+
+**File: `locale/en-us/greet.user.intent`**
+```
+greet [me|]
+say hello [to me|]
+```
+
+**File: `locale/en-us/greeting.dialog`**
+```
+Hello there
+Hi, how can I help you
+Greetings
+```
+
+**File: `__init__.py`**
+```python
+from mycroft import MycroftSkill, intent_handler
+
+class GreetingSkill(MycroftSkill):
+    @intent_handler('greet.user.intent')
+    def handle_greeting(self, message):
+        self.speak_dialog('greeting')
+
+def create_skill():
+    return GreetingSkill()
+```
+
+**File: `manifest.yml`**
+```yaml
+# No external dependencies needed for this simple skill
+```
+
+**Usage:**
+```
+"Hey Mycroft, greet me"
+→ "Hello there" (or other random greeting)
 ```
 
 ---
@@ -336,17 +648,42 @@ Add to `mycroft.conf` for weather skill:
 
 ### **Common Issues**
 
-#### **Audio Not Working**
+#### **Microphone Not Working**
+
+**Most common issue: Wrong default microphone selected**
+
 ```bash
-# Check audio devices
-arecord -l
+# 1. List all available microphones
+pactl list sources short
 
-# Test microphone
-arecord -D hw:1,0 -f S16_LE -r 16000 -c 1 test.wav
+# 2. Check which one is currently default
+pactl info | grep "Default Source"
 
-# Check Mycroft logs
-tail -f /var/log/mycroft/*.log
+# 3. Set the correct microphone as default
+pactl set-default-source SOURCE_NAME_FROM_STEP_1
+
+# Example:
+pactl set-default-source alsa_input.usb-046d_C922_Pro_Stream_Webcam_46FC0ADF-02.analog-stereo
+
+# 4. Restart Mycroft
+cd ~/mycroft-core
+./stop-mycroft.sh && ./start-mycroft.sh all
 ```
+
+**To make it permanent**, edit `~/.config/mycroft/mycroft.conf` and add:
+```json
+{
+  "listener": {
+    "device_name": "C922",
+    "sample_rate": 16000
+  }
+}
+```
+(Use a substring that matches your device name)
+
+**Other issues:**
+- **Voice service crashed**: Check `/var/log/mycroft/voice.log` for pocketsphinx errors
+- **Microphone muted**: Run `pactl list sources | grep -A 10 "YOUR_DEVICE" | grep Mute`
 
 #### **Wake Word Not Responding**
 ```bash
@@ -355,7 +692,12 @@ ls -la ~/.local/share/mycroft/precise/
 
 # Verify wake word configuration
 ./bin/mycroft-config show user | grep -A 10 hotwords
+
+# Check which wake word engine is loaded
+tail -f /var/log/mycroft/voice.log | grep -i "wake word"
 ```
+
+**Note:** If you see pocketsphinx installation failures during setup, this is expected on modern x86_64 systems and won't affect functionality. Precise is the primary wake word engine and works perfectly.
 
 #### **Skills Not Loading**
 ```bash
@@ -371,6 +713,117 @@ tail -f /var/log/mycroft/skills.log
 - **Audio**: `/var/log/mycroft/audio.log`
 - **Voice**: `/var/log/mycroft/voice.log`
 - **Message Bus**: `/var/log/mycroft/messagebus.log`
+
+---
+
+## 🎤 **Wake Word Engines**
+
+### **Understanding Wake Word vs. Speech-to-Text**
+
+Mycroft uses **two separate systems** for voice recognition:
+
+| Component | Purpose | Engine Used | When It Runs |
+|-----------|---------|-------------|--------------|
+| **Wake Word Detection** | Listens for "Hey Mycroft" | Precise (default) | Continuously (24/7) |
+| **Speech-to-Text (STT)** | Converts commands to text | FasterWhisper | After wake word detected |
+
+**Important:** These are **independent systems**. FasterWhisper cannot be used for wake word detection.
+
+### **Available Wake Word Engines**
+
+#### **1. Precise Runtime (Default)** ✅
+- **Status**: Fully working, installed by default for "hey mycroft"
+- **Quality**: Excellent accuracy for pre-trained "hey mycroft" model
+- **Use Case**: Default wake word, or if you have existing `.pb` model files
+- **Training**: Not supported in Python 3.11 environment (requires separate Python 3.7 + TF1 setup)
+- **Configuration**: Already configured in `~/.config/mycroft/mycroft.conf`
+
+```json
+"hotwords": {
+  "hey mycroft": {
+    "module": "precise",
+    "threshold": 1e-90
+  }
+}
+```
+
+#### **2. OpenWakeWord (Recommended for Custom Training)** ✅
+- **Status**: Optional, installed if you select it during setup
+- **Quality**: Excellent accuracy with proper training
+- **Use Case**: Training your own custom wake words (e.g., "computer", "jarvis")
+- **Training**: Full support with GPU acceleration (Python 3.11+ compatible)
+- **See**: [OPENWAKEWORD_SETUP.md](OPENWAKEWORD_SETUP.md) for complete guide
+
+#### **3. Pocketsphinx (Fallback)** ⚠️
+- **Status**: Optional, may fail on modern x86_64 systems
+- **Quality**: Fair accuracy, higher false positive rate
+- **Known Issue**: Fails to compile on x86_64 with GCC 13+ (C23 `bool` typedef conflict)
+- **Works On**: ARM/Raspberry Pi systems (compiles successfully)
+- **Fallback**: Mycroft automatically falls back to pocketsphinx if Precise fails
+
+**Why pocketsphinx may fail:**
+```
+Error: 'bool' cannot be defined via 'typedef'
+Cause: Modern GCC defaults to C23 standard where 'bool' is a keyword
+Impact: Installation fails on x86_64 Debian/Ubuntu with GCC 13+
+```
+
+**This is OK because:**
+- ✅ Precise is the primary engine (better quality)
+- ✅ Setup continues without pocketsphinx (marked as optional)
+- ✅ On Raspberry Pi, pocketsphinx installs successfully as backup
+- ✅ Mycroft works perfectly with just Precise
+
+#### **4. Other Alternatives**
+
+If you need additional wake word options:
+
+| Engine | License | Quality | Notes |
+|--------|---------|---------|-------|
+| **Porcupine** | Free tier available | Excellent | Requires API key |
+| **Snowboy** | Deprecated | Good | No longer maintained |
+
+### **Wake Word Engine Fallback Chain**
+
+Mycroft automatically tries engines in this order:
+
+```
+1. Precise (configured)
+   ↓ (if fails)
+2. Pocketsphinx (backup)
+   ↓ (if fails)
+3. Basic Pocketsphinx (last resort)
+```
+
+### **Testing Your Wake Word**
+
+```bash
+# Check which engine is loaded
+tail -f /var/log/mycroft/voice.log | grep -i "wake word"
+
+# Verify Precise model exists
+ls -la ~/.local/share/mycroft/precise/
+
+# Test wake word sensitivity
+# Say "Hey Mycroft" and watch for detection in logs
+tail -f /var/log/mycroft/voice.log
+```
+
+### **Pocketsphinx Installation Status**
+
+During setup, you'll see one of these messages:
+
+**On x86_64 (Debian/Ubuntu with GCC 13+):**
+```
+⚠️  pocketsphinx installation failed (known issue on x86_64 with GCC 13+)
+   This is OK - Precise wake word engine will be used instead
+   Primary wake word 'hey mycroft' (Precise) will still work perfectly
+```
+
+**On Raspberry Pi (ARM):**
+```
+✅ pocketsphinx installed - 'wake up' alternative wake word available
+```
 
 ---
 
@@ -393,14 +846,39 @@ tail -f /var/log/mycroft/skills.log
 ## 🌟 **Advanced Features**
 
 ### **Custom Wake Word Training**
-If you installed TensorFlow during setup:
-```bash
-# Train custom wake word
-precise-train -w "your phrase" /path/to/audio/samples
 
-# Test wake word
-precise-listen -w "your phrase" /path/to/model.pb
+**OpenWakeWord (Recommended)**
+
+💡 **Note**: All `oww-` commands require the virtual environment to be activated first:
+```bash
+cd mycroft-core  # Navigate to your mycroft-core directory
+source .venv/bin/activate
 ```
+You only need to do this once per terminal session.
+
+If you installed training dependencies during setup, you can start training immediately:
+```bash
+source .venv/bin/activate
+
+# Example: Training a custom wake word "computer"
+# (Replace "computer" with your desired wake word phrase like "hey robot", "jarvis", etc.)
+oww-train-model \
+  --wake-word "computer" \
+  --positive-dir ~/samples/wake-word \
+  --negative-dir ~/samples/not-wake-word
+```
+
+Optional GPU control flags (only needed to override your setup choice):
+- `--gpu`: Force GPU acceleration (auto-installs/upgrades if needed)
+- `--no-gpu`: Force CPU-only training
+
+**Note**: All `oww-` commands require the venv to be activated (shown above).
+
+See [OPENWAKEWORD_SETUP.md](OPENWAKEWORD_SETUP.md) for complete training guide.
+
+**Precise Models**
+
+Runtime support only. Training requires a separate Python 3.7 + TensorFlow 1.x environment. See [CUSTOM_WAKE_WORDS.md](CUSTOM_WAKE_WORDS.md) for details.
 
 ### **GPIO Integration (Raspberry Pi)**
 If you installed GPIO support:
@@ -441,6 +919,375 @@ pip install -r requirements/requirements.txt
 
 ---
 
+## ⚡ **Performance Optimization (GPU Acceleration)**
+
+### **Understanding the Voice Processing Pipeline**
+
+When you speak to Mycroft, your voice goes through several stages:
+
+1. **🎤 Audio Capture** (PyAudio) - Microphone input, typically ~30ms latency
+2. **👂 Wake Word Detection** (Precise) - Listens for "Hey Mycroft" using a lightweight neural network, ~10-50ms per audio chunk
+3. **🔴 Recording** - Captures your command after wake word detected
+4. **🔇 Voice Activity Detection (VAD)** - Waits for silence (~0.5-1.0s) to know you're done speaking
+5. **💬 Speech-to-Text (STT)** - **BOTTLENECK: ~0.9-1.4s on CPU** - Transcribes audio using FasterWhisper (Whisper neural network)
+6. **🧠 Intent Matching** (Padatious) - Determines what skill to use, ~10-50ms
+7. **🔊 Text-to-Speech (TTS)** (eSpeak) - Generates response audio, ~100-300ms
+
+**The slowest component is Speech-to-Text (STT)**, which runs the Whisper neural network to transcribe your voice command. This is where GPU acceleration makes the biggest difference.
+
+### **GPU Acceleration for Speech-to-Text**
+
+FasterWhisper (the STT engine) can use NVIDIA GPU acceleration to **significantly reduce transcription time**. Performance gains vary depending on your GPU model and the Whisper model size you choose.
+
+#### **Requirements:**
+
+✅ **NVIDIA GPU** with compute capability **6.0+** (Pascal architecture or newer)
+   - ✓ Works: GTX 1000 series, RTX 2000/3000/4000 series, Tesla P/V/A series
+   - ✗ Too old: GTX 700/900 series (Maxwell/Kepler architecture)
+
+✅ **System CUDA libraries** installed at `/usr/local/cuda`
+   - Cannot be installed via pip - must be system-wide installation
+   - Ubuntu/Debian: `sudo apt install nvidia-cuda-toolkit`
+   - Check installation: `nvcc --version` should show CUDA 11.x or 12.x
+
+✅ **Sufficient VRAM** for the model:
+   - `tiny.en` - ~100 MB (fast, lower accuracy)
+   - `base.en` - ~220 MB (default, good balance)
+   - `small.en` - ~500 MB (better accuracy)
+   - `medium.en` - ~870 MB (best accuracy for English)
+
+**Note:** The setup script already includes GPU support in `start-mycroft.sh`. If you don't have NVIDIA/CUDA, the path is simply ignored (no errors).
+
+**For GPU-accelerated training** (custom wake words), see the [GPU Acceleration for Training](#gpu-acceleration-for-training-pytorchcuda) section below.
+
+#### **Setup Steps:**
+
+1. **Verify CUDA installation:**
+   ```bash
+   # Check if CUDA is installed
+   ls /usr/local/cuda/lib64/libcudart.so
+
+   # Check GPU compute capability
+   nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
+   ```
+
+2. **Edit Mycroft configuration** (`~/.config/mycroft/mycroft.conf`):
+   ```json
+   "stt": {
+     "module": "ovos-stt-plugin-fasterwhisper",
+     "ovos-stt-plugin-fasterwhisper": {
+       "model": "base.en",
+       "language": "en",
+       "use_cuda": true
+     }
+   }
+   ```
+
+3. **Restart Mycroft:**
+   ```bash
+   ./stop-mycroft.sh all
+   ./start-mycroft.sh all
+   ```
+
+4. **Verify GPU usage** (say a voice command, then immediately check):
+   ```bash
+   nvidia-smi --query-compute-apps=pid,used_memory --format=csv
+   ```
+
+   You should see the Mycroft voice process using GPU memory (~220 MB for base.en, ~870 MB for medium.en).
+
+#### **Performance Example (RTX 3060):**
+
+Tested on NVIDIA GeForce RTX 3060 with i7-4790 CPU:
+
+| Model | CPU Time | GPU Time | Speedup | Accuracy | VRAM |
+|-------|----------|----------|---------|----------|------|
+| base.en | ~0.9-1.0s | ~0.09-0.11s | ~10x | Good | ~220 MB |
+| medium.en | ~6.0s* | ~0.3-0.5s | ~15x+ | Best | ~870 MB |
+
+*CPU time for medium.en is estimated; actual GPU time was measured at 0.3-0.5s for 2-3 second audio clips.
+
+**Your mileage will vary** based on:
+- GPU model and VRAM
+- CPU speed (affects CPU baseline)
+- Audio length and complexity
+- Background noise and accent clarity
+
+**General guidance:**
+- **Low-end GPUs** (GTX 1050, 1650): Expect 3-5x speedup with base.en
+- **Mid-range GPUs** (GTX 1660, RTX 2060): Expect 5-8x speedup with small.en/medium.en
+- **High-end GPUs** (RTX 3060+, 4070+): Expect 10x+ speedup, can comfortably run medium.en
+
+**Finding Your Balance:**
+
+The best model depends on your GPU and accuracy needs. We recommend experimenting:
+
+1. **Start with `base.en`** - Good baseline for testing GPU acceleration
+2. **Check the speed** - Say a few commands and note the response time
+3. **Evaluate accuracy** - Does it correctly transcribe your commands?
+4. **If happy with speed but want better accuracy** → Try the next larger model (`small.en` → `medium.en`)
+5. **If too slow** → Drop back to the previous smaller model
+6. **Repeat** until you find the sweet spot between speed and accuracy
+
+**Example progression:**
+- `base.en` → Fast but occasionally mishears? → Try `small.en`
+- `small.en` → Good accuracy, still fast? → Try `medium.en`
+- `medium.en` → Noticeably slower? → Stick with `small.en`
+
+The goal is **instant-feeling responses** with **accurate transcription** for your voice/environment.
+
+#### **Troubleshooting:**
+
+**GPU not being used?**
+```bash
+# Check if voice service has correct library path
+ps aux | grep "mycroft.client.speech"  # Get PID
+cat /proc/PID/environ | tr '\0' '\n' | grep LD_LIBRARY_PATH
+# Should include: /usr/local/cuda/lib64
+```
+
+**CUDA errors?**
+- Verify compute capability is 6.0+ with `nvidia-smi`
+- Ensure CUDA version matches driver version
+- Check `/var/log/mycroft/voice.log` for error messages
+
+---
+
+### **GPU Acceleration for Training (PyTorch/CUDA)**
+
+**Important Distinction:** There are two separate GPU acceleration systems in Mycroft:
+
+| Feature | Runtime Inference (STT) | Training (Wake Words) |
+|---------|------------------------|----------------------|
+| **Status** | ✅ Included by default | ⚠️ Optional (requires setup) |
+| **Library** | `ctranslate2` | `PyTorch` |
+| **Installed?** | Yes (with FasterWhisper) | No (manual installation) |
+| **Purpose** | GPU speech-to-text | Train custom wake word models |
+| **CUDA Source** | System libs (`/usr/lib/`) | Bundled with PyTorch |
+| **Venv Packages** | `faster-whisper`, `ctranslate2` | `torch`, `torchvision`, `torchaudio` |
+| **Config** | `"use_cuda": true` in STT | Install via pip (see below) |
+| **When Needed** | Every voice command | Only when training models |
+
+**Key Points:**
+- ✅ **Runtime STT GPU acceleration works immediately** after enabling in config - no extra packages needed
+- ❌ **Training GPU acceleration requires PyTorch installation** - not included by default
+- 🎯 **If you only use Mycroft (not training), you don't need PyTorch**
+- 📦 **Both can coexist** - ctranslate2 for inference, PyTorch for training
+
+If you want to train custom wake word models (OpenWakeWord or Precise), you'll benefit from GPU acceleration during training. This requires installing **PyTorch with CUDA support**.
+
+#### **Determining Your CUDA Version**
+
+**Step 1: Check your NVIDIA driver version**
+```bash
+nvidia-smi
+```
+
+Look at the top right corner for driver version:
+```
+Driver Version: 535.154.05    CUDA Version: 12.2
+```
+
+**Step 2: Match driver to compatible CUDA versions**
+
+Your **driver version** determines which CUDA versions you can use:
+
+| Driver Version | Supported CUDA Versions | Recommended PyTorch CUDA |
+|----------------|-------------------------|--------------------------|
+| 450.x - 524.x  | CUDA 11.x only          | `cu118` (CUDA 11.8)      |
+| 525.x - 536.x  | CUDA 11.x or 12.x       | `cu121` or `cu124`       |
+| 537.x+         | CUDA 11.x or 12.x       | `cu124` (CUDA 12.4)      |
+
+**Important:** The "CUDA Version" shown by `nvidia-smi` is the **maximum** CUDA version your driver supports, not what's currently installed. You can use any CUDA version up to that maximum.
+
+**Step 3: Check what system CUDA is installed (if any)**
+```bash
+nvcc --version  # Shows installed CUDA toolkit version (if installed)
+```
+
+**Note:** You don't need to match PyTorch's CUDA version with system CUDA. PyTorch bundles its own CUDA runtime libraries.
+
+#### **Installing PyTorch with CUDA**
+
+Activate your virtual environment first:
+```bash
+source .venv/bin/activate
+```
+
+**For modern drivers (525+) - Use CUDA 12.4:**
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+```
+
+**For older drivers (450-524) - Use CUDA 11.8:**
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+```
+
+**For CPU-only (no GPU):**
+```bash
+pip install torch torchvision torchaudio
+```
+
+#### **Verifying PyTorch CUDA Installation**
+
+```bash
+python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda if torch.cuda.is_available() else \"N/A\"}')"
+```
+
+Expected output with GPU:
+```
+PyTorch version: 2.6.0+cu124
+CUDA available: True
+CUDA version: 12.4
+```
+
+#### **Complete Setup for OpenWakeWord Training**
+
+💡 **Important**: All OpenWakeWord commands require activating the virtual environment first:
+```bash
+cd mycroft-core  # Navigate to your mycroft-core directory
+source .venv/bin/activate
+```
+Activate once per terminal session, then all commands below will work.
+
+**If You Installed Training Dependencies During Setup:**
+
+You're already set! Just activate the venv and start training:
+
+```bash
+source .venv/bin/activate
+
+# Interactive mode - prompts for any missing parameters
+oww-train-model
+
+# Or provide all parameters on command line (replace "computer" with your custom wake word)
+oww-train-model --wake-word "computer" --positive-dir ./samples --negative-dir ./negative
+
+# Partial parameters - prompts only for what's missing
+oww-train-model --wake-word "computer"  # Will ask for directories
+```
+
+**Note**: Replace `"computer"` with your desired custom wake word (e.g., "jarvis", "hey robot", "assistant").
+
+The script automatically enters interactive mode if you're missing required parameters (wake word, positive samples directory, negative samples directory).
+
+**Optional GPU control flags** (only needed to override your setup):
+- `--gpu`: Force GPU (auto-upgrades CPU→GPU PyTorch if needed)
+- `--no-gpu`: Force CPU (even if GPU available)
+
+**If You Skipped Training Dependencies During Setup:**
+
+The training script can install them automatically when you first run it:
+
+```bash
+source .venv/bin/activate
+
+# Run without parameters - script will prompt for everything (interactive mode)
+oww-train-model
+
+# Or provide parameters and let it handle dependencies
+oww-train-model --wake-word "computer" --positive-dir ./samples --negative-dir ./negative
+
+# Or use --gpu flag to auto-install GPU version without prompts
+oww-train-model --gpu
+```
+
+The script will detect missing dependencies and offer to install them before prompting for training parameters.
+
+**Option B: Manual Setup**
+
+If you prefer to install dependencies yourself:
+
+**1. Install PyTorch with CUDA** (see instructions above)
+
+**2. Install additional dependencies:**
+```bash
+source .venv/bin/activate
+pip install scipy==1.16.2 tqdm==4.67.2 torchinfo==1.8.0 torchmetrics==1.8.2
+pip install soundfile==0.13.1 librosa==0.11.0
+pip install audiomentations==0.43.1 torch-audiomentations==0.12.0
+pip install speechbrain==1.0.3 pronouncing==0.2.0 webrtcvad==2.0.10
+pip install pydub==0.25.1 mutagen==1.47.0 acoustics==0.2.6
+pip install matplotlib==3.10.8 pandas==3.0.0
+```
+
+**3. Verify GPU is available:**
+```bash
+python -c "import torch; print(f'GPU available: {torch.cuda.is_available()}')"
+# Should print: GPU available: True
+```
+
+**4. Start training:**
+```bash
+# With venv activated, you can run training commands from any directory
+oww-train-model --help
+
+# GPU acceleration flags (requires venv activation - see above):
+oww-train-model --gpu [...]     # Force GPU acceleration (auto-install/upgrade if needed)
+oww-train-model --no-gpu [...]  # Force CPU-only training (skip GPU prompts)
+
+# See OPENWAKEWORD_SETUP.md for complete training workflow and flag details
+```
+
+#### **GPU Requirements for Training**
+
+**OpenWakeWord Training (recommended for custom wake words):**
+- **Minimum:** 4GB VRAM (GTX 1650, RTX 2060)
+- **Recommended:** 6GB+ VRAM (RTX 3060, RTX 4060)
+- Training time: 3-10 minutes per 1000 epochs with GPU vs 30-60 minutes on CPU
+- Dependencies: PyTorch + CUDA, speechbrain
+- See `OPENWAKEWORD_SETUP.md` for complete training instructions
+
+**Precise Training (TensorFlow-based):**
+- **Minimum:** 6GB VRAM (GTX 1660, RTX 2060)
+- **Recommended:** 8GB+ VRAM (RTX 3070, RTX 4070)
+- Training time: 10-30 minutes per session with GPU vs 2-4 hours on CPU
+- Dependencies: TensorFlow (installed if you chose Precise during setup)
+- See `CUSTOM_WAKE_WORDS.md` for training instructions
+
+#### **CUDA Version Compatibility Matrix**
+
+| Component | CUDA 11.8 | CUDA 12.1 | CUDA 12.4 | Notes |
+|-----------|-----------|-----------|-----------|-------|
+| **PyTorch 2.6+** | ✅ | ✅ | ✅ | All versions supported |
+| **ONNX Runtime** | ✅ | ✅ | ✅ | Runtime for OpenWakeWord models |
+| **TensorFlow 2.12** | ✅ | ⚠️ | ⚠️ | Prefers CUDA 11.8 (Precise training) |
+| **FasterWhisper** | ✅ | ✅ | ✅ | Uses system CUDA libs, not PyTorch |
+
+**Recommendations:**
+- **New setups with driver 525+:** Use CUDA 12.4 (best performance, latest features)
+- **Older drivers (450-524):** Use CUDA 11.8 (maximum compatibility)
+- **Mixed workloads (Precise + OpenWakeWord):** Use CUDA 11.8 (best TensorFlow compatibility)
+
+#### **Troubleshooting CUDA Installation**
+
+**"CUDA out of memory" errors during training:**
+- Reduce batch size in training scripts
+- Use a smaller model architecture
+- Close other GPU applications (browsers, games)
+- Check VRAM usage: `nvidia-smi`
+
+**PyTorch can't find CUDA:**
+```bash
+# Check if you accidentally installed CPU-only version
+pip show torch | grep Version
+# Should show: Version: 2.6.0+cu124 (or cu118/cu121)
+# If just "2.6.0" with no +cu*, reinstall with correct index URL
+```
+
+**Multiple CUDA versions causing conflicts:**
+- PyTorch bundles its own CUDA runtime - this is normal and expected
+- Different packages can use different CUDA versions without conflicts
+- System CUDA (`/usr/local/cuda`) is only needed for FasterWhisper STT
+
+**AMD GPU users:**
+- AMD GPUs don't support CUDA (NVIDIA proprietary)
+- Limited support via ROCm (experimental, not covered here)
+- Recommend CPU-only training or cloud GPU services
+
+---
+
 ## 🤝 **Contributing**
 
 This is a **working fork** of Mycroft Core. Contributions are welcome:
@@ -453,8 +1300,8 @@ This is a **working fork** of Mycroft Core. Contributions are welcome:
 
 ### **Development Setup**
 ```bash
-# Clone your fork
-git clone --depth=1 https://github.com/YOUR_USERNAME/mycroft-core.git
+# Clone your fork (after forking)
+git clone --depth=1 https://github.com/YOUR_GITHUB_USER/mycroft-core.git
 cd mycroft-core
 
 # Setup development environment

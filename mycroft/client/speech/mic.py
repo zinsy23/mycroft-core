@@ -486,11 +486,11 @@ class ResponsiveRecognizer(speech_recognition.Recognizer):
         try:
             # Create the IPC directory if it doesn't exist
             os.makedirs(os.path.dirname(self.mic_level_file), exist_ok=True)
-            
-            # Write initial mic level data
+
+            # Write initial mic level data with default threshold (300 from speech_recognition.Recognizer)
             with open(self.mic_level_file, 'w') as f:
                 f.write('Energy:  cur=0 thresh={:.3f} muted=0'.format(
-                    getattr(self, 'energy_threshold', 1000)
+                    getattr(self, 'energy_threshold', 300)
                 ))
             LOG.debug("Initialized mic level file for CLI display")
         except Exception as e:

@@ -1,0 +1,639 @@
+# OpenWakeWord Setup Guide
+
+This guide covers training and using OpenWakeWord models in a Mycroft/OVOS environment. The scripts in the `openwakeword/` directory provide tools for collecting audio, training models, and testing them live.
+
+## Table of Contents
+- [Overview](#overview)
+- [Prerequisites](#prerequisites)
+- [Scripts](#scripts)
+- [Training Models](#training-models)
+- [Configuration](#configuration)
+- [Training Tips & Lessons Learned](#training-tips--lessons-learned)
+- [Alternative Setup Methods](#alternative-setup-methods)
+
+---
+
+## Overview
+
+OpenWakeWord uses a pre-trained Google CNN (speech embedding model) that produces audio embeddings, followed by a small feed-forward classifier network that you train. This is fundamentally different from systems like Precise that use MFCCs (mathematical features).
+
+**Key Difference**: Because OpenWakeWord relies on deep learned embeddings, it expects varied/augmented data during training. Raw duplicate samples will cause overfitting and poor generalization.
+
+---
+
+## Prerequisites
+
+### Runtime vs Training Requirements
+
+**Important:** There are two different use cases with different requirements:
+
+#### 1. **Using Pre-trained OpenWakeWord Models (Runtime)**
+✅ Already included in default Mycroft setup - no additional packages needed!
+
+**What you have:**
+- `openwakeword` package (for loading .onnx models)
+- `ovos-ww-plugin-openwakeword` (Mycroft integration)
+- `onnxruntime` (runs trained models efficiently)
+
+**What it's for:**
+- Using existing OpenWakeWord models in Mycroft
+- Real-time wake word detection
+- No GPU required (CPU inference is fast enough)
+
+#### 2. **Training Custom OpenWakeWord Models**
+⚠️ Requires additional packages - **PyTorch with CUDA for GPU acceleration**
+
+**What you need to install:**
+
+```bash
+# Activate your virtual environment
+source .venv/bin/activate
+
+# Install PyTorch with CUDA 12.4 (for modern NVIDIA drivers 525+)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+# For older drivers (450-524), use CUDA 11.8:
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# Install audio processing library
+pip install speechbrain
+
+# Verify GPU is available
+python -c "import torch; print(f'GPU available: {torch.cuda.is_available()}')"
+```
+
+**GPU Recommendations:**
+- **Minimum:** 4GB VRAM (GTX 1650, RTX 2060)
+- **Recommended:** 6GB+ VRAM (RTX 3060, RTX 4060)
+- **Training time:** 3-10 minutes per 1000 epochs with GPU vs 30-60+ minutes on CPU
+
+**Why PyTorch and not ctranslate2?**
+- `ctranslate2` is for **inference** (running trained models) - fast, lightweight
+- `PyTorch` is for **training** (creating models) - includes backpropagation, optimizers, GPU acceleration
+- The OpenWakeWord training scripts use PyTorch's neural network training capabilities
+- After training, models are exported to ONNX format for efficient inference
+
+**See the main README's "GPU Acceleration for Training" section for:**
+- How to determine your CUDA version
+- Detailed driver compatibility
+- Troubleshooting GPU issues
+
+---
+
+## Scripts
+
+💡 **Important**: All OpenWakeWord commands require the virtual environment to be activated first.
+
+After running `dev_setup.sh`, the OpenWakeWord scripts are available as standalone commands when the virtual environment is activated. You can run them from **any directory**.
+
+**Usage:**
+```bash
+# Activate the virtual environment (from your mycroft-core directory)
+cd mycroft-core
+source .venv/bin/activate
+
+# Now you can run commands from anywhere
+oww-collect <output_directory>
+oww-train-model --help
+# etc.
+```
+
+Alternatively, you can run the scripts directly from the mycroft-core directory:
+```bash
+python openwakeword/oww-collect.py <output_directory>
+```
+
+---
+
+### oww-collect.py
+Records audio samples with auto-numbering, similar to `precise-collect`.
+
+```bash
+# With venv activated (from any directory)
+oww-collect <output_directory>
+
+# Or run directly
+python openwakeword/oww-collect.py <output_directory>
+```
+
+- Press **Space** to start/stop recording
+- Press **ESC** to exit
+- Files auto-increment: `recording-01.wav`, `recording-02.wav`, etc.
+
+### oww-listen.py
+Live testing tool that mimics `precise-listen` behavior with a scrolling bar graph.
+
+```bash
+# With venv activated (from any directory)
+oww-listen <model.onnx> [--sensitivity 0.5]
+
+# Or run directly
+python openwakeword/oww-listen.py <model.onnx> [--sensitivity 0.5]
+```
+
+- Shows continuous scrolling bar with 'X' marks for confidence scores
+- The `--sensitivity` parameter only affects visualization: uppercase 'X' below threshold, lowercase 'x' above threshold
+- Doesn't affect actual model detection behavior (that's controlled by the threshold in mycroft.conf)
+- Ctrl+C to exit
+
+### oww-train-model.py
+Main training script for OpenWakeWord models.
+
+**Interactive Mode:** Run without arguments to be prompted for all settings:
+```bash
+oww-train-model
+```
+
+**Partial Interactive Mode:** Provide some arguments and be prompted only for missing ones:
+```bash
+# Forgot --wake-word? It will ask only for that
+oww-train-model --positive-dir ./wake-word --negative-dir ./not-wake-word
+
+# Have directories but want to set wake word interactively
+oww-train-model --positive-dir ./wake-word --negative-dir ./not-wake-word
+```
+
+**Command-line Mode:** Provide all three required arguments to skip interactive prompts entirely:
+```bash
+# With venv activated (from any directory)
+oww-train-model \
+  --wake-word <wake_word_phrase> \
+  --positive-dir <path_to_positive_samples> \
+  --negative-dir <path_to_negative_samples> \
+  --output <output_model_name.onnx> \
+  --augmentation <none|simple|full> \
+  --variations <number> \
+  --epochs <number>
+
+# Or run directly
+python openwakeword/oww-train-model.py \
+  --wake-word <wake_word_phrase> \
+  --positive-dir <path_to_positive_samples> \
+  --negative-dir <path_to_negative_samples> \
+  --output <output_model_name.onnx> \
+  --augmentation <none|simple|full> \
+  --variations <number> \
+  --epochs <number>
+```
+
+**Required Parameters (all required to avoid interactive mode):**
+- `--wake-word`: Wake word phrase (e.g., "computer", "hey jarvis")
+- `--positive-dir`: Directory containing wake word samples (16kHz, 16-bit WAV files)
+- `--negative-dir`: Directory containing non-wake-word samples
+- `--output`: Output model filename (e.g., `my_wakeword.onnx`)
+
+**Important Parameters:**
+- `--augmentation`: Augmentation type
+  - `none`: No augmentation (DOES NOT WORK - Google's embedding model requires varied data; models won't trigger at all; not part of standard OVOS setup, added as experimental option)
+  - `simple`: Basic augmentation (RECOMMENDED for most cases)
+  - `full`: Aggressive augmentation (may be too much variation)
+- `--variations`: Number of augmented variations per sample (e.g., 60)
+- `--epochs`: Training epochs (see tips below for optimal range)
+
+**GPU Control Flags:**
+- `--gpu`: Force GPU acceleration (automatically installs/upgrades to GPU PyTorch if needed)
+- `--no-gpu`: Force CPU-only training (skips GPU prompts/upgrades)
+
+**GPU Flag Behavior:**
+
+When you run the training script, it automatically detects your hardware and training dependencies:
+
+1. **No flags provided** (default behavior):
+   - If training dependencies already installed: Uses existing PyTorch (CPU or GPU)
+   - If GPU hardware detected but CPU PyTorch installed: Prompts to upgrade to GPU
+   - If no GPU hardware: Continues with CPU training
+   - If dependencies missing: Prompts to install (defaults to CPU, offers GPU choice)
+
+2. **With `--gpu` flag**:
+   - Automatically installs GPU PyTorch if dependencies missing (no prompts)
+   - Automatically upgrades CPU → GPU PyTorch if needed (no prompts)
+   - Falls back to CPU if no GPU hardware detected (with warning)
+   - Use this for automated GPU setup
+
+3. **With `--no-gpu` flag**:
+   - Forces CPU training mode even if GPU available
+   - Automatically installs CPU PyTorch if dependencies missing (no prompts)
+   - Skips all GPU upgrade prompts
+   - Use this to explicitly stay on CPU
+
+**Example with GPU flag:**
+```bash
+# Automatically use/install GPU acceleration without prompting
+oww-train-model --gpu \
+  --wake-word "computer" \
+  --positive-dir ./wake-word \
+  --negative-dir ./not-wake-word \
+  --output computer.onnx
+
+# Explicitly force CPU-only training
+oww-train-model --no-gpu \
+  --wake-word "computer" \
+  --positive-dir ./wake-word \
+  --negative-dir ./not-wake-word \
+  --output computer.onnx
+```
+
+**Note:** The flags control both dependency installation (if needed) and which PyTorch version to use. If you already installed dependencies during `dev_setup.sh`, the script respects that choice but allows you to switch using these flags.
+
+### oww-duplicate-samples.py
+Duplicates audio samples for data balancing. Useful for emphasizing critical negative samples during training.
+
+```bash
+# With venv activated (from any directory)
+oww-duplicate-samples \
+  --sample <path_to_sample.wav> --count <number> \
+  --sample <path_to_another.wav> --count <number>
+
+# Or run directly
+python openwakeword/oww-duplicate-samples.py \
+  --sample <path_to_sample.wav> --count <number> \
+  --sample <path_to_another.wav> --count <number>
+```
+
+- Each `--count` adds that many duplicates ON TOP of existing ones
+- Automatically detects existing duplicates and continues numbering
+- Gracefully expands digit width as needed (01-99, then 100-999, etc.)
+- Files created as: `original_name_dup_01.wav`, `original_name_dup_02.wav`, etc.
+
+**Example:**
+```bash
+# With venv activated
+oww-duplicate-samples \
+  --sample "./not-wake-word/talking_sample.wav" --count 15 \
+  --sample "./not-wake-word/false_positives.wav" --count 80
+```
+
+### oww-train-verifier.py (Optional)
+Trains a custom verifier model for additional false positive reduction.
+
+```bash
+# With venv activated (from any directory)
+oww-train-verifier \
+  --model <base_model.onnx> \
+  --positive-dir <path_to_positive_samples> \
+  --negative-dir <path_to_negative_samples> \
+  --output <verifier_model.pkl>
+
+# Or run directly
+python openwakeword/oww-train-verifier.py \
+  --model <base_model.onnx> \
+  --positive-dir <path_to_positive_samples> \
+  --negative-dir <path_to_negative_samples> \
+  --output <verifier_model.pkl>
+```
+
+The verifier is a logistic regression model that runs as a second-stage filter when the primary model triggers. It can be very strict and may require careful tuning.
+
+**Memory Warning**: Training the verifier loads all features into RAM and can use ~28 GB total (depending on dataset size). If you have 32 GB RAM, it should fit; with less RAM (e.g., 24 GB), you'll need swap space.
+
+**Creating swap space if needed:**
+```bash
+# Check if swap exists
+swapon --show
+
+# If no swap, create 10-15 GB swap file
+sudo fallocate -l 15G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+
+# After training completes, optionally remove swap
+sudo swapoff /swapfile
+sudo rm /swapfile
+```
+
+---
+
+## Training Models
+
+> **⚠️ Before training:** Make sure you have PyTorch with CUDA installed! See the [Prerequisites](#prerequisites) section above for installation instructions. Training without GPU will be 5-10x slower.
+
+### Why Augmentation is Required
+
+OpenWakeWord's embedding model (Google's pre-trained CNN) expects varied audio data. Unlike Precise which uses MFCCs (mathematical transformations), OpenWakeWord uses deep learned features that need diversity to generalize properly.
+
+**Do NOT use `--augmentation none`** even with duplicated samples. The embedding model will overfit to identical features and perform poorly on real-world audio.
+
+### Recommended Training Settings
+
+Based on extensive testing, here are the settings that work well:
+
+```bash
+# With venv activated (can run from any directory)
+# Example: Training "computer" wake word (replace with your custom phrase)
+oww-train-model \
+  --wake-word "computer" \
+  --positive-dir ./wake-word \
+  --negative-dir ./not-wake-word \
+  --output my_wakeword_simple_60x_2000ep.onnx \
+  --augmentation simple \
+  --variations 60 \
+  --epochs 2000
+```
+
+**Key Findings:**
+- **Augmentation**: `simple` works best
+  - `none`: Doesn't generalize (overfits)
+  - `full`: Too aggressive, can hurt accuracy
+  - `simple`: Sweet spot for most use cases
+
+- **Epochs**: 2000-3000 is optimal
+  - 1000: Insufficient false positive rejection
+  - 2000-3000: Sweet spot
+  - 4000+: Starts overfitting, MORE false positives (bell curve effect)
+
+- **Variations**: 60 variations per sample works well for moderate-sized datasets
+
+**Context for these settings**: Based on testing with ~65 positive samples (8 voice locations × 6 variations each + testing samples) and ~800+ negative samples including a 15-minute conversation recording, plus duplicated critical negative samples to balance the dataset.
+
+### Data Balancing
+
+If you're experiencing too many false positives, the issue is often data imbalance. The model sees too many positive samples relative to negatives per epoch.
+
+**Strategy**: Duplicate critical negative samples to balance the dataset
+- Duplicate samples that represent common false positive triggers
+- Duplicate longer conversation/talking samples multiple times
+- Duplicate specific problematic phrases that cause false triggers
+
+This emphasizes negative examples during training without requiring more unique audio recordings.
+
+**Using oww-duplicate-samples.py:**
+```bash
+# With venv activated
+oww-duplicate-samples \
+  --sample "./not-wake-word/long_conversation.wav" --count 15 \
+  --sample "./not-wake-word/false_positive_triggers.wav" --count 80 \
+  --sample "./not-wake-word/similar_sounding_words.wav" --count 80
+```
+
+The count adds duplicates on top of any existing ones, so you can run it multiple times to incrementally add more emphasis.
+
+### Example Training Commands
+
+**Note**: Replace "computer" with your custom wake word phrase in all examples below.
+
+**Basic model (2000 epochs):**
+```bash
+# With venv activated
+oww-train-model \
+  --wake-word "computer" \
+  --positive-dir ./wake-word \
+  --negative-dir ./not-wake-word \
+  --output my_wakeword_2000ep.onnx \
+  --augmentation simple \
+  --variations 60 \
+  --epochs 2000
+```
+
+**Higher epochs for better false positive rejection:**
+```bash
+# With venv activated
+oww-train-model \
+  --wake-word "computer" \
+  --positive-dir ./wake-word \
+  --negative-dir ./not-wake-word \
+  --output my_wakeword_3000ep.onnx \
+  --augmentation simple \
+  --variations 60 \
+  --epochs 3000
+```
+
+---
+
+## Configuration
+
+### Mycroft/OVOS Integration
+
+OpenWakeWord has been adapted to work with this Mycroft environment using the `ovos-ww-plugin-openwakeword` plugin.
+
+Add configuration to `~/.config/mycroft/mycroft.conf`:
+
+```json
+{
+  "hotwords": {
+    "your_wakeword": {
+      "module": "ovos-ww-plugin-openwakeword",
+      "models": ["/path/to/your_model.onnx"],
+      "inference_framework": "onnx",
+      "threshold": 0.5
+    }
+  }
+}
+```
+
+**Configuration Options:**
+- `module`: Must be `"ovos-ww-plugin-openwakeword"` (full plugin name)
+- `models`: Array of model paths (can specify multiple)
+- `inference_framework`: Use `"onnx"` (default, fastest)
+- `threshold`: Detection threshold (0.0-1.0)
+  - Lower = more sensitive (more false positives)
+  - Higher = less sensitive (may miss true positives)
+  - Start with 0.5 and adjust based on testing
+
+### Optional: Custom Verifier Model
+
+If you've trained a verifier model for additional false positive reduction:
+
+```json
+{
+  "hotwords": {
+    "your_wakeword": {
+      "module": "ovos-ww-plugin-openwakeword",
+      "models": ["/path/to/your_model.onnx"],
+      "verifier_models": ["/path/to/your_verifier.pkl"],
+      "custom_verifier_threshold": 0.5,
+      "inference_framework": "onnx",
+      "threshold": 0.5
+    }
+  }
+}
+```
+
+**Verifier Options:**
+- `verifier_models`: Array of verifier .pkl files (matches models array)
+- `custom_verifier_threshold`: When to run the verifier (controls primary model threshold for verifier activation, NOT the verifier's decision threshold)
+
+**Note**: The verifier can be very strict. If it blocks legitimate detections even at low thresholds, you may need to retrain it with different data or focus on improving the primary model instead.
+
+---
+
+## Training Tips & Lessons Learned
+
+### What Works
+✓ **Simple augmentation** with 60 variations
+✓ **2000-3000 epochs** (sweet spot)
+✓ **Long conversation samples** (15+ minutes) in negative set
+✓ **Duplicating critical negative samples** for balance
+✓ **Testing with oww-listen.py** for immediate feedback
+
+### What Doesn't Work
+✗ **Raw samples** (`--augmentation none`) - models won't trigger at all; Google's embedding model fundamentally requires variation
+✗ **4000+ epochs** - causes MORE false positives (overfitting)
+✗ **Full augmentation** - too aggressive for most cases
+✗ **Unbalanced positive:negative ratios** - leads to excessive false triggers
+
+### Epoch Sweet Spot Explained
+
+Training follows a bell curve pattern:
+- **Too few epochs** (< 1000): Model hasn't learned to reject false positives
+- **Optimal range** (2000-3000): Best balance of true positive detection and false positive rejection
+- **Too many epochs** (4000+): Model starts overfitting to positive samples, becomes trigger-happy
+
+### False Positive Debugging
+
+If experiencing frequent false positives:
+
+1. **Check your data ratio**: Count positive vs negative samples (after augmentation/duplication)
+   - Ratio should favor negatives or be balanced
+   - Too many positives per epoch → false positive prone
+
+2. **Record false positive triggers**: Use oww-collect.py to capture phrases that falsely trigger
+   - Add these to negative dataset
+   - Duplicate them to emphasize during training
+
+3. **Test different thresholds**: Before retraining, try adjusting the threshold in config
+   - Higher threshold (0.6-0.8) reduces false positives
+   - May need to retrain if threshold needs to be too high
+
+4. **Consider epoch count**: Try reducing from 3000 to 2000 epochs
+   - Sometimes less training is better
+
+### Memory Considerations
+
+- **Primary model training**: Uses memory-mapped files, very efficient
+- **Verifier training**: Loads all features into RAM
+  - Can use 10-20+ GB depending on dataset size
+  - Add swap space if you hit OOM errors
+  - Consider limiting negative samples if memory is constrained
+
+---
+
+## Troubleshooting
+
+### Model triggers constantly
+- Data imbalance (too many positive samples per epoch)
+- Try duplicating negative samples
+- Consider reducing epochs (4000 → 2000)
+- Increase threshold in config
+
+### Model rarely triggers
+- Threshold too high
+- Not enough epochs (< 1000)
+- Positive samples may need more variation
+- Check if augmentation is enabled
+
+### Training crashes (OOM)
+- For verifier training: Add swap space
+- For primary model: Reduce batch size or dataset size
+
+### Poor generalization / Model won't trigger
+- Using `--augmentation none` → switch to `simple` (none doesn't work at all)
+- Not enough negative sample variety
+- Need longer conversation samples in negative set
+
+---
+
+## Quick Reference
+
+### Typical Workflow
+
+1. **Activate virtual environment**:
+   ```bash
+   cd mycroft-core  # Navigate to your mycroft-core directory
+   source .venv/bin/activate
+   ```
+
+2. **Collect positive samples** (from any directory):
+   ```bash
+   oww-collect ./wake-word
+   ```
+
+3. **Collect/gather negative samples** (non-wake-word speech)
+
+4. **Train model** (replace "computer" with your wake word):
+   ```bash
+   oww-train-model \
+     --wake-word "computer" \
+     --positive-dir ./wake-word \
+     --negative-dir ./not-wake-word \
+     --output my_wakeword.onnx \
+     --augmentation simple \
+     --variations 60 \
+     --epochs 2000
+   ```
+
+5. **Test with oww-listen**:
+   ```bash
+   oww-listen my_wakeword.onnx --sensitivity 0.5
+   ```
+
+6. **Configure in mycroft.conf** and restart Mycroft
+
+7. **Iterate**: Adjust data, epochs, or threshold based on real-world performance
+
+---
+
+## Alternative Setup Methods
+
+This section describes alternative approaches for environments that don't use the scripts in the `openwakeword/` folder.
+
+### Using Pre-trained Models
+
+Check available models:
+```bash
+python3 << 'EOF'
+from openwakeword import get_pretrained_model_paths
+for model in get_pretrained_model_paths():
+    print(model)
+EOF
+```
+
+Available pre-trained models:
+- `alexa_v0.1`
+- `hey_jarvis_v0.1`
+- `hey_mycroft_v0.1`
+- `hey_rhasspy_v0.1`
+- `timer_v0.1`
+- `weather_v0.1`
+
+### Training via Google Colab
+
+For automated synthetic training without local scripts:
+
+1. Visit: https://colab.research.google.com/drive/1q1oe2zOyZp7UsB3jJiQ1IFn8z5YfjwEb
+2. Follow the automated training notebook
+3. Input your wake word phrase
+4. Download the resulting `.tflite` or `.onnx` model
+
+### Alternative Configuration Format
+
+Some setups may use this configuration style (replace "computer" with your wake word):
+
+```json
+{
+  "openwakeword": {
+    "model_path": "~/.local/share/mycroft/openwakeword/models",
+    "inference_framework": "tflite"
+  },
+  "hotwords": {
+    "computer": {
+      "module": "ovos-ww-plugin-openwakeword",
+      "model": "computer",
+      "threshold": 0.5,
+      "lang": "en-us"
+    }
+  },
+  "listener": {
+    "wake_word": "computer"
+  }
+}
+```
+
+---
+
+## Additional Resources
+
+- OpenWakeWord GitHub: https://github.com/dscripka/openWakeWord
+- Training Guide: https://github.com/dscripka/openWakeWord/blob/main/docs/custom_verifier_models.md
+- Colab Training: https://colab.research.google.com/drive/1q1oe2zOyZp7UsB3jJiQ1IFn8z5YfjwEb
+- Mycroft Forums: https://community.mycroft.ai

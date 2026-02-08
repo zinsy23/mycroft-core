@@ -1,0 +1,1039 @@
+#!/usr/bin/env python3
+"""
+Train OpenWakeWord Full Model for Mycroft
+
+This script trains a complete wake word detection model from your audio samples
+using OpenWakeWord's training framework with synthetic augmentation.
+
+Based on OpenWakeWord's training methodology.
+Requires PyTorch and full training dependencies.
+
+Usage:
+    python train_oww_model.py \\
+        --wake-word "computer" \\
+        --positive-dir /path/to/wake-word-samples \\
+        --negative-dir /path/to/background-samples \\
+        --output computer.onnx
+
+Or run interactively:
+    python train_oww_model.py
+"""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+def check_gpu_upgrade_opportunity(force_gpu=None):
+    """
+    Check if user has GPU hardware but CPU-only PyTorch, offer to upgrade.
+
+    Args:
+        force_gpu: True to force GPU, False to force CPU, None to prompt if eligible
+
+    Returns:
+        True if should continue, False if user wants to exit to upgrade manually
+    """
+    try:
+        import torch
+        import subprocess
+
+        # Check if GPU hardware exists but CUDA is not available in PyTorch
+        has_nvidia_gpu = subprocess.run(['nvidia-smi'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        cuda_available = torch.cuda.is_available()
+
+        # Handle --gpu flag when no GPU hardware exists
+        if force_gpu is True and not has_nvidia_gpu:
+            print()
+            print("⚠️  --gpu flag provided but no NVIDIA GPU detected")
+            print("   Continuing with CPU training")
+            print()
+            return True
+
+        # Handle --gpu flag when GPU already enabled
+        if force_gpu is True and cuda_available:
+            print()
+            print("✓ GPU acceleration already enabled")
+            print()
+            return True
+
+        # Handle --no-gpu flag when GPU is available
+        if force_gpu is False and cuda_available:
+            print()
+            print("ℹ️  --no-gpu flag provided: Forcing CPU training (GPU available but not being used)")
+            print()
+            return True
+
+        if has_nvidia_gpu and not cuda_available:
+            # GPU hardware exists but PyTorch is CPU-only
+            print()
+            print("=" * 60)
+            print("🎯 GPU Acceleration Available!")
+            print("=" * 60)
+            print(f"Current PyTorch: {torch.__version__} (CPU-only)")
+            print("NVIDIA GPU detected but not being used for training")
+            print()
+            print("GPU training is ~6-10x faster:")
+            print("  • CPU: 30-60 minutes per 1000 epochs")
+            print("  • GPU: 3-10 minutes per 1000 epochs")
+            print()
+
+            # Handle --gpu / --no-gpu flags
+            if force_gpu is True:
+                print("--gpu flag provided: Switching to GPU PyTorch...")
+                upgrade_choice = 'y'
+            elif force_gpu is False:
+                print("--no-gpu flag provided: Continuing with CPU training")
+                print()
+                return True
+            else:
+                # Ask user
+                upgrade_choice = input("Switch to GPU-accelerated PyTorch now? [Y/n]: ").strip().lower()
+                if not upgrade_choice:
+                    upgrade_choice = 'y'
+
+            if upgrade_choice in ['y', 'yes']:
+                print()
+                print("Installing PyTorch with CUDA 12.4 support...")
+                print("(This will take a few minutes - ~2-3 GB download)")
+                print()
+
+                result = subprocess.run([
+                    sys.executable, '-m', 'pip', 'install',
+                    'torch==2.6.0+cu124', 'torchvision==0.21.0+cu124', 'torchaudio==2.6.0+cu124',
+                    '--index-url', 'https://download.pytorch.org/whl/cu124'
+                ])
+
+                if result.returncode == 0:
+                    print()
+                    print("✅ GPU PyTorch installed successfully!")
+                    print("   Please re-run this script to use GPU acceleration")
+                    print()
+                    return False  # Exit so user can restart with GPU
+                else:
+                    print()
+                    print("⚠️  PyTorch GPU installation failed")
+                    if force_gpu is True:
+                        print("   --gpu flag was provided but installation failed")
+                        print("   Possible causes: network issue, incompatible CUDA version, disk space")
+                    print("   Continuing with CPU training...")
+                    print()
+            else:
+                print()
+                print("Continuing with CPU training")
+                print("(You can switch to GPU later by re-running with --gpu flag)")
+                print()
+
+        return True
+    except Exception as e:
+        # If anything fails, just continue
+        print(f"Note: GPU check failed ({e}), continuing with available PyTorch")
+        return True
+
+def check_dependencies(force_gpu=None):
+    """
+    Check if all required dependencies are installed, offer to install if missing.
+
+    Args:
+        force_gpu: True to force GPU install, False to force CPU, None to prompt
+    """
+    # Check if dependencies are already installed
+    try:
+        import torch
+        import openwakeword.train
+        import librosa
+        import soundfile
+        import scipy.io.wavfile
+        import tqdm
+        print(f"✓ PyTorch {torch.__version__} ({'CUDA' if torch.cuda.is_available() else 'CPU'})")
+        return True
+    except ImportError as e:
+        import subprocess
+
+        print(f"⚠️  Missing training dependency: {e}")
+        print()
+        print("❌ OpenWakeWord training requires PyTorch and additional dependencies.")
+        print()
+
+        # Detect if GPU is available
+        has_nvidia_gpu = subprocess.run(['nvidia-smi'], capture_output=True, stderr=subprocess.DEVNULL).returncode == 0
+
+        # Determine what to install based on flags and hardware
+        install_gpu = False
+        install_cpu = False
+
+        # Handle --gpu flag
+        if force_gpu is True:
+            if has_nvidia_gpu:
+                print("🎯 --gpu flag provided: Installing GPU training dependencies automatically")
+                print()
+                print("Download size: ~4-6 GB (includes PyTorch with CUDA)")
+                print()
+                install_gpu = True
+            else:
+                print("⚠️  --gpu flag provided but no NVIDIA GPU detected")
+                print("   Installing CPU-only version instead")
+                print()
+                install_cpu = True
+
+        # Handle --no-gpu flag
+        elif force_gpu is False:
+            print("ℹ️  --no-gpu flag provided: Installing CPU-only training dependencies")
+            print()
+            print("Download size: ~4-6 GB")
+            print()
+            install_cpu = True
+
+        # No flags: Prompt user
+        else:
+            if has_nvidia_gpu:
+                print("🎯 NVIDIA GPU detected!")
+                print()
+                print("GPU training is ~6-10x faster:")
+                print("  • CPU: 30-60 minutes per 1000 epochs")
+                print("  • GPU: 3-10 minutes per 1000 epochs")
+                print()
+                print("Download size: ~4-6 GB (includes PyTorch with CUDA)")
+                print()
+                print("💡 Note: You can install CPU-only now and upgrade to GPU later using:")
+                print("   oww-train-model --gpu")
+                print()
+
+                install_choice = input("Install training dependencies with GPU support now? [y/N]: ").strip().lower()
+                if not install_choice:
+                    install_choice = 'n'
+
+                if install_choice in ['y', 'yes']:
+                    install_gpu = True
+                else:
+                    # User declined GPU, offer CPU
+                    print()
+                    print("💡 Installing CPU-only version instead")
+                    print()
+                    cpu_choice = input("Install training dependencies (CPU-only) now? [Y/n]: ").strip().lower()
+                    if not cpu_choice:
+                        cpu_choice = 'y'
+                    if cpu_choice in ['y', 'yes']:
+                        install_cpu = True
+            else:
+                # No GPU hardware
+                print("ℹ️  No NVIDIA GPU detected - will install CPU-only version")
+                print()
+                print("CPU training is slower but functional:")
+                print("  • CPU: 30-60 minutes per 1000 epochs")
+                print()
+                print("Download size: ~4-6 GB")
+                print()
+
+                install_choice = input("Install training dependencies (CPU-only) now? [Y/n]: ").strip().lower()
+                if not install_choice:
+                    install_choice = 'y'
+                if install_choice in ['y', 'yes']:
+                    install_cpu = True
+
+        # Helper function to install common packages (audio libs, augmentation, utilities)
+        def install_common_packages():
+            """Install audio processing, augmentation, and training utilities."""
+            # Install audio processing libraries
+            print()
+            print("2️⃣  Installing audio processing libraries...")
+            result = subprocess.run([
+                sys.executable, '-m', 'pip', 'install',
+                'scipy==1.16.2', 'tqdm==4.67.2', 'torchinfo==1.8.0', 'torchmetrics==1.8.2',
+                'soundfile==0.13.1', 'librosa==0.11.0'
+            ])
+            if result.returncode != 0:
+                print("❌ Audio libraries installation failed")
+                return False
+
+            # Install audio augmentation
+            print()
+            print("3️⃣  Installing audio augmentation libraries...")
+            result = subprocess.run([
+                sys.executable, '-m', 'pip', 'install',
+                'audiomentations==0.43.1', 'torch-audiomentations==0.12.0'
+            ])
+            if result.returncode != 0:
+                print("❌ Audio augmentation installation failed")
+                return False
+
+            # Install training utilities
+            print()
+            print("4️⃣  Installing training utilities...")
+            result = subprocess.run([
+                sys.executable, '-m', 'pip', 'install',
+                'speechbrain==1.0.3', 'pronouncing==0.2.0', 'webrtcvad==2.0.10',
+                'pydub==0.25.1', 'mutagen==1.47.0', 'acoustics==0.2.6',
+                'matplotlib==3.10.8', 'pandas==3.0.0', 'onnx==1.17.0'
+            ])
+            if result.returncode != 0:
+                print("❌ Training utilities installation failed")
+                return False
+
+            return True
+
+        # Perform GPU installation
+        if install_gpu:
+            print()
+            print("📦 Installing training dependencies with GPU support...")
+            print("   This will take several minutes...")
+            print()
+
+            # Install GPU PyTorch
+            print("1️⃣  Installing PyTorch with CUDA 12.4 support...")
+            result = subprocess.run([
+                sys.executable, '-m', 'pip', 'install',
+                'torch==2.6.0+cu124', 'torchvision==0.21.0+cu124', 'torchaudio==2.6.0+cu124',
+                '--index-url', 'https://download.pytorch.org/whl/cu124'
+            ])
+
+            if result.returncode != 0:
+                print("❌ PyTorch installation failed")
+                return False
+
+            # Install common packages
+            if not install_common_packages():
+                return False
+
+            print()
+            print("✅ All training dependencies installed successfully!")
+            print("   Please re-run this script to start training")
+            print()
+            return False  # Exit so user can restart with new packages
+
+        # Perform CPU installation
+        elif install_cpu:
+            print()
+            print("📦 Installing training dependencies (CPU-only)...")
+            print("   This will take several minutes...")
+            print()
+
+            # Install CPU PyTorch
+            print("1️⃣  Installing PyTorch (CPU-only)...")
+            result = subprocess.run([
+                sys.executable, '-m', 'pip', 'install',
+                'torch==2.6.0', 'torchvision==0.21.0', 'torchaudio==2.6.0'
+            ])
+
+            if result.returncode != 0:
+                print("❌ PyTorch installation failed")
+                return False
+
+            # Install common packages
+            if not install_common_packages():
+                return False
+
+            print()
+            print("✅ All training dependencies installed successfully!")
+            print("   Please re-run this script to start training")
+            print()
+            if has_nvidia_gpu:
+                print("💡 Tip: You can upgrade to GPU later using: oww-train-model --gpu")
+                print()
+            return False  # Exit so user can restart with new packages
+
+        # User declined installation (neither install_gpu nor install_cpu was set)
+        else:
+            print()
+            print("ℹ️  Installation declined. You can install manually later:")
+            print()
+            print("Activate virtual environment:")
+            print("  cd ~/mycroft-core")
+            print("  source .venv/bin/activate")
+            print()
+            if has_nvidia_gpu:
+                print("Then install with GPU support:")
+                print("  pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 \\")
+                print("    --index-url https://download.pytorch.org/whl/cu124")
+            else:
+                print("Then install CPU-only:")
+                print("  pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0")
+            print("  pip install scipy==1.16.2 tqdm==4.67.2")
+            print("  pip install torchinfo==1.8.0 torchmetrics==1.8.2 soundfile==0.13.1 librosa==0.11.0")
+            print("  pip install audiomentations==0.43.1 torch-audiomentations==0.12.0")
+            print("  pip install speechbrain==1.0.3 pronouncing==0.2.0 webrtcvad==2.0.10")
+            print("  pip install pydub==0.25.1 mutagen==1.47.0 acoustics==0.2.6 matplotlib==3.10.8 pandas==3.0.0")
+            print()
+            return False
+
+def prepare_training_data(positive_dir, negative_dir, wake_word, clip_length=3,
+                         augmentation_type='full', variations_per_sample=1, force_cpu=False):
+    """
+    Prepare training data from positive and negative samples.
+
+    Args:
+        positive_dir: Directory containing positive wake word samples
+        negative_dir: Directory containing negative samples
+        wake_word: The wake word phrase
+        clip_length: Length of clips in seconds (default: 3)
+        augmentation_type: 'full' (all augmentations), 'simple' (mix_clips_batch like notebook), or 'none'
+        variations_per_sample: How many augmented variations to generate per sample (default: 1)
+        force_cpu: If True, force CPU mode even if GPU is available (default: False)
+
+    Returns:
+        Tuple of (positive_features_file, negative_features_file)
+    """
+    import numpy as np
+    from numpy.lib.format import open_memmap
+    import openwakeword
+    import openwakeword.data
+    import openwakeword.utils
+    import scipy.io.wavfile
+    from tqdm import tqdm
+
+    positive_dir = Path(positive_dir)
+    negative_dir = Path(negative_dir)
+
+    # Get positive samples
+    positive_files = list(positive_dir.glob("*.wav"))
+    if len(positive_files) < 3:
+        raise ValueError(f"Need at least 3 wake word samples, found {len(positive_files)}")
+
+    # Get negative samples
+    negative_files = list(negative_dir.glob("*.wav"))
+    if len(negative_files) == 0:
+        raise ValueError(f"Need at least 1 negative sample file")
+
+    print(f"\n=== Preparing Training Data ===")
+    print(f"Wake word: {wake_word}")
+    print(f"Positive samples: {len(positive_files)}")
+    print(f"Negative samples: {len(negative_files)}")
+    print(f"Clip length: {clip_length} seconds")
+    print(f"Augmentation: {augmentation_type}")
+    if variations_per_sample > 1:
+        print(f"Generating {variations_per_sample} variations per sample = {len(positive_files) * variations_per_sample} total positive samples")
+
+    # Create output directory
+    output_dir = Path("/tmp/oww_training") / wake_word.replace(" ", "_")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Filter audio files
+    print("\nFiltering positive clips...")
+    positive_clips, positive_durations = openwakeword.data.filter_audio_paths(
+        [str(positive_dir)],
+        min_length_secs=0.5,
+        max_length_secs=2.0,
+        duration_method="header"
+    )
+    print(f"  {len(positive_clips)} positive clips after filtering")
+
+    print("\nFiltering negative clips...")
+    negative_clips, negative_durations = openwakeword.data.filter_audio_paths(
+        [str(negative_dir)],
+        min_length_secs=1.0,
+        max_length_secs=60*30,  # 30 minutes max
+        duration_method="header"
+    )
+    print(f"  {len(negative_clips)} negative clips after filtering (~{sum(negative_durations)//3600} hours)")
+
+    # Initialize audio feature extractor with GPU acceleration
+    import torch
+    if force_cpu:
+        device = "cpu"
+        print(f"\nFeature extraction device: cpu (forced by --no-gpu flag)")
+    else:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"\nFeature extraction device: {device}")
+
+    F = openwakeword.utils.AudioFeatures(
+        device=device,
+        ncpu=8,  # Use multiple CPUs for audio preprocessing (GPU only helps with embedding)
+        inference_framework="onnx"  # ONNX supports CUDA better than TFLite
+    )
+
+    # --- Process Negative Clips First ---
+    print("\nProcessing negative clips...")
+    batch_size = 64
+    N_total = int(sum(negative_durations) // clip_length)
+    n_feature_cols = F.get_embedding_shape(clip_length)
+
+    negative_features_file = output_dir / "negative_features.npy"
+    fp = open_memmap(str(negative_features_file), mode='w+', dtype=np.float32,
+                     shape=(N_total, n_feature_cols[0], n_feature_cols[1]))
+
+    row_counter = 0
+    for i in tqdm(np.arange(0, len(negative_clips), batch_size)):
+        # Load batch manually with soundfile (matching notebook's approach)
+        import soundfile as sf
+        batch_clips = negative_clips[i:i+batch_size]
+        wav_data = []
+        for clip_path in batch_clips:
+            # Load as float (default), then convert to int16 (matches datasets behavior)
+            audio, sr = sf.read(clip_path)
+
+            # Convert stereo to mono if needed
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
+
+            if sr != 16000:
+                # Resample if needed
+                import librosa
+                audio = librosa.resample(audio.astype(np.float32), orig_sr=sr, target_sr=16000)
+            # Convert float to int16 (same as notebook: array*32767)
+            audio = (audio * 32767).astype(np.int16)
+            wav_data.append(audio)
+
+        wav_data = openwakeword.data.stack_clips(wav_data, clip_size=16000*clip_length).astype(np.int16)
+
+        # Extract features (use 8 CPUs for preprocessing even with GPU)
+        features = F.embed_clips(x=wav_data, batch_size=1024, ncpu=8)
+
+        # Save to memory-mapped file
+        if row_counter + features.shape[0] > N_total:
+            fp[row_counter:min(row_counter+features.shape[0], N_total), :, :] = features[0:N_total - row_counter, :, :]
+            fp.flush()
+            break
+        else:
+            fp[row_counter:row_counter+features.shape[0], :, :] = features
+            row_counter += features.shape[0]
+            fp.flush()
+
+    openwakeword.data.trim_mmap(str(negative_features_file))
+    print(f"✓ Negative features: {negative_features_file}")
+
+    # --- Process Positive Clips with Augmentation ---
+    sr = 16000
+    total_length = int(sr * clip_length)
+    batch_size = 8
+
+    # Process augmented clips - generate multiple variations per sample
+    N_total = len(positive_clips) * variations_per_sample
+    positive_features_file = output_dir / "positive_features.npy"
+    fp = open_memmap(str(positive_features_file), mode='w+', dtype=np.float32,
+                     shape=(N_total, n_feature_cols[0], n_feature_cols[1]))
+
+    row_counter = 0
+
+    if augmentation_type == 'simple':
+        print("\nProcessing positive clips with simple background mixing (notebook style)...")
+        print(f"  (Background mixing at SNR 5-15, volume augmentation)")
+        print(f"  Generating {variations_per_sample} variations per sample...")
+
+        # Generate multiple variations by running the generator multiple times
+        for variation_num in range(variations_per_sample):
+            # Calculate clip alignment with random jitter for each variation
+            jitters = (np.random.uniform(0, 0.2, len(positive_clips))*sr).astype(np.int32)
+            starts = [total_length - (int(np.ceil(i*sr))+j) for i,j in zip(positive_durations, jitters)]
+
+            # Create generator for this variation
+            augmentation_generator = openwakeword.data.mix_clips_batch(
+                foreground_clips=positive_clips,
+                background_clips=negative_clips,
+                combined_size=total_length,
+                batch_size=batch_size,
+                snr_low=5,
+                snr_high=15,
+                start_index=starts,
+                volume_augmentation=True
+            )
+
+            # Process batches for this variation
+            for batch in tqdm(augmentation_generator,
+                            total=len(positive_clips)//batch_size,
+                            desc=f"Variation {variation_num+1}/{variations_per_sample}"):
+                augmented_audio = batch[0]
+
+                # Extract features
+                features = F.embed_clips(augmented_audio, batch_size=256)
+
+                # Save
+                fp[row_counter:row_counter+features.shape[0], :, :] = features
+                row_counter += features.shape[0]
+                fp.flush()
+
+    elif augmentation_type == 'full':
+        print("\nProcessing positive clips with advanced augmentation...")
+        print("  (PitchShift, EQ, Distortion, Noise, Reverb, Background mixing)")
+        print(f"  Generating {variations_per_sample} variations per sample...")
+
+        # Generate multiple variations by running the generator multiple times
+        for variation_num in range(variations_per_sample):
+            # Create generator for this variation (random augmentations each time)
+            augmentation_generator = openwakeword.data.augment_clips(
+                clip_paths=positive_clips,
+                total_length=total_length,
+                sr=sr,
+                batch_size=batch_size,
+                background_clip_paths=negative_clips,
+                augmentation_probabilities={
+                    'SevenBandParametricEQ': 0.25,
+                    'TanhDistortion': 0.25,
+                    'PitchShift': 0.25,
+                    'BandStopFilter': 0.25,
+                    'AddColoredNoise': 0.25,
+                    'AddBackgroundNoise': 0.75,
+                    'Gain': 1.0,
+                    'RIR': 0.5  # Room impulse response (reverb)
+                }
+            )
+
+            # Process batches for this variation
+            for batch in tqdm(augmentation_generator,
+                            total=len(positive_clips)//batch_size,
+                            desc=f"Variation {variation_num+1}/{variations_per_sample}"):
+                # Convert float to int16
+                augmented_audio = (batch * 32767).astype(np.int16)
+
+                # Extract features
+                features = F.embed_clips(augmented_audio, batch_size=256)
+
+                # Save
+                fp[row_counter:row_counter+features.shape[0], :, :] = features
+                row_counter += features.shape[0]
+                fp.flush()
+    else:
+        # No augmentation - just load raw samples (with optional duplication)
+        print("\nProcessing positive clips with NO augmentation (raw samples only)...")
+        if variations_per_sample > 1:
+            print(f"  Duplicating each sample {variations_per_sample} times for better data balance")
+            print(f"  Total positive samples: {len(positive_clips)} × {variations_per_sample} = {len(positive_clips) * variations_per_sample}")
+        else:
+            print("  Using original samples without any modifications")
+
+        import soundfile as sf
+
+        # Duplicate samples if requested (variations_per_sample times)
+        for duplicate_num in range(variations_per_sample):
+            desc = f"Duplicate {duplicate_num+1}/{variations_per_sample}" if variations_per_sample > 1 else "Processing raw samples"
+            for clip_path in tqdm(positive_clips, desc=desc):
+                # Load audio
+                audio, sr_file = sf.read(clip_path)
+
+                # Convert stereo to mono if needed
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=1)
+
+                # Resample if needed
+                if sr_file != sr:
+                    import librosa
+                    audio = librosa.resample(audio.astype(np.float32), orig_sr=sr_file, target_sr=sr)
+
+                # Pad or trim to exact length
+                if len(audio) < total_length:
+                    # Pad with silence
+                    audio = np.pad(audio, (0, total_length - len(audio)), mode='constant')
+                else:
+                    # Trim to length
+                    audio = audio[:total_length]
+
+                # Convert to int16
+                audio = (audio * 32767).astype(np.int16)
+
+                # Extract features
+                features = F.embed_clips(np.array([audio]), batch_size=1)
+
+                # Save
+                fp[row_counter:row_counter+features.shape[0], :, :] = features
+                row_counter += features.shape[0]
+                fp.flush()
+
+    openwakeword.data.trim_mmap(str(positive_features_file))
+    print(f"✓ Positive features: {positive_features_file}")
+    print(f"   Total samples generated: {row_counter}")
+
+    return positive_features_file, negative_features_file
+
+def train_model(positive_features, negative_features, wake_word, n_epochs=10, output_path=None, force_cpu=False):
+    """
+    Train the wake word detection model.
+
+    Args:
+        positive_features: Path to positive training features
+        negative_features: Path to negative training features
+        wake_word: The wake word phrase
+        n_epochs: Number of training epochs (default: 10)
+        output_path: Where to save the final model
+        force_cpu: If True, force CPU mode even if GPU is available (default: False)
+    """
+    import torch
+    from torch import nn
+    import numpy as np
+    import collections
+    from tqdm import tqdm
+
+    print(f"\n=== Training Model ===")
+    print(f"Epochs: {n_epochs}")
+
+    if force_cpu:
+        device = "cpu"
+        print(f"Using device: cpu (forced by --no-gpu flag)")
+    else:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Using device: {device}")
+
+    # Load training features
+    print(f"\nLoading features...")
+    negative_X = np.load(str(negative_features))
+    positive_X = np.load(str(positive_features))
+
+    print(f"  Negative: {negative_X.shape}")
+    print(f"  Positive: {positive_X.shape}")
+
+    # Combine and create labels
+    X = np.vstack((negative_X, positive_X))
+    y = np.array([0]*len(negative_X) + [1]*len(positive_X)).astype(np.float32)[...,None]
+
+    print(f"  Combined: {X.shape}")
+
+    # Create PyTorch dataloader
+    batch_size = 512
+    training_data = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(torch.from_numpy(X), torch.from_numpy(y)),
+        batch_size=batch_size,
+        shuffle=True
+    )
+
+    # Define model architecture (simple fully-connected network)
+    # Note: 32 neurons works well with ~100-200 training samples
+    #       Larger models (128+) need significantly more data to avoid overfitting
+    layer_dim = 32
+    model = nn.Sequential(
+        nn.Flatten(),
+        nn.Linear(X.shape[1]*X.shape[2], layer_dim),  # timesteps * features
+        nn.LayerNorm(layer_dim),
+        nn.ReLU(),
+        nn.Linear(layer_dim, layer_dim),
+        nn.LayerNorm(layer_dim),
+        nn.ReLU(),
+        nn.Linear(layer_dim, 1),
+        nn.Sigmoid(),
+    )
+    model = model.to(device)
+
+    print("\nModel architecture:")
+    print(model)
+
+    # Setup training
+    loss_function = torch.nn.functional.binary_cross_entropy
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+    # Train
+    print(f"\nTraining for {n_epochs} epochs...")
+    history = collections.defaultdict(list)
+
+    for epoch in tqdm(range(n_epochs), total=n_epochs):
+        for batch in training_data:
+            x, labels = batch[0].to(device), batch[1].to(device)
+
+            # Weight negative class higher to reduce false positives
+            weights = torch.ones(labels.shape[0]).to(device)
+            weights[labels.flatten() == 1] = 0.1
+
+            # Forward pass
+            optimizer.zero_grad()
+            predictions = model(x)
+
+            # Backward pass
+            loss = loss_function(predictions, labels, weights[..., None])
+            loss.backward()
+            optimizer.step()
+
+            # Log metrics
+            history['loss'].append(float(loss.detach().cpu().numpy()))
+
+            tp = sum(predictions.flatten()[labels.flatten() == 1] >= 0.5)
+            fn = sum(predictions.flatten()[labels.flatten() == 1] < 0.5)
+            # Avoid division by zero if no positive samples in batch
+            if (tp + fn) > 0:
+                recall = float((tp/(tp+fn)).detach().cpu().numpy())
+            else:
+                recall = 0.0
+            history['recall'].append(recall)
+
+    print("\n✓ Training complete!")
+    print(f"  Final loss: {history['loss'][-1]:.4f}")
+    print(f"  Final recall: {history['recall'][-1]:.4f}")
+
+    # Export model
+    if output_path is None:
+        output_path = f"{wake_word.replace(' ', '_')}.onnx"
+
+    output_path = Path(output_path)
+    onnx_path = output_path.with_suffix('.onnx')
+
+    # Export to ONNX
+    print(f"\nExporting model to {onnx_path}...")
+    torch.onnx.export(
+        model,
+        args=torch.zeros((1, X.shape[1], X.shape[2])).to(device),
+        f=str(onnx_path)
+    )
+    print(f"✓ ONNX model: {onnx_path}")
+
+    # Note: TFLite conversion not supported in this setup (requires TensorFlow)
+    # TFLite is mainly useful for embedded devices (Raspberry Pi, mobile)
+    # ONNX is faster on desktop GPUs and works perfectly with OpenWakeWord
+
+    return onnx_path
+
+def interactive_mode():
+    """Interactive mode for gathering training parameters."""
+    print("\n=== Interactive Training Mode ===\n")
+
+    # Get wake word
+    wake_word = input("Wake word phrase: ").strip()
+    if not wake_word:
+        print("ERROR: Wake word is required")
+        sys.exit(1)
+
+    # Get positive samples directory
+    positive_dir = input(f"Path to '{wake_word}' positive samples directory: ").strip()
+    positive_dir = os.path.expanduser(positive_dir)
+    if not os.path.isdir(positive_dir):
+        print(f"ERROR: Directory not found: {positive_dir}")
+        sys.exit(1)
+
+    # Get negative samples directory
+    negative_dir = input(f"Path to negative/background samples directory: ").strip()
+    negative_dir = os.path.expanduser(negative_dir)
+    if not os.path.isdir(negative_dir):
+        print(f"ERROR: Directory not found: {negative_dir}")
+        sys.exit(1)
+
+    # Get augmentation type
+    print("\nAugmentation options:")
+    print("  1. Simple mixing (like OpenWakeWord notebook - recommended by developers)")
+    print("     - Mixes wake word with background at random volumes")
+    print("     - Aligns wake word to end of window (reduces latency)")
+    print("     - What OpenWakeWord developers say works best")
+    print()
+    print("  2. Full augmentation (all techniques)")
+    print("     - Everything from option 1, PLUS:")
+    print("     - Pitch shifting, EQ changes, distortion")
+    print("     - Colored noise, reverb effects")
+    print("     - More variety but may change voice too much")
+    print()
+    aug_choice = input("Choose augmentation [1/2, default=1]: ").strip()
+    augmentation_type = 'simple' if aug_choice != '2' else 'full'
+
+    # Get variations per sample
+    print("\nHow many augmented variations to generate per sample?")
+    print("  You have recordings - each will be augmented multiple times")
+    print("  More variations = more training data, better model (but slower training)")
+    print("  Examples:")
+    print("    1  = No multiplication (62 samples → 62 training examples)")
+    print("    10 = 10x multiplication (62 samples → 620 training examples)")
+    print("    20 = 20x multiplication (62 samples → 1,240 training examples)")
+    variations = input("Variations per sample [10]: ").strip()
+    variations_per_sample = int(variations) if variations else 10
+
+    # Get training parameters
+    print(f"\nWith {variations_per_sample}x variations, recommended epochs are lower")
+    print(f"  (You'll have {variations_per_sample}x more data to train on)")
+    default_epochs = max(10, 300 // variations_per_sample)
+    n_epochs = input(f"Training epochs [{default_epochs}]: ").strip()
+    n_epochs = int(n_epochs) if n_epochs else default_epochs
+
+    clip_length = input("Clip length in seconds [3]: ").strip()
+    clip_length = int(clip_length) if clip_length else 3
+
+    # Get output path
+    default_output = f"{wake_word.replace(' ', '_')}.onnx"
+    output_path = input(f"Output path [{default_output}]: ").strip()
+    if not output_path:
+        output_path = default_output
+
+    # Confirm
+    print("\n" + "=" * 60)
+    print("Configuration:")
+    print("=" * 60)
+    print(f"Wake word:          {wake_word}")
+    print(f"Positive dir:       {positive_dir}")
+    print(f"Negative dir:       {negative_dir}")
+    print(f"Augmentation:       {augmentation_type}")
+    print(f"Variations/sample:  {variations_per_sample}x")
+    print(f"Clip length:        {clip_length}s")
+    print(f"Training epochs:    {n_epochs}")
+    print(f"Output:             {output_path}")
+    print("=" * 60)
+
+    confirm = input("\nProceed with training? [y/N]: ").strip().lower()
+    if confirm != 'y':
+        print("Training cancelled.")
+        sys.exit(0)
+
+    return wake_word, positive_dir, negative_dir, clip_length, n_epochs, output_path, augmentation_type, variations_per_sample
+
+def main():
+    """Main training workflow."""
+    parser = argparse.ArgumentParser(
+        description="Train OpenWakeWord full model for Mycroft",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Interactive mode
+  python train_oww_model.py
+
+  # Command line mode
+  python train_oww_model.py \\
+      --wake-word "computer" \\
+      --positive-dir ~/samples/wake-word \\
+      --negative-dir ~/samples/not-wake-word \\
+      --output computer.onnx \\
+      --epochs 10
+
+  # Force GPU acceleration (auto-install GPU PyTorch if needed)
+  python train_oww_model.py --gpu --wake-word "computer" ...
+
+  # Force CPU-only training (skip GPU prompt)
+  python train_oww_model.py --no-gpu --wake-word "computer" ...
+        """
+    )
+
+    parser.add_argument('--wake-word', help='Wake word phrase (e.g., "computer")')
+    parser.add_argument('--positive-dir', help='Directory containing wake word samples')
+    parser.add_argument('--negative-dir', help='Directory containing negative/background samples')
+    parser.add_argument('--clip-length', type=int, default=3, help='Clip length in seconds (default: 3)')
+    parser.add_argument('--epochs', type=int, default=30, help='Training epochs (default: 30)')
+    parser.add_argument('--augmentation', choices=['simple', 'full', 'none'], default='simple',
+                       help='Augmentation type: simple (notebook style), full (all techniques), or none (raw samples only)')
+    parser.add_argument('--variations', type=int, default=10,
+                       help='Variations to generate per sample (default: 10)')
+    parser.add_argument('--output', help='Output model file path')
+
+    # GPU control flags
+    gpu_group = parser.add_mutually_exclusive_group()
+    gpu_group.add_argument('--gpu', action='store_true',
+                          help='Force GPU acceleration (automatically install GPU PyTorch if needed)')
+    gpu_group.add_argument('--no-gpu', action='store_true',
+                          help='Force CPU-only training (skip GPU upgrade prompt)')
+
+    args = parser.parse_args()
+
+    print("=" * 60)
+    print("OpenWakeWord Full Model Training")
+    print("=" * 60)
+
+    # Check for GPU upgrade opportunity (before training starts)
+    force_gpu = None
+    if args.gpu:
+        force_gpu = True
+    elif args.no_gpu:
+        force_gpu = False
+
+    # Check dependencies (pass force_gpu to handle --gpu flag when deps missing)
+    if not check_dependencies(force_gpu=force_gpu):
+        sys.exit(1)
+
+    if not check_gpu_upgrade_opportunity(force_gpu=force_gpu):
+        # User chose to upgrade, script will exit so they can restart
+        sys.exit(0)
+
+    # Determine if we should force CPU mode
+    force_cpu = (force_gpu == False)  # True if --no-gpu was specified
+
+    # Interactive or command-line mode
+    # Check if required arguments are provided (not None)
+    missing_args = []
+    if args.wake_word is None:
+        missing_args.append('--wake-word')
+    if args.positive_dir is None:
+        missing_args.append('--positive-dir')
+    if args.negative_dir is None:
+        missing_args.append('--negative-dir')
+
+    if missing_args:
+        # Enter interactive mode for missing arguments only
+        print(f"\n⚠️  Missing required arguments: {', '.join(missing_args)}")
+        print("Entering interactive mode...\n")
+
+        # Get wake word (prompt if missing, use provided if available)
+        if args.wake_word is None:
+            wake_word = input("Wake word phrase: ").strip()
+            if not wake_word:
+                print("ERROR: Wake word is required")
+                sys.exit(1)
+        else:
+            wake_word = args.wake_word
+            print(f"Wake word: {wake_word}")
+
+        # Get positive directory (prompt if missing, use provided if available)
+        if args.positive_dir is None:
+            positive_dir = input(f"Path to '{wake_word}' positive samples directory: ").strip()
+            positive_dir = os.path.expanduser(positive_dir)
+            if not os.path.isdir(positive_dir):
+                print(f"ERROR: Directory not found: {positive_dir}")
+                sys.exit(1)
+        else:
+            positive_dir = args.positive_dir
+            print(f"Positive samples: {positive_dir}")
+
+        # Get negative directory (prompt if missing, use provided if available)
+        if args.negative_dir is None:
+            negative_dir = input(f"Path to negative/background samples directory: ").strip()
+            negative_dir = os.path.expanduser(negative_dir)
+            if not os.path.isdir(negative_dir):
+                print(f"ERROR: Directory not found: {negative_dir}")
+                sys.exit(1)
+        else:
+            negative_dir = args.negative_dir
+            print(f"Negative samples: {negative_dir}")
+
+        # Use optional arguments from command line or defaults
+        clip_length = args.clip_length
+        n_epochs = args.epochs
+        output_path = args.output if args.output else f"{wake_word.replace(' ', '_')}.onnx"
+        augmentation_type = args.augmentation
+        variations_per_sample = args.variations
+
+        print(f"\nUsing settings:")
+        print(f"  Output: {output_path}")
+        print(f"  Augmentation: {augmentation_type}")
+        print(f"  Variations: {variations_per_sample}")
+        print(f"  Epochs: {n_epochs}")
+    else:
+        # All required arguments provided - use command line mode
+        wake_word = args.wake_word
+        positive_dir = args.positive_dir
+        negative_dir = args.negative_dir
+        clip_length = args.clip_length
+        n_epochs = args.epochs
+        output_path = args.output if args.output else f"{wake_word.replace(' ', '_')}.onnx"
+        augmentation_type = args.augmentation
+        variations_per_sample = args.variations
+
+    # Prepare training data
+    positive_features, negative_features = prepare_training_data(
+        positive_dir, negative_dir, wake_word, clip_length,
+        augmentation_type, variations_per_sample, force_cpu=force_cpu
+    )
+
+    # Train model
+    onnx_path = train_model(
+        positive_features, negative_features, wake_word, n_epochs, output_path, force_cpu=force_cpu
+    )
+
+    print("\n" + "=" * 60)
+    print("Training Complete!")
+    print("=" * 60)
+    print(f"\nModel saved: {onnx_path}")
+    print("\nONNX format is optimized for desktop GPUs and works perfectly with OpenWakeWord.")
+    print("\nNext steps:")
+    print("\n1. Set the active wake word in ~/.config/mycroft/mycroft.conf:")
+    print(f"""
+{{
+  "listener": {{
+    "wake_word": "{wake_word}"
+  }}
+}}
+""")
+    print("2. Configure the wake word model in ~/.config/mycroft/mycroft.conf:")
+    print(f"""
+{{
+  "hotwords": {{
+    "{wake_word}": {{
+      "module": "ovos-ww-plugin-openwakeword",
+      "models": ["{onnx_path.absolute()}"],
+      "inference_framework": "onnx",
+      "threshold": 0.5
+    }}
+  }}
+}}
+""")
+    print("3. Restart Mycroft services:")
+    print("   ./stop-mycroft.sh && ./start-mycroft.sh all")
+    print(f"\n4. Test your wake word by saying: \"{wake_word}\"")
+    print()
+
+if __name__ == "__main__":
+    main()

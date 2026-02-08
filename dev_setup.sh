@@ -201,6 +201,73 @@ find_available_python_versions() {
     echo "Available Python versions (sorted): ${AVAILABLE_PYTHONS[*]}"
 }
 
+# Function to detect compatible Python (3.10 or 3.11) for Mycroft
+detect_compatible_python() {
+    echo "Checking for compatible Python (3.10 or 3.11)..."
+    
+    PYTHON_CMD=""
+    PYTHON_VERSION=""
+    PYTHON_MAJOR=""
+    PYTHON_MINOR=""
+    
+    # Check for python3.11 first (preferred)
+    if command -v python3.11 &> /dev/null; then
+        PYTHON_CMD="python3.11"
+        PYTHON_VERSION="3.11"
+        PYTHON_MAJOR="3"
+        PYTHON_MINOR="11"
+        echo "✅ Found Python 3.11"
+        return 0
+    fi
+    
+    # Check for python3.10 (fallback)
+    if command -v python3.10 &> /dev/null; then
+        PYTHON_CMD="python3.10"
+        PYTHON_VERSION="3.10"
+        PYTHON_MAJOR="3"
+        PYTHON_MINOR="10"
+        echo "✅ Found Python 3.10"
+        return 0
+    fi
+    
+    # Check if system python3 is 3.10 or 3.11
+    if command -v python3 &> /dev/null; then
+        local sys_version
+        sys_version=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "unknown")
+        local sys_major=$(echo "$sys_version" | cut -d. -f1)
+        local sys_minor=$(echo "$sys_version" | cut -d. -f2)
+        
+        if [[ "$sys_major" == "3" ]] && [[ "$sys_minor" == "11" || "$sys_minor" == "10" ]]; then
+            PYTHON_CMD="python3"
+            PYTHON_VERSION="$sys_version"
+            PYTHON_MAJOR="$sys_major"
+            PYTHON_MINOR="$sys_minor"
+            echo "✅ System Python is $sys_version (compatible)"
+            return 0
+        elif [[ "$sys_major" == "3" ]] && [[ "$sys_minor" -lt 10 ]]; then
+            echo "⚠️  System Python $sys_version is too old (< 3.10)"
+            return 1
+        elif [[ "$sys_major" == "3" ]] && [[ "$sys_minor" -gt 11 ]]; then
+            echo "⚠️  System Python $sys_version is too new (> 3.11)"
+            echo "   Python $sys_version has compatibility issues with Mycroft dependencies"
+            return 1
+        fi
+    fi
+    
+    # No compatible Python found
+    echo ""
+    echo "❌ No compatible Python (3.10 or 3.11) found"
+    echo ""
+    echo "Mycroft requires Python 3.10 or 3.11 for full compatibility."
+    echo "  - Python < 3.10: Too old, missing features"
+    echo "  - Python 3.10-3.11: ✅ Fully compatible"
+    echo "  - Python > 3.11: Too new, dependency issues (pocketsphinx, tensorflow)"
+    echo ""
+    echo "This script can install Python 3.11 automatically using 'uv'."
+    echo ""
+    return 1
+}
+
 # Function to select best Python version for Mycroft
 select_best_python() {
     echo "Selecting best Python version for Mycroft..."
@@ -455,6 +522,10 @@ echo "==========================================================================
 # Detect OS and package manager first (needed for questions)
 detect_os_and_package_manager
 
+# Detect compatible Python (3.10 or 3.11)
+detect_compatible_python
+PYTHON_DETECTED=$?
+
 # Check for existing setup
 EXISTING_VENV=false
 EXISTING_TENSORFLOW=false
@@ -486,28 +557,58 @@ echo "==========================================================================
 echo "PHASE 0.5: Setup Configuration Questions"
 echo "=============================================================================="
 
-# Question 1: Custom Wake Word Support (TensorFlow)
+# Question 1: Custom Wake Word Support
+INSTALL_TENSORFLOW=false
+INSTALL_OPENWAKEWORD=false
+
 if [[ "$EXISTING_TENSORFLOW" == true ]]; then
     echo ""
     echo "🎤 CUSTOM WAKE WORD SUPPORT:"
     echo "✅ TensorFlow is already installed in existing virtual environment"
+    echo "   Assuming Precise engine for custom wake words"
     INSTALL_TENSORFLOW=false  # Don't reinstall
+    WAKE_WORD_ENGINE="precise"
 else
     echo ""
     echo "🎤 CUSTOM WAKE WORD SUPPORT:"
-    echo "TensorFlow is required if you plan to train custom wake word models."
-    echo "The default 'hey mycroft' wake word works without TensorFlow."
+    echo "You can use custom wake word models (e.g., 'computer', 'jarvis', etc.)"
+    echo "instead of the default 'hey mycroft'."
     echo ""
-    echo "Do you plan to train custom wake word models? (This requires TensorFlow ~500MB)"
-    read -p "Install TensorFlow for custom wake words? [y/N] (default: no): " -r custom_wake_words
+    echo "The default 'hey mycroft' wake word works without any additional setup."
+    echo ""
+    read -p "Do you want to use custom wake word models? [y/N] (default: no): " -r custom_wake_words
     CUSTOM_WAKE_WORDS=${custom_wake_words:-N}
 
     if [[ "$CUSTOM_WAKE_WORDS" =~ ^[Yy]$ ]]; then
-        echo "✅ Will install TensorFlow for custom wake word training"
-        INSTALL_TENSORFLOW=true
+        echo ""
+        echo "Choose your wake word engine:"
+        echo ""
+        echo "  1) OpenWakeWord (Recommended) - Train new models"
+        echo "     • Modern, lightweight ONNX models"
+        echo "     • Full training support in this environment"
+        echo "     • GPU training via PyTorch (optional)"
+        echo ""
+        echo "  2) Precise - Use existing .pb model files only"
+        echo "     • For users with existing TensorFlow 1.x Precise models"
+        echo "     • Runtime engine only (no training tools)"
+        echo "     • Note: Training tools require separate TF1 environment"
+        echo ""
+        read -p "Select engine [1=OpenWakeWord, 2=Precise] (default: 1): " -r engine_choice
+        ENGINE_CHOICE=${engine_choice:-1}
+
+        if [[ "$ENGINE_CHOICE" == "2" ]]; then
+            echo "✅ Will use Precise runtime (for existing .pb models)"
+            echo "   Note: Place your .pb model in ~/.local/share/mycroft/precise/"
+            INSTALL_TENSORFLOW=false
+            WAKE_WORD_ENGINE="precise"
+        else
+            echo "✅ Will install OpenWakeWord for custom wake word training"
+            INSTALL_OPENWAKEWORD=true
+            WAKE_WORD_ENGINE="openwakeword"
+        fi
     else
-        echo "✅ Skipping TensorFlow - using default wake word only"
-        INSTALL_TENSORFLOW=false
+        echo "✅ Skipping custom wake word support - using default wake word only"
+        WAKE_WORD_ENGINE="default"
     fi
 fi
 
@@ -549,7 +650,7 @@ if [[ "$(uname -m)" =~ ^(arm|aarch64|armv7l).*$ ]]; then
     fi
 
     # Method 5: Check /proc/cpuinfo for Broadcom/Pi indicators
-    if [[ -f "/proc/cpuinfo" ]] && $(grep -c "BCM\|Raspberry Pi\|Broadcom" /proc/cpuinfo 2>/dev/null) -gt 0; then
+    if [[ -f "/proc/cpuinfo" ]] && [[ $(grep -c "BCM\|Raspberry Pi\|Broadcom" /proc/cpuinfo 2>/dev/null) -gt 0 ]]; then
         echo "✅ Raspberry Pi detected via CPU information"
         RPI_DETECTED=true
     fi
@@ -587,35 +688,251 @@ else
     INSTALL_GPIO=false
 fi
 
-# Question 3: Python Version (DeadSnakes PPA for Ubuntu users)
+# Question 3: Python 3.10/3.11 Installation (if not already present)
 echo ""
-if [[ "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"ubuntu"* ]]; then
-    echo "🐍 PYTHON VERSION OPTIMIZATION (Ubuntu detected):"
-    echo "The DeadSnakes PPA provides Python 3.11 which works better with Mycroft."
-    echo "This can resolve virtual environment and dependency issues."
+
+if [[ "$PYTHON_DETECTED" -ne 0 ]]; then
+    echo "🐍 PYTHON 3.10/3.11 INSTALLATION:"
+    echo "Mycroft requires Python 3.10 or 3.11 for full compatibility."
+    echo "  - Python 3.11 is recommended (supported until October 2027)"
+    echo "  - Python 3.10 also works (supported until October 2026)"
     echo ""
-    echo "⚠️  Note: This adds a third-party repository to your system."
+    echo "This script will install Python 3.11 using 'uv' (universal Python installer):"
+    echo "  - Fast: Downloads pre-built binaries (installs in seconds)"
+    echo "  - Universal: Works on any Linux distribution"
+    echo "  - Isolated: Doesn't interfere with system Python"
     echo ""
-    read -p "Install Python 3.11 via DeadSnakes PPA? [Y/n] (default: yes): " -r deadsnakes_ppa
-    DEADSNAKES_PPA=${deadsnakes_ppa:-Y}
     
-    if [[ "$DEADSNAKES_PPA" =~ ^[Yy]$ ]]; then
-        echo "✅ Will install Python 3.11 via DeadSnakes PPA"
-        INSTALL_DEADSNAKES=true
+    read -p "Install Python 3.11 via uv? [Y/n] (default: yes): " -r install_python
+    INSTALL_PYTHON=${install_python:-Y}
+    
+    if [[ "$INSTALL_PYTHON" =~ ^[Yy]$ ]]; then
+        echo "✅ Will install Python 3.11 via uv"
+        INSTALL_PYTHON_VIA_UV=true
     else
-        echo "✅ Skipping DeadSnakes PPA - using system Python version"
-        INSTALL_DEADSNAKES=false
+        echo "❌ Python 3.10/3.11 installation declined"
+        echo ""
+        echo "⚠️  WARNING: Setup cannot continue without Python 3.10 or 3.11"
+        echo ""
+        echo "Please install Python 3.10 or 3.11 manually and re-run this script."
+        exit 1
     fi
 else
-    echo "ℹ️  DeadSnakes PPA not applicable for this system (not Ubuntu)"
-    INSTALL_DEADSNAKES=false
+    echo "✅ Compatible Python found: $PYTHON_CMD (Python $PYTHON_VERSION)"
+    
+    # Check if this Python is from uv (installed in uv's directory)
+    PYTHON_PATH=$(which "$PYTHON_CMD" 2>/dev/null || echo "$PYTHON_CMD")
+    PYTHON_REALPATH=$(readlink -f "$PYTHON_PATH" 2>/dev/null || echo "$PYTHON_PATH")
+    
+    if [[ "$PYTHON_PATH" == *"uv/python"* ]] || [[ "$PYTHON_PATH" == *".local/share/uv"* ]] || \
+       [[ "$PYTHON_REALPATH" == *"uv/python"* ]] || [[ "$PYTHON_REALPATH" == *".local/share/uv"* ]]; then
+        echo "   Detected uv-installed Python (no system dev packages needed)"
+        INSTALL_PYTHON_VIA_UV=true
+    else
+        echo "   Detected system Python (may need dev packages)"
+        INSTALL_PYTHON_VIA_UV=false
+    fi
+fi
+
+# Question 4: GPU Acceleration
+echo ""
+if [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+    echo "🎮 GPU ACCELERATION (Speech-to-Text & Wake Word Training):"
+else
+    echo "🎮 GPU ACCELERATION FOR SPEECH-TO-TEXT:"
+fi
+
+# Check if NVIDIA GPU is available
+GPU_AVAILABLE=false
+GPU_COMPUTE_CAP=0
+GPU_NAME=""
+ENABLE_STT_GPU=false
+COMPATIBLE_GPU_NAME=""
+BEST_COMPUTE_CAP=0
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    # Try to get GPU info for ALL GPUs
+    GPU_INFO=$(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader 2>/dev/null || echo "")
+    if [ -n "$GPU_INFO" ]; then
+        echo "Detected NVIDIA GPU(s):"
+
+        # Check each GPU and find the best compatible one
+        while IFS= read -r gpu_line; do
+            GPU_NAME=$(echo "$gpu_line" | cut -d',' -f1 | xargs)
+            GPU_COMPUTE_CAP=$(echo "$gpu_line" | cut -d',' -f2 | xargs)
+
+            echo "  • $GPU_NAME (Compute Capability $GPU_COMPUTE_CAP)"
+
+            # Check if this GPU meets minimum requirements
+            GPU_MEETS_REQ=false
+            if command -v bc >/dev/null 2>&1; then
+                if (( $(echo "$GPU_COMPUTE_CAP >= 7.0" | bc -l) )); then
+                    GPU_MEETS_REQ=true
+                fi
+            else
+                # Fallback: convert to integer comparison (7.0 -> 70, 8.6 -> 86)
+                GPU_COMPUTE_INT=$(echo "$GPU_COMPUTE_CAP" | tr -d '.' | cut -c1-2)
+                if [ "$GPU_COMPUTE_INT" -ge 70 ]; then
+                    GPU_MEETS_REQ=true
+                fi
+            fi
+
+            # Track the best compatible GPU
+            if [ "$GPU_MEETS_REQ" = true ]; then
+                # Compare compute capabilities
+                if command -v bc >/dev/null 2>&1; then
+                    if (( $(echo "$GPU_COMPUTE_CAP > $BEST_COMPUTE_CAP" | bc -l) )); then
+                        BEST_COMPUTE_CAP=$GPU_COMPUTE_CAP
+                        COMPATIBLE_GPU_NAME=$GPU_NAME
+                        GPU_AVAILABLE=true
+                    fi
+                else
+                    # Fallback integer comparison
+                    GPU_CAP_INT=$(echo "$GPU_COMPUTE_CAP" | tr -d '.')
+                    BEST_CAP_INT=$(echo "$BEST_COMPUTE_CAP" | tr -d '.')
+                    if [ "$GPU_CAP_INT" -gt "$BEST_CAP_INT" ]; then
+                        BEST_COMPUTE_CAP=$GPU_COMPUTE_CAP
+                        COMPATIBLE_GPU_NAME=$GPU_NAME
+                        GPU_AVAILABLE=true
+                    fi
+                fi
+            fi
+        done <<< "$GPU_INFO"
+
+        echo ""
+
+        if [ "$GPU_AVAILABLE" = true ]; then
+            echo "✅ Compatible GPU found: $COMPATIBLE_GPU_NAME (CC $BEST_COMPUTE_CAP)"
+            echo ""
+            echo "✅ GPU is compatible with CUDA acceleration!"
+            echo ""
+
+            # Customize message based on what GPU will be used for
+            if [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+                echo "GPU can accelerate both Speech-to-Text and wake word training:"
+                echo ""
+                echo "Speech-to-Text (FasterWhisper):"
+                echo "  - CPU: ~2-5x realtime (slower than speaking)"
+                echo "  - GPU: ~10-30x realtime (nearly instant)"
+                echo ""
+                echo "Wake Word Training (if you install training dependencies later):"
+                echo "  - CPU: 30-60+ minutes per 1000 epochs"
+                echo "  - GPU: 3-10 minutes per 1000 epochs"
+            else
+                echo "Speech-to-Text (FasterWhisper) can use your GPU for much faster transcription:"
+                echo "  - CPU: ~2-5x realtime (slower than speaking)"
+                echo "  - GPU: ~10-30x realtime (nearly instant)"
+            fi
+
+            echo ""
+            echo "Note: This requires ~1.5 GB of CUDA runtime libraries"
+            echo "      (nvidia-cudnn, nvidia-cublas, nvidia-cuda-runtime)"
+            echo ""
+
+            if [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+                read -p "Enable GPU acceleration? [Y/n] (default: yes): " -r enable_stt_gpu
+            else
+                read -p "Enable GPU acceleration for Speech-to-Text? [Y/n] (default: yes): " -r enable_stt_gpu
+            fi
+            ENABLE_STT_GPU_INPUT=${enable_stt_gpu:-Y}
+
+            if [[ "$ENABLE_STT_GPU_INPUT" =~ ^[Yy]$ ]]; then
+                ENABLE_STT_GPU=true
+                echo "✅ GPU acceleration will be enabled for Speech-to-Text"
+            else
+                ENABLE_STT_GPU=false
+                echo "ℹ️  GPU acceleration disabled - Speech-to-Text will use CPU"
+            fi
+        else
+            echo "⚠️  No compatible GPU found (all GPUs have compute capability < 7.0)"
+            echo ""
+            echo "Modern PyTorch and optimized inference engines require compute capability >= 7.0"
+            echo "Minimum required: NVIDIA Volta architecture or newer (GTX 1650, RTX series, etc.)"
+            echo ""
+            echo "Speech-to-Text will use CPU (slower but still functional)"
+            ENABLE_STT_GPU=false
+        fi
+    else
+        echo "⚠️  nvidia-smi found but couldn't query GPU info"
+        echo "Speech-to-Text will use CPU"
+        ENABLE_STT_GPU=false
+    fi
+else
+    echo "No NVIDIA GPU detected (nvidia-smi not found)"
+    echo "Speech-to-Text will use CPU"
+    ENABLE_STT_GPU=false
+fi
+
+# Question 5: Training Dependencies (only if OpenWakeWord selected)
+INSTALL_OWW_TRAINING=false
+if [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+    echo ""
+    echo "🎓 WAKE WORD TRAINING DEPENDENCIES (OpenWakeWord):"
+    echo "To train custom wake word models, you need PyTorch and training libraries."
+    echo ""
+
+    if [[ "$GPU_AVAILABLE" == true ]] && [[ "$ENABLE_STT_GPU" == true ]]; then
+        echo "Download size: ~2.7-3.2 GB (GPU version with CUDA libraries)"
+        echo "Installed size: ~4-6 GB"
+        echo ""
+        echo "✅ GPU acceleration will be used for both STT and training:"
+        echo "   • Speech-to-Text: ~10-30x realtime (nearly instant)"
+        echo "   • Wake Word Training: 3-10 min per 1000 epochs (vs 30-60 min on CPU)"
+        echo ""
+        echo "💡 Installing now ensures compatible CUDA libraries for both."
+        echo "   Recommended: Install now to take full advantage of your GPU."
+    elif [[ "$GPU_AVAILABLE" == true ]] && [[ "$ENABLE_STT_GPU" == false ]]; then
+        echo "Download size: ~400-500 MB (CPU-only version)"
+        echo "Installed size: ~800 MB - 1 GB"
+        echo ""
+        echo "ℹ️  GPU available but you declined GPU for STT - training will also use CPU:"
+        echo "   • Wake Word Training: 30-60+ min per 1000 epochs"
+        echo ""
+        echo "💡 Note: Training will match your STT choice (CPU-only)"
+        echo "   You can switch to GPU training later using: oww-train-model --gpu"
+    else
+        echo "Download size: ~400-500 MB (CPU-only version)"
+        echo "Installed size: ~800 MB - 1 GB"
+        echo ""
+        echo "ℹ️  No compatible GPU - training will use CPU (slower but functional):"
+        echo "   • Wake Word Training: 30-60+ min per 1000 epochs"
+    fi
+    echo ""
+    echo "You can skip this now and install later when you run 'oww-train-model'."
+    echo ""
+
+    # Default to 'yes' for all scenarios (training is useful even on CPU)
+    # User can always say no if they don't want it now
+    read -p "Install training dependencies now? [Y/n] (default: yes): " -r install_training
+    INSTALL_TRAINING_INPUT=${install_training:-Y}
+
+    if [[ "$INSTALL_TRAINING_INPUT" =~ ^[Yy]$ ]]; then
+        INSTALL_OWW_TRAINING=true
+        if [[ "$ENABLE_STT_GPU" == true ]]; then
+            echo "✅ Will install training dependencies (~2.7-3.2 GB download during setup)"
+        else
+            echo "✅ Will install training dependencies (~400-500 MB download during setup)"
+        fi
+    else
+        echo "⏭️  Skipping training dependencies - you can install them later with 'oww-train-model'"
+    fi
 fi
 
 echo ""
 echo "Setup configuration complete:"
-echo "  - Custom wake words: $([ "$INSTALL_TENSORFLOW" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
+if [ "$WAKE_WORD_ENGINE" = "precise" ]; then
+    echo "  - Custom wake words: ✅ Enabled (Precise runtime only)"
+elif [ "$INSTALL_OPENWAKEWORD" = true ]; then
+    echo "  - Custom wake words: ✅ Enabled (OpenWakeWord with training)"
+else
+    echo "  - Custom wake words: ❌ Disabled"
+fi
 echo "  - GPIO support: $([ "$INSTALL_GPIO" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
-echo "  - Python 3.11 (DeadSnakes): $([ "$INSTALL_DEADSNAKES" = true ] && echo "✅ Enabled" || echo "❌ Disabled")"
+echo "  - Python installation: $([ "$INSTALL_PYTHON_VIA_UV" = true ] && echo "✅ Will install 3.11 via uv" || echo "ℹ️  Using $PYTHON_VERSION")"
+echo "  - GPU acceleration (STT): $([ "$ENABLE_STT_GPU" = true ] && echo "✅ Enabled ($COMPATIBLE_GPU_NAME)" || echo "❌ Disabled (CPU only)")"
+if [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+    echo "  - Training dependencies: $([ "$INSTALL_OWW_TRAINING" = true ] && echo "✅ Will install during setup" || echo "⏭️  Skip (install later)")"
+fi
 echo ""
 
 # PHASE 1: Virtual Environment Setup (using answers from Phase 0.5)
@@ -637,57 +954,129 @@ if [[ "$EXISTING_VENV" == true && "$NEEDS_UPDATE" == false ]]; then
 else
     echo "Creating new virtual environment or updating existing one..."
 
-# Install Python 3.11 if DeadSnakes PPA was requested
-if [[ "$INSTALL_DEADSNAKES" == true ]]; then
+# Install Python 3.11 via uv if requested
+if [[ "$INSTALL_PYTHON_VIA_UV" == true ]]; then
     echo ""
-    echo "🐍 Installing Python 3.11 via DeadSnakes PPA (as requested in setup)..."
+    echo "🐍 Installing Python 3.11 via uv (as requested in setup)..."
     echo "This will provide Python 3.11 for optimal Mycroft performance"
     echo ""
     
-    # Add DeadSnakes PPA
-    if sudo add-apt-repository ppa:deadsnakes/ppa -y; then
-        echo "✅ DeadSnakes PPA added successfully"
+    PYTHON311_INSTALLED=false
+    
+    # Check if uv already installed
+    if command -v uv &> /dev/null; then
+        echo "✅ uv already installed"
+        uv --version
+    else
+        echo "Installing uv..."
         
-        # Update package lists (ignore CD-ROM errors)
-        echo "Updating package lists..."
-        sudo apt update 2>&1 | grep -v "cdrom://" | grep -v "apt-cdrom" || true
-        
-        # Try to install Python 3.11 regardless of update warnings
-        echo "Attempting to install Python 3.11..."
-        if sudo apt install -y python3.11 python3.11-venv python3.11-dev 2>/dev/null; then
-            echo "✅ Python 3.11 installed successfully"
-            DEADSNAKES_INSTALLED=true
+        # Install uv (single binary, no dependencies)
+        if curl -LsSf https://astral.sh/uv/install.sh | sh; then
+            echo "✅ uv installed"
+            
+            # Add uv to PATH for this session
+            export PATH="$HOME/.local/bin:$PATH"
+            
+            # Verify installation
+            if command -v uv &> /dev/null; then
+                echo "✅ uv available in PATH"
+                uv --version
+            else
+                echo "❌ uv installed but not in PATH"
+                echo "Please add $HOME/.local/bin to your PATH and re-run this script."
+                exit 1
+            fi
         else
-            echo "❌ Failed to install Python 3.11 packages"
-            echo "Continuing with system Python versions..."
-            DEADSNAKES_INSTALLED=false
+            echo "❌ Failed to install uv"
+            exit 1
+        fi
+    fi
+    
+    # Install Python 3.11 via uv
+    echo ""
+    echo "Installing Python 3.11 via uv (downloading pre-built binary)..."
+    if uv python install 3.11; then
+        echo "✅ Python 3.11 installed successfully via uv"
+        
+        # Find where uv installed Python
+        UV_PYTHON_PATH=$(uv python find 3.11 2>/dev/null || echo "")
+        
+        if [[ -n "$UV_PYTHON_PATH" ]] && [[ -f "$UV_PYTHON_PATH" ]]; then
+            PYTHON_CMD="$UV_PYTHON_PATH"
+            PYTHON_VERSION="3.11"
+            PYTHON_MAJOR="3"
+            PYTHON_MINOR="11"
+            
+            echo "✅ Python 3.11 now available via uv"
+            echo "   Location: $PYTHON_CMD"
+            $PYTHON_CMD --version
+            
+            PYTHON311_INSTALLED=true
+        else
+            echo "⚠️  uv installed Python but couldn't find it, trying manual search..."
+            
+            # Try common uv Python locations
+            for possible_path in \
+                "$HOME/.local/share/uv/python/cpython-3.11"*/bin/python3.11 \
+                "$HOME/.local/share/uv/python/cpython-3.11"*/bin/python3 \
+                "$HOME/.cache/uv/python/cpython-3.11"*/bin/python3.11; do
+                
+                if [[ -f "$possible_path" ]]; then
+                    PYTHON_CMD="$possible_path"
+                    PYTHON_VERSION="3.11"
+                    PYTHON_MAJOR="3"
+                    PYTHON_MINOR="11"
+                    echo "✅ Found uv Python at: $PYTHON_CMD"
+                    $PYTHON_CMD --version
+                    PYTHON311_INSTALLED=true
+                    break
+                fi
+            done
+            
+            if [[ "$PYTHON311_INSTALLED" == false ]]; then
+                echo "❌ Could not locate uv-installed Python"
+                exit 1
+            fi
         fi
     else
-        echo "❌ Failed to add DeadSnakes PPA"
-        echo "Continuing with system Python versions..."
-        DEADSNAKES_INSTALLED=false
+        echo "❌ Failed to install Python 3.11 via uv"
+        exit 1
     fi
+    
+    # Refresh command cache
+    hash -r
+    
+    # Re-detect Python 3.11 after installation
+    echo ""
+    echo "Verifying Python 3.11 installation..."
+    if command -v python3.11 &> /dev/null; then
+        # uv created a symlink, use that for simplicity
+        PYTHON_CMD="python3.11"
+        echo "✅ python3.11 command available"
+    fi
+    
+    $PYTHON_CMD --version
 else
-    echo "ℹ️  DeadSnakes PPA installation skipped (as requested in setup)"
-    DEADSNAKES_INSTALLED=false
+    echo "ℹ️  Using existing Python $PYTHON_VERSION"
 fi
 
 # Force refresh command cache to find newly installed Python versions
 hash -r
 
-# Find available Python versions (now including DeadSnakes if installed)
-find_available_python_versions
-
-# Select best Python version
-select_best_python
+# Python 3.11 was already enforced in PHASE 0, so we just use it
+# PYTHON_CMD and PYTHON_VERSION are already set by enforce_python_311()
+echo "Using enforced Python 3.11: $PYTHON_CMD (version $PYTHON_VERSION)"
 
 # Verify Python version stability before venv creation
 echo "Verifying Python version stability before virtual environment creation..."
 if ! verify_python_version_stability "$PYTHON_CMD" 2; then
     echo "⚠️  Python version stability check failed!"
     
-    # If this is Python 3.11 and DeadSnakes was requested, try to upgrade
-    if [[ "$PYTHON_VERSION" == "3.11" && "$INSTALL_DEADSNAKES" == true ]]; then
+    # If this is Python 3.11 and we just installed it via uv, it should be stable
+    if [[ "$PYTHON_VERSION" == "3.11" && "$INSTALL_PYTHON_VIA_UV" == true ]]; then
+        echo "⚠️  uv-installed Python 3.11 stability check failed (unexpected)"
+        echo "Continuing anyway as uv provides stable builds..."
+    elif [[ "$PYTHON_VERSION" == "3.11" ]]; then
         echo "Attempting to upgrade Python 3.11 to stable version..."
         
         # Upgrade Python 3.11 packages to stable versions
@@ -856,8 +1245,14 @@ case "$PACKAGE_MANAGER" in
         
         sudo apt-get update
         
+        # Skip Python dev packages if using uv (uv provides complete Python installation)
+        if [[ "$INSTALL_PYTHON_VIA_UV" == true ]]; then
+            echo "ℹ️  Skipping Python dev packages - using uv-provided Python 3.11 (complete installation)"
+            PYTHON_DEV_PKG=""
+            PYTHON_PIP_PKG=""
+            PYTHON_SETUP_PKG=""
         # Use specific Python packages if we know the version, otherwise use generic
-        if [[ -n "$PYTHON_VERSION" ]]; then
+        elif [[ -n "$PYTHON_VERSION" ]]; then
             PYTHON_DEV_PKG="python$PYTHON_VERSION-dev"
             # Python 3.12+ removed distutils (it's now in setuptools)
             # Only try to install distutils for Python < 3.12
@@ -880,7 +1275,10 @@ case "$PACKAGE_MANAGER" in
         
         # Install system dependencies without version conflicts
         # Build package list based on whether PYTHON_SETUP_PKG and PYTHON_PIP_PKG are set
-        PYTHON_PACKAGES="git python3 $PYTHON_DEV_PKG"
+        PYTHON_PACKAGES="git python3"
+        if [[ -n "$PYTHON_DEV_PKG" ]]; then
+            PYTHON_PACKAGES="$PYTHON_PACKAGES $PYTHON_DEV_PKG"
+        fi
         if [[ -n "$PYTHON_PIP_PKG" ]]; then
             PYTHON_PACKAGES="$PYTHON_PACKAGES $PYTHON_PIP_PKG"
         fi
@@ -941,7 +1339,7 @@ fi
 
 # Critical dependency fix: Ensure pyxdg is installed first (required for Mycroft config)
 echo "Installing critical dependencies first..."
-pip install pyxdg>=0.27
+pip install "pyxdg>=0.27"
 
 # Verify pyxdg installation immediately
 echo "Verifying pyxdg installation..."
@@ -975,22 +1373,38 @@ PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
 
 if [[ "$PYTHON_MAJOR" -eq 3 && "$PYTHON_MINOR" -ge 11 ]]; then
     echo "Python $PYTHON_VERSION detected (3.11+) - PyAudio compilation may fail"
-    echo "Attempting to install system PyAudio package first..."
     
-    if [[ "$OS_NAME" == "debian" || "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"debian"* ]]; then
-        # Try to install system PyAudio for this Python version
-        PYTHON_DEV_PKG="python$PYTHON_VERSION-dev"
-        echo "Installing $PYTHON_DEV_PKG for PyAudio compilation..."
-        sudo apt-get install -y "$PYTHON_DEV_PKG" || echo "⚠️  $PYTHON_DEV_PKG not available"
+    # Skip Python dev package installation if using uv (already has complete headers)
+    if [[ "$INSTALL_PYTHON_VIA_UV" == true ]]; then
+        echo "ℹ️  Using uv-provided Python 3.11 - has complete headers for PyAudio compilation"
+        echo "   Skipping system Python dev package installation"
         
-        # Try system PyAudio package
-        sudo apt-get install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available"
-    elif [[ "$OS_NAME" == "fedora" || "$OS_LIKE" == *"rhel"* || "$OS_LIKE" == *"fedora"* ]]; then
-        sudo dnf install -y "python$PYTHON_VERSION-devel" || echo "⚠️  Python $PYTHON_VERSION devel not available"
-        sudo dnf install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available"
-    elif [[ "$OS_NAME" == "arch" || "$OS_LIKE" == *"arch"* ]]; then
-        sudo pacman -S --needed --noconfirm "python$PYTHON_VERSION" || echo "⚠️  Python $PYTHON_VERSION not available"
-        sudo pacman -S --needed --noconfirm python-pyaudio || echo "⚠️  python-pyaudio not available"
+        # Still try to install system PyAudio package as fallback
+        if [[ "$OS_NAME" == "debian" || "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"debian"* ]]; then
+            sudo apt-get install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available (will compile from source)"
+        elif [[ "$OS_NAME" == "fedora" || "$OS_LIKE" == *"rhel"* || "$OS_LIKE" == *"fedora"* ]]; then
+            sudo dnf install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available (will compile from source)"
+        elif [[ "$OS_NAME" == "arch" || "$OS_LIKE" == *"arch"* ]]; then
+            sudo pacman -S --needed --noconfirm python-pyaudio || echo "⚠️  python-pyaudio not available (will compile from source)"
+        fi
+    else
+        echo "Attempting to install system PyAudio package first..."
+        
+        if [[ "$OS_NAME" == "debian" || "$OS_NAME" == "ubuntu" || "$OS_LIKE" == *"debian"* ]]; then
+            # Try to install system PyAudio for this Python version
+            PYTHON_DEV_PKG="python$PYTHON_VERSION-dev"
+            echo "Installing $PYTHON_DEV_PKG for PyAudio compilation..."
+            sudo apt-get install -y "$PYTHON_DEV_PKG" || echo "⚠️  $PYTHON_DEV_PKG not available"
+            
+            # Try system PyAudio package
+            sudo apt-get install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available"
+        elif [[ "$OS_NAME" == "fedora" || "$OS_LIKE" == *"rhel"* || "$OS_LIKE" == *"fedora"* ]]; then
+            sudo dnf install -y "python$PYTHON_VERSION-devel" || echo "⚠️  Python $PYTHON_VERSION devel not available"
+            sudo dnf install -y python3-pyaudio || echo "⚠️  python3-pyaudio not available"
+        elif [[ "$OS_NAME" == "arch" || "$OS_LIKE" == *"arch"* ]]; then
+            sudo pacman -S --needed --noconfirm "python$PYTHON_VERSION" || echo "⚠️  Python $PYTHON_VERSION not available"
+            sudo pacman -S --needed --noconfirm python-pyaudio || echo "⚠️  python-pyaudio not available"
+        fi
     fi
     
     echo "Note: If PyAudio compilation fails, the script will continue with other packages"
@@ -1007,21 +1421,257 @@ if [[ -z "$VIRTUAL_ENV" ]] || [[ ! -f ".venv/bin/activate" ]]; then
     echo "✅ Virtual environment reactivated"
 fi
 
+# Install lingua-franca separately to avoid python-dateutil version conflict
+# lingua-franca requires ~=2.6.0 but works fine with >=2.7 (needed for matplotlib/pandas)
+echo "Installing lingua-franca (NLP library)..."
+pip install --no-deps lingua-franca==0.4.3
+
 # Conditional installation based on user choices
 echo ""
 echo "Installing conditional packages based on your setup choices..."
 
-# Ensure we're in the virtual environment for conditional installations  
+# Ensure we're in the virtual environment for conditional installations
 source .venv/bin/activate
 
-# Install TensorFlow if custom wake words are enabled
-if [[ "$INSTALL_TENSORFLOW" == true ]]; then
-    echo "Installing TensorFlow for custom wake word training..."
-    pip install tensorflow==2.12.0
-    pip install mycroft-precise
-    echo "✅ TensorFlow and mycroft-precise installed for custom wake words"
+# Install pocketsphinx (optional - for alternative wake word "wake up")
+echo "Attempting to install pocketsphinx (optional wake word engine)..."
+pip install pocketsphinx==0.1.0 2>&1 | tee /tmp/pocketsphinx_install.log
+POCKETSPHINX_EXIT_CODE=${PIPESTATUS[0]}
+
+if [ $POCKETSPHINX_EXIT_CODE -eq 0 ]; then
+    echo "✅ pocketsphinx installed - 'wake up' alternative wake word available"
+    POCKETSPHINX_INSTALLED=true
 else
-    echo "ℹ️  Skipping TensorFlow - using default wake word only"
+    echo "⚠️  pocketsphinx installation failed (known issue on x86_64 with GCC 13+)"
+    echo "   This is OK - Precise wake word engine will be used instead"
+    echo "   Note: 'wake up' alternative wake word will not be available"
+    echo "   Primary wake word 'hey mycroft' (Precise) will still work perfectly"
+    POCKETSPHINX_INSTALLED=false
+fi
+
+# Install wake word engine based on user selection
+if [[ "$WAKE_WORD_ENGINE" == "precise" ]]; then
+    echo "=============================================================================="
+    echo "Setting up Precise runtime for existing wake word models..."
+    echo "=============================================================================="
+    echo ""
+    echo "NOTE: This setup installs RUNTIME ONLY (no training tools)"
+    echo ""
+    echo "To train new Precise models, use a separate Python 3.7 environment:"
+    echo "  1. Clone: https://github.com/MycroftAI/mycroft-precise"
+    echo "  2. Follow: https://github.com/MycroftAI/mycroft-precise/wiki/Training-your-own-wake-word"
+    echo "  3. Use Python 3.7 venv (required for TensorFlow 1.x compatibility)"
+    echo ""
+    echo "Once trained, place your .pb model in ~/.local/share/mycroft/precise/"
+    echo ""
+
+    # Download and extract Precise 0.3.0 pre-built binary for runtime
+    PRECISE_DIR="$HOME/.local/share/mycroft/precise"
+    mkdir -p "$PRECISE_DIR"
+
+    # Check if precise-engine already exists
+    if [[ -f "$PRECISE_DIR/precise-engine/precise-engine" ]]; then
+        echo "✅ Precise runtime binary already installed"
+        "$PRECISE_DIR/precise-engine/precise-engine" --version 2>/dev/null || true
+    else
+        echo "Downloading Precise 0.3.0 runtime binary..."
+
+        ARCH=$(uname -m)
+        if [[ "$ARCH" == "x86_64" ]]; then
+            PRECISE_URL="https://github.com/MycroftAI/mycroft-precise/releases/download/v0.3.0/precise-engine_0.3.0_x86_64.tar.gz"
+        elif [[ "$ARCH" == "aarch64" ]]; then
+            PRECISE_URL="https://github.com/MycroftAI/mycroft-precise/releases/download/v0.3.0/precise-engine_0.3.0_aarch64.tar.gz"
+        elif [[ "$ARCH" == "armv7l" ]]; then
+            PRECISE_URL="https://github.com/MycroftAI/mycroft-precise/releases/download/v0.3.0/precise-engine_0.3.0_armv7l.tar.gz"
+        else
+            echo "⚠️  Warning: Unsupported architecture $ARCH for Precise 0.3.0"
+            echo "   Supported: x86_64, aarch64, armv7l"
+            echo "   Precise wake words may not work. Continuing anyway..."
+            PRECISE_URL=""
+        fi
+
+        if [[ -n "$PRECISE_URL" ]]; then
+            if wget -q --show-progress "$PRECISE_URL" -O "$PRECISE_DIR/precise-engine_0.3.0_${ARCH}.tar.gz"; then
+                echo "Extracting Precise 0.3.0 binary..."
+                tar -xzf "$PRECISE_DIR/precise-engine_0.3.0_${ARCH}.tar.gz" -C "$PRECISE_DIR"
+
+                if [[ -f "$PRECISE_DIR/precise-engine/precise-engine" ]]; then
+                    chmod +x "$PRECISE_DIR/precise-engine/precise-engine"
+                    echo "✅ Precise 0.3.0 runtime binary installed successfully"
+                    "$PRECISE_DIR/precise-engine/precise-engine" --version
+                else
+                    echo "⚠️  Warning: Precise binary extraction may have failed"
+                fi
+            else
+                echo "⚠️  Warning: Failed to download Precise 0.3.0 binary"
+                echo "   You can manually download and extract to: $PRECISE_DIR"
+            fi
+        fi
+    fi
+
+    echo ""
+    echo "✅ Precise runtime setup complete!"
+    echo "   - Runtime binary: ~/.local/share/mycroft/precise/precise-engine/precise-engine"
+    echo "   - Place your .pb models in: ~/.local/share/mycroft/precise/"
+    echo "   - No training tools installed (use separate Python 3.7 environment)"
+    echo ""
+elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+    echo "Installing OpenWakeWord for custom wake word models..."
+    echo "(Lightweight alternative using ONNX models)"
+    echo ""
+
+    # Install training dependencies if user requested them earlier
+    # IMPORTANT: Install training deps BEFORE OpenWakeWord to avoid version downgrades
+    if [[ "$INSTALL_OWW_TRAINING" == true ]]; then
+        echo ""
+        echo "📦 Installing PyTorch and training dependencies..."
+        if [[ "$ENABLE_STT_GPU" == true ]]; then
+            echo "   This may take several minutes (~2.7-3.2 GB download for GPU version)..."
+        else
+            echo "   This will take a few minutes (~400-500 MB download for CPU version)..."
+        fi
+        echo ""
+
+        # Install PyTorch FIRST - follow STT GPU decision for consistency
+        # This pins sympy==1.13.1 which OpenWakeWord will accept
+        # (User can switch to GPU training later by reinstalling PyTorch with CUDA)
+        if [[ "$ENABLE_STT_GPU" == true ]]; then
+            echo "1️⃣  Installing PyTorch with CUDA 12.4 support..."
+            pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+
+            if [ $? -eq 0 ]; then
+                echo "✅ PyTorch with CUDA installed successfully"
+                # Mark that we've installed CUDA libraries via PyTorch
+                CUDA_LIBS_INSTALLED=true
+            else
+                echo "⚠️  Warning: PyTorch installation failed"
+                echo "   Training will still work on CPU, but will be slower"
+            fi
+        else
+            echo "1️⃣  Installing PyTorch (CPU-only)..."
+            pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0
+
+            if [[ "$GPU_AVAILABLE" == true ]]; then
+                echo "✅ PyTorch (CPU) installed successfully"
+                echo ""
+                echo "💡 Note: GPU detected but CPU-only PyTorch installed (matching your STT choice)"
+                echo "   The training script will offer to switch to GPU when you first run it"
+                echo "   Or use: oww-train-model --gpu  (to force GPU upgrade)"
+                echo "           oww-train-model --no-gpu  (to skip GPU prompt)"
+            else
+                echo "✅ PyTorch (CPU) installed successfully"
+            fi
+        fi
+
+        # Install audio augmentation libraries BEFORE librosa
+        # This pins soxr==0.5.0.post1 which librosa will accept
+        echo ""
+        echo "2️⃣  Installing audio augmentation libraries..."
+        pip install audiomentations==0.43.1 torch-audiomentations==0.12.0
+
+        # Install audio processing libraries (with correct scipy version)
+        # This pins scipy==1.16.2 and tqdm==4.67.2 which OpenWakeWord will accept
+        echo ""
+        echo "3️⃣  Installing audio processing libraries..."
+        pip install scipy==1.16.2 tqdm==4.67.2 torchinfo==1.8.0 torchmetrics==1.8.2 soundfile==0.13.1 librosa==0.11.0
+
+        # Install additional training utilities
+        echo ""
+        echo "4️⃣  Installing additional training utilities..."
+        pip install speechbrain==1.0.3 pronouncing==0.2.0 webrtcvad==2.0.10
+        pip install pydub==0.25.1 mutagen==1.47.0 acoustics==0.2.6
+        pip install matplotlib==3.10.8 pandas==3.0.0
+        pip install onnx==1.17.0  # Required for PyTorch ONNX export
+
+        echo ""
+        echo "✅ All training dependencies installed successfully!"
+
+        # Verify PyTorch installation
+        python3 << 'VERIFY_EOF'
+import sys
+try:
+    import torch
+    cuda_available = torch.cuda.is_available()
+    print(f"\n✓ PyTorch {torch.__version__} ({'CUDA' if cuda_available else 'CPU'})")
+    if cuda_available:
+        print(f"✓ CUDA device: {torch.cuda.get_device_name(0)}")
+except Exception as e:
+    print(f"\n⚠️  Warning: Could not verify PyTorch: {e}", file=sys.stderr)
+VERIFY_EOF
+    fi
+
+    # Install OpenWakeWord packages AFTER training deps (if installed)
+    # This way OpenWakeWord accepts the pinned versions from training:
+    # - sympy 1.13.1 (from PyTorch)
+    # - scipy 1.16.2 (from training)
+    # - tqdm 4.67.2 (from training)
+    # - soxr 0.5.0.post1 (from augmentation)
+    echo ""
+    echo "Installing OpenWakeWord and OVOS plugin..."
+    pip install openwakeword==0.6.0 ovos-ww-plugin-openwakeword==0.4.1
+
+    echo "✅ OpenWakeWord packages installed (pinned to known-good versions)"
+
+    # Patch openwakeword data.py bug: numpy arrays don't support .max(dim=1) syntax
+    # This is a known bug in openwakeword 0.6.0 where it uses PyTorch syntax on numpy arrays
+    echo "Applying openwakeword bug fix (numpy max syntax)..."
+    OWW_DATA_FILE=".venv/lib/python${PYTHON_MAJOR}.${PYTHON_MINOR}/site-packages/openwakeword/data.py"
+    if [ -f "$OWW_DATA_FILE" ]; then
+        # Fix: mixed_clips_batch.max(dim=1) → mixed_clips_batch.max(axis=1) for numpy
+        sed -i 's/mixed_clips_batch\.max(dim=1)/mixed_clips_batch.max(axis=1)/g' "$OWW_DATA_FILE"
+        echo "✅ OpenWakeWord numpy compatibility patch applied"
+    else
+        echo "⚠️  Warning: Could not find openwakeword data.py to patch"
+    fi
+
+    if [[ "$INSTALL_OWW_TRAINING" != true ]]; then
+        echo "⏭️  Training dependencies not installed - you can install them later with 'oww-train-model'"
+    fi
+
+    # Create symlinks for training scripts in venv bin
+    if [ -d "openwakeword" ]; then
+        echo ""
+        echo "Creating symlinks for OpenWakeWord training scripts..."
+
+        for script in openwakeword/oww-*.py; do
+            if [ -f "$script" ]; then
+                SCRIPT_NAME=$(basename "$script")
+                # Remove .py extension for cleaner command names
+                LINK_NAME="${SCRIPT_NAME%.py}"
+
+                # Create symlink in venv bin
+                ln -sf "$(pwd)/$script" ".venv/bin/$LINK_NAME"
+                chmod +x "$script"
+                echo "  ✅ $LINK_NAME -> $script"
+            fi
+        done
+
+        echo ""
+        echo "✅ OpenWakeWord training scripts available in venv:"
+        echo "   - oww-collect    (collect wake word samples)"
+        echo "   - oww-train-model (train ONNX models)"
+        echo "   - oww-train-verifier (train verifier models)"
+        echo "   - oww-duplicate-samples (augment training data)"
+        echo "   - oww-listen     (test trained models)"
+    else
+        echo "⚠️  Warning: openwakeword/ directory not found - scripts not linked"
+        echo "   Training tools will need to be run from the openwakeword directory"
+    fi
+
+    echo ""
+    echo "✅ OpenWakeWord setup complete!"
+    echo "   - Runtime: openwakeword + ovos-ww-plugin-openwakeword"
+    if [[ "$INSTALL_OWW_TRAINING" == true ]]; then
+        echo "   - Training: PyTorch + all dependencies installed"
+    else
+        echo "   - Training: Dependencies can be installed later with 'oww-train-model'"
+    fi
+    echo "   - Training tools: oww-* commands available when venv is active"
+    echo ""
+    echo "📖 To train and use custom wake words, see OPENWAKEWORD_SETUP.md"
+else
+    echo "ℹ️  Skipping custom wake word support"
+    echo "   (Default 'hey mycroft' wake word uses pre-built Precise binary with bundled TensorFlow)"
 fi
 
 # Install GPIO libraries if Raspberry Pi GPIO support is enabled
@@ -1044,8 +1694,8 @@ pip install --force-reinstall mycroft-messagebus-client==0.9.6
 echo "Installing padatious (with fann2 fix)..."
 pip install padatious --no-deps
 
-# Install required dependency for padatious
-pip install xxhash
+# Install required dependency for padatious (pinned to working version)
+pip install xxhash==3.6.0
 
 # Create dummy fann2 module since compilation fails on this system
 echo "Creating dummy fann2 module to resolve compilation issues..."
@@ -1198,9 +1848,120 @@ source .venv/bin/activate
 echo "Installing additional STT requirements..."
 pip install -r requirements/extra-stt.txt || echo "Some STT extras failed, continuing..."
 
-# Install ovos-stt-plugin-fasterwhisper for local STT
-echo "Installing FasterWhisper STT plugin..."
-pip install ovos-stt-plugin-fasterwhisper
+# Verify ovos-stt-plugin-fasterwhisper is installed at pinned version
+# (Already in requirements-offline.txt, this ensures correct version after extra-stt.txt)
+echo "Verifying FasterWhisper STT plugin at correct pinned version..."
+pip install --no-deps ovos-stt-plugin-fasterwhisper==0.2.0
+
+# Install CUDA runtime libraries if GPU acceleration was enabled
+# Skip if PyTorch already installed them (from OpenWakeWord training setup)
+if [[ "$ENABLE_STT_GPU" == true ]]; then
+    if [[ "$CUDA_LIBS_INSTALLED" == true ]]; then
+        echo ""
+        echo "ℹ️  CUDA libraries already installed via PyTorch - skipping separate installation"
+        echo "   GPU acceleration for STT and training will use the same CUDA 12.4 libraries"
+    else
+        echo ""
+        echo "Installing NVIDIA CUDA runtime libraries for GPU acceleration..."
+        pip install "nvidia-cudnn-cu12>=9.1.0" "nvidia-cublas-cu12>=12.4.0" "nvidia-cuda-runtime-cu12>=12.4.0"
+        if [ $? -eq 0 ]; then
+            echo "✅ CUDA runtime libraries installed successfully"
+        else
+            echo "⚠️  Warning: CUDA runtime library installation failed"
+            echo "   GPU acceleration may not work. You can try installing manually:"
+            echo "   pip install nvidia-cudnn-cu12 nvidia-cublas-cu12 nvidia-cuda-runtime-cu12"
+        fi
+    fi
+fi
+
+# Pre-download Precise wake word model (only if using Precise or default wake word)
+if [[ "$INSTALL_OPENWAKEWORD" != true ]]; then
+    echo "Pre-downloading Precise wake word model..."
+    PRECISE_DIR="$HOME/.local/share/mycroft/precise"
+    mkdir -p "$PRECISE_DIR"
+
+    if [ ! -f "$PRECISE_DIR/hey-mycroft.pb" ]; then
+    echo "Downloading 'hey mycroft' wake word model..."
+    DOWNLOAD_SUCCESS=false
+    
+    # Try wget first (more robust with retries)
+    if command -v wget >/dev/null 2>&1; then
+        echo "Using wget for download..."
+        if wget -c "https://raw.githubusercontent.com/MycroftAI/precise-data/models/hey-mycroft.tar.gz" \
+                -O "$PRECISE_DIR/hey-mycroft.tar.gz" \
+                --tries=5 --read-timeout=10 --timeout=30 2>&1 | grep -v "^--"; then
+            DOWNLOAD_SUCCESS=true
+        fi
+    # Fallback to curl (available on all systems we support)
+    elif command -v curl >/dev/null 2>&1; then
+        echo "Using curl for download..."
+        if curl -L --retry 5 --retry-delay 2 --max-time 60 --connect-timeout 30 \
+                -o "$PRECISE_DIR/hey-mycroft.tar.gz" \
+                "https://raw.githubusercontent.com/MycroftAI/precise-data/models/hey-mycroft.tar.gz" 2>&1; then
+            DOWNLOAD_SUCCESS=true
+        fi
+    else
+        echo "⚠️  Neither wget nor curl found - cannot download model"
+    fi
+    
+    if [ "$DOWNLOAD_SUCCESS" = true ]; then
+        # Extract the model
+        if tar -xzf "$PRECISE_DIR/hey-mycroft.tar.gz" -C "$PRECISE_DIR" 2>/dev/null; then
+            echo "✅ Precise wake word model installed successfully"
+            ls -lh "$PRECISE_DIR"/hey-mycroft.pb* 2>/dev/null || true
+        else
+            echo "⚠️  Failed to extract Precise model - will download at runtime"
+        fi
+    else
+        echo "⚠️  Failed to download Precise model - will download at runtime"
+        echo "   This is OK - Mycroft will attempt to download it when starting"
+    fi
+    else
+        echo "✅ Precise wake word model already exists"
+    fi
+else
+    echo "Pre-downloading OpenWakeWord models..."
+    python3 << 'ENDPYTHON'
+try:
+    from openwakeword.utils import download_models
+    print("Downloading OpenWakeWord models (~19 MB total)...")
+    download_models()
+    print("✅ OpenWakeWord models downloaded successfully")
+except Exception as e:
+    print(f"⚠️  Warning: Failed to pre-download OpenWakeWord models: {e}")
+    print("   This is OK - Mycroft will attempt to download them when starting")
+ENDPYTHON
+fi
+
+# Pre-download Faster-Whisper STT model (conditional based on GPU setting)
+echo "Pre-downloading Faster-Whisper STT model..."
+if [[ "$ENABLE_STT_GPU" == true ]]; then
+    WHISPER_MODEL="medium.en"
+    echo "Using GPU-optimized model: $WHISPER_MODEL (~1.5 GB)..."
+else
+    WHISPER_MODEL="base.en"
+    echo "Using CPU-optimized model: $WHISPER_MODEL (~140 MB)..."
+fi
+
+python3 << ENDPYTHON
+try:
+    from faster_whisper import WhisperModel
+    import os
+    from pathlib import Path
+
+    model_name = "${WHISPER_MODEL}"
+    cache_dir = str(Path.home() / ".cache" / "huggingface")
+
+    print(f"Downloading Whisper {model_name} model to {cache_dir}...")
+
+    # Initialize the model which triggers download if not present
+    model = WhisperModel(model_name, device="cpu", compute_type="int8")
+
+    print(f"✅ Faster-Whisper {model_name} model downloaded successfully")
+except Exception as e:
+    print(f"⚠️  Warning: Failed to pre-download Faster-Whisper model: {e}")
+    print("   This is OK - Mycroft will attempt to download it when starting")
+ENDPYTHON
 
 # CRITICAL: Add mycroft-core to the virtual environment path
 # This is equivalent to typing 'add2virtualenv $TOP' and is essential for module imports
@@ -1240,13 +2001,13 @@ chmod +x scripts/*.sh
 # Ensure we're in the virtual environment for skill dependencies
 source .venv/bin/activate
 
-# Install common skill dependencies  
+# Install common skill dependencies (pinned to working versions)
 echo "Installing common skill dependencies..."
-pip install pyjokes==0.6.0 pytz holidays
+pip install pyjokes==0.6.0 pytz==2025.2 holidays==0.90
 
-# Install additional skill dependencies for alarm and date-time skills
+# Install additional skill dependencies for alarm and date-time skills (pinned to working versions)
 echo "Installing additional skill dependencies..."
-pip install pyalsaaudio timezonefinder geocoder requests
+pip install pyalsaaudio==0.11.0 timezonefinder==8.2.1 geocoder==1.38.1 requests
 
 # Create log directory
 sudo mkdir -p /var/log/mycroft/
@@ -1297,6 +2058,14 @@ echo "==========================================================================
 echo "Creating unified Mycroft configuration..."
 mkdir -p ~/.config/mycroft
 
+# Check if config already exists and back it up
+if [ -f ~/.config/mycroft/mycroft.conf ]; then
+    BACKUP_FILE=~/.config/mycroft/mycroft.conf.backup.$(date +%Y%m%d_%H%M%S)
+    echo "⚠️  Existing configuration found - backing up to:"
+    echo "   $BACKUP_FILE"
+    cp ~/.config/mycroft/mycroft.conf "$BACKUP_FILE"
+fi
+
 # Detect system architecture for optimized configuration
 ARCH=$(uname -m)
 echo "Detected architecture: $ARCH"
@@ -1311,26 +2080,74 @@ else
 fi
 
 echo "Creating Mycroft configuration ($CONFIG_TYPE)..."
-cat > ~/.config/mycroft/mycroft.conf << 'EOF'
-{
-  "max_allowed_core_version": 21.2,
-  "hotwords": {
-    "hey mycroft": {
+
+# Build listener configuration based on pocketsphinx availability
+if [ "$POCKETSPHINX_INSTALLED" = true ]; then
+    echo "Including 'wake up' secondary wake word (pocketsphinx available)"
+    LISTENER_CONFIG='"listener": {
+    "wake_word": "hey mycroft",
+    "stand_up_word": "wake up",
+    "mute_during_output": true,
+    "sample_rate": 16000
+  },'
+else
+    echo "Disabling 'wake up' secondary wake word (pocketsphinx not available)"
+    LISTENER_CONFIG='"listener": {
+    "wake_word": "hey mycroft",
+    "stand_up_word": "",
+    "mute_during_output": true,
+    "sample_rate": 16000
+  },'
+fi
+
+# Build wake word engine configuration based on user choice
+WAKE_WORD_ENGINE_CONFIG=''
+HOTWORD_CONFIG=''
+
+if [[ "$INSTALL_TENSORFLOW" == true ]] && [[ -f "$HOME/.local/share/mycroft/precise/precise-engine/precise-engine" ]]; then
+    echo "Configuring Precise 0.3.0 to prevent auto-downgrade..."
+    WAKE_WORD_ENGINE_CONFIG='"precise": {
+    "executable": "~/.local/share/mycroft/precise/precise-engine/precise-engine"
+  },'
+    HOTWORD_CONFIG='"hey mycroft": {
       "module": "precise",
       "phonemes": "HH EY . M AY K R AO F T",
       "threshold": 1e-90,
       "lang": "en-us"
-    }
+    }'
+elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+    echo "Configuring OpenWakeWord plugin..."
+    WAKE_WORD_ENGINE_CONFIG=''  # No extra config needed
+    HOTWORD_CONFIG='"hey mycroft": {
+      "module": "ovos-ww-plugin-openwakeword",
+      "models": ["hey_mycroft"],
+      "inference_framework": "onnx",
+      "threshold": 0.5,
+      "lang": "en-us"
+    }'
+else
+    # Default Precise configuration (bundled binary)
+    HOTWORD_CONFIG='"hey mycroft": {
+      "module": "precise",
+      "phonemes": "HH EY . M AY K R AO F T",
+      "threshold": 1e-90,
+      "lang": "en-us"
+    }'
+fi
+
+cat > ~/.config/mycroft/mycroft.conf <<EOF
+{
+  "max_allowed_core_version": 21.2,
+  $WAKE_WORD_ENGINE_CONFIG
+  "hotwords": {
+    $HOTWORD_CONFIG
   },
-  "listener": {
-    "wake_word": "hey mycroft",
-    "sample_rate": 16000
-  },
+  $LISTENER_CONFIG
   "stt": {
     "module": "ovos-stt-plugin-fasterwhisper",
     "ovos-stt-plugin-fasterwhisper": {
-      "model": "base.en",
-      "use_cuda": false,
+      "model": "$([ "$ENABLE_STT_GPU" = true ] && echo "medium.en" || echo "base.en")",
+      "use_cuda": $([ "$ENABLE_STT_GPU" = true ] && echo "true" || echo "false"),
       "language": "en"
     }
   },
@@ -1356,11 +2173,27 @@ EOF
 
 echo "✅ Created simplified Mycroft configuration (like old working setup)"
 echo "✅ Includes max_allowed_core_version: 21.2 (critical for compatibility)"
-echo "✅ Sets up default 'hey mycroft' wake word with Precise"
+
+if [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+    echo "✅ Sets up default wake word with OpenWakeWord plugin"
+elif [[ "$INSTALL_TENSORFLOW" == true ]]; then
+    echo "✅ Sets up default wake word with Precise 0.3.0 (custom training ready)"
+else
+    echo "✅ Sets up default 'hey mycroft' wake word with Precise"
+fi
+
 echo "✅ Uses simplified audio approach (no complex device detection)"
 echo ""
 echo "Note: This configuration follows the simpler approach that worked in your old setup."
-echo "If you need custom wake words or audio devices, you can edit ~/.config/mycroft/mycroft.conf"
+
+if [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
+    echo "For custom OpenWakeWord models, see OPENWAKEWORD_SETUP.md"
+elif [[ "$INSTALL_TENSORFLOW" == true ]]; then
+    echo "For custom Precise models, see CUSTOM_WAKE_WORDS.md"
+else
+    echo "If you need custom wake words or audio devices, you can edit ~/.config/mycroft/mycroft.conf"
+fi
+
 echo "Location configuration can be added later for the weather skill if needed."
 
 echo "=============================================================================="
@@ -1603,17 +2436,21 @@ echo "  ✅ Proper verification flow (skills installed → services stopped → 
 echo "  ✅ Git configuration preserved (existing remotes and SSH setup maintained)"
 echo "  ✅ Function definitions moved before usage (fixed bash execution order)"
 echo "  ✅ Duplicate PHASE sections consolidated"
+echo "  ✅ Mimic TTS binary installed (ensures audio ducking works even without TTS config)"
+if [[ "$INSTALL_OWW_TRAINING" == true ]] && [[ "$ENABLE_STT_GPU" == true ]]; then
+    echo "  ✅ Unified CUDA libraries for GPU STT and wake word training (PyTorch 2.6.0 CUDA 12.4)"
+fi
 echo ""
 
 echo "The following external services have been disabled:"
 echo "  - Device pairing (backend unavailable)"
 echo "  - Skill updates (using local skills only)"
-echo "  - Mimic2 TTS (will fall back to local Mimic)"
+echo "  - Mimic2 TTS (cloud service disabled)"
 echo "  - Wake word training uploads"
 echo ""
 
 echo "STT is configured to use FasterWhisper locally."
-echo "TTS is configured to use eSpeak."
+echo "TTS is configured to use eSpeak (with Mimic fallback installed)."
 echo "=============================================================================="
 echo "PHASE 5: OPTIONAL - Test Mycroft services (recommended)"
 echo "=============================================================================="
