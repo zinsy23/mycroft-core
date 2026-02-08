@@ -11,9 +11,9 @@ Requires PyTorch and full training dependencies.
 Usage:
     python train_oww_model.py \\
         --wake-word "computer" \\
-        --samples-dir /path/to/wake-word-samples \\
-        --output computer.tflite \\
-        --steps 5000
+        --positive-dir /path/to/wake-word-samples \\
+        --negative-dir /path/to/background-samples \\
+        --output computer.onnx
 
 Or run interactively:
     python train_oww_model.py
@@ -39,7 +39,7 @@ def check_gpu_upgrade_opportunity(force_gpu=None):
         import subprocess
 
         # Check if GPU hardware exists but CUDA is not available in PyTorch
-        has_nvidia_gpu = subprocess.run(['nvidia-smi'], capture_output=True, stderr=subprocess.DEVNULL).returncode == 0
+        has_nvidia_gpu = subprocess.run(['nvidia-smi'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
         cuda_available = torch.cuda.is_available()
 
         # Handle --gpu flag when no GPU hardware exists
@@ -264,7 +264,7 @@ def check_dependencies(force_gpu=None):
                 sys.executable, '-m', 'pip', 'install',
                 'speechbrain==1.0.3', 'pronouncing==0.2.0', 'webrtcvad==2.0.10',
                 'pydub==0.25.1', 'mutagen==1.47.0', 'acoustics==0.2.6',
-                'matplotlib==3.10.8', 'pandas==3.0.0'
+                'matplotlib==3.10.8', 'pandas==3.0.0', 'onnx==1.17.0'
             ])
             if result.returncode != 0:
                 print("❌ Training utilities installation failed")
@@ -760,17 +760,11 @@ def train_model(positive_features, negative_features, wake_word, n_epochs=10, ou
     )
     print(f"✓ ONNX model: {onnx_path}")
 
-    # Convert to TFLite (optional)
-    tflite_path = output_path.with_suffix('.tflite')
-    try:
-        from openwakeword.train import convert_onnx_to_tflite
-        convert_onnx_to_tflite(str(onnx_path), str(tflite_path))
-        print(f"✓ TFLite model: {tflite_path}")
-    except Exception as e:
-        print(f"  (TFLite conversion failed: {e})")
-        tflite_path = None
+    # Note: TFLite conversion not supported in this setup (requires TensorFlow)
+    # TFLite is mainly useful for embedded devices (Raspberry Pi, mobile)
+    # ONNX is faster on desktop GPUs and works perfectly with OpenWakeWord
 
-    return onnx_path, tflite_path
+    return onnx_path
 
 def interactive_mode():
     """Interactive mode for gathering training parameters."""
@@ -1005,32 +999,40 @@ Examples:
     )
 
     # Train model
-    onnx_path, tflite_path = train_model(
+    onnx_path = train_model(
         positive_features, negative_features, wake_word, n_epochs, output_path, force_cpu=force_cpu
     )
 
     print("\n" + "=" * 60)
     print("Training Complete!")
     print("=" * 60)
-    print(f"\nModels saved:")
-    print(f"  - ONNX:  {onnx_path}")
-    if tflite_path:
-        print(f"  - TFLite: {tflite_path}")
-    print("\nBoth formats work with OpenWakeWord.")
-    print("ONNX may be faster on desktop GPUs, TFLite is smaller for distribution.")
+    print(f"\nModel saved: {onnx_path}")
+    print("\nONNX format is optimized for desktop GPUs and works perfectly with OpenWakeWord.")
     print("\nNext steps:")
-    print("1. Update ~/.config/mycroft/mycroft.conf:")
+    print("\n1. Set the active wake word in ~/.config/mycroft/mycroft.conf:")
     print(f"""
+{{
+  "listener": {{
+    "wake_word": "{wake_word}"
+  }}
+}}
+""")
+    print("2. Configure the wake word model in ~/.config/mycroft/mycroft.conf:")
+    print(f"""
+{{
   "hotwords": {{
     "{wake_word}": {{
-      "module": "openwakeword",
+      "module": "ovos-ww-plugin-openwakeword",
       "models": ["{onnx_path.absolute()}"],
-      "inference_framework": "onnx",  // or "tflite"
+      "inference_framework": "onnx",
       "threshold": 0.5
     }}
   }}
+}}
 """)
-    print("2. Restart Mycroft and test: mycroft-say-to 'computer'")
+    print("3. Restart Mycroft services:")
+    print("   ./stop-mycroft.sh && ./start-mycroft.sh all")
+    print(f"\n4. Test your wake word by saying: \"{wake_word}\"")
     print()
 
 if __name__ == "__main__":

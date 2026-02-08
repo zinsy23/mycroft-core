@@ -18,29 +18,30 @@ SpeechRecognition==3.8.1
 
 # System utilities
 pyserial==3.0
-psutil>=5.6.6
-# Pin to version compatible with pandas/matplotlib (require >=2.8.2)
-python-dateutil>=2.10.1
-fasteners>=0.14.1
-PyYAML>=5.4
-pyxdg>=0.27
+psutil>=5.6.6,<8.0
+# Pin to version compatible with pandas/matplotlib (require >=2.7)
+# lingua-franca will be installed separately with --no-deps to avoid conflict
+python-dateutil>=2.7,<3.0
+fasteners>=0.14.1,<1.0
+PyYAML>=5.4,<7.0
+pyxdg>=0.27,<0.29
 
 # Image processing
-Pillow>=8.3.2
+Pillow>=8.3.2,<13.0
 
 # Event handling - match mycroft-messagebus-client dependency
 pyee==8.1.0
 
 # Mycroft core components
 # Pinned to known-good versions for stability
-lingua-franca==0.4.3
+# lingua-franca==0.4.3  # Installed separately with --no-deps (conflicts with python-dateutil)
 msm==0.9.0
 msk==0.4.0
 # Use older messagebus client to avoid threading issues (will be patched)
 mycroft-messagebus-client==0.9.6
-adapt-parser>=0.3.0
-padaos>=0.1.9
-petact>=0.1.2
+adapt-parser>=0.3.0,<2.0
+padaos>=0.1.9,<0.2
+petact>=0.1.2,<0.2
 precise-runner==0.3.1
 
 # Intent parsing (padatious) - critical for skills

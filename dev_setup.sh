@@ -1421,11 +1421,16 @@ if [[ -z "$VIRTUAL_ENV" ]] || [[ ! -f ".venv/bin/activate" ]]; then
     echo "✅ Virtual environment reactivated"
 fi
 
+# Install lingua-franca separately to avoid python-dateutil version conflict
+# lingua-franca requires ~=2.6.0 but works fine with >=2.7 (needed for matplotlib/pandas)
+echo "Installing lingua-franca (NLP library)..."
+pip install --no-deps lingua-franca==0.4.3
+
 # Conditional installation based on user choices
 echo ""
 echo "Installing conditional packages based on your setup choices..."
 
-# Ensure we're in the virtual environment for conditional installations  
+# Ensure we're in the virtual environment for conditional installations
 source .venv/bin/activate
 
 # Install pocketsphinx (optional - for alternative wake word "wake up")
@@ -1576,6 +1581,7 @@ elif [[ "$INSTALL_OPENWAKEWORD" == true ]]; then
         pip install speechbrain==1.0.3 pronouncing==0.2.0 webrtcvad==2.0.10
         pip install pydub==0.25.1 mutagen==1.47.0 acoustics==0.2.6
         pip install matplotlib==3.10.8 pandas==3.0.0
+        pip install onnx==1.17.0  # Required for PyTorch ONNX export
 
         echo ""
         echo "✅ All training dependencies installed successfully!"
@@ -1605,6 +1611,18 @@ VERIFY_EOF
     pip install openwakeword==0.6.0 ovos-ww-plugin-openwakeword==0.4.1
 
     echo "✅ OpenWakeWord packages installed (pinned to known-good versions)"
+
+    # Patch openwakeword data.py bug: numpy arrays don't support .max(dim=1) syntax
+    # This is a known bug in openwakeword 0.6.0 where it uses PyTorch syntax on numpy arrays
+    echo "Applying openwakeword bug fix (numpy max syntax)..."
+    OWW_DATA_FILE=".venv/lib/python${PYTHON_MAJOR}.${PYTHON_MINOR}/site-packages/openwakeword/data.py"
+    if [ -f "$OWW_DATA_FILE" ]; then
+        # Fix: mixed_clips_batch.max(dim=1) → mixed_clips_batch.max(axis=1) for numpy
+        sed -i 's/mixed_clips_batch\.max(dim=1)/mixed_clips_batch.max(axis=1)/g' "$OWW_DATA_FILE"
+        echo "✅ OpenWakeWord numpy compatibility patch applied"
+    else
+        echo "⚠️  Warning: Could not find openwakeword data.py to patch"
+    fi
 
     if [[ "$INSTALL_OWW_TRAINING" != true ]]; then
         echo "⏭️  Training dependencies not installed - you can install them later with 'oww-train-model'"
@@ -1676,8 +1694,8 @@ pip install --force-reinstall mycroft-messagebus-client==0.9.6
 echo "Installing padatious (with fann2 fix)..."
 pip install padatious --no-deps
 
-# Install required dependency for padatious
-pip install xxhash
+# Install required dependency for padatious (pinned to working version)
+pip install xxhash==3.6.0
 
 # Create dummy fann2 module since compilation fails on this system
 echo "Creating dummy fann2 module to resolve compilation issues..."
@@ -1983,13 +2001,13 @@ chmod +x scripts/*.sh
 # Ensure we're in the virtual environment for skill dependencies
 source .venv/bin/activate
 
-# Install common skill dependencies  
+# Install common skill dependencies (pinned to working versions)
 echo "Installing common skill dependencies..."
-pip install pyjokes==0.6.0 pytz holidays
+pip install pyjokes==0.6.0 pytz==2025.2 holidays==0.90
 
-# Install additional skill dependencies for alarm and date-time skills
+# Install additional skill dependencies for alarm and date-time skills (pinned to working versions)
 echo "Installing additional skill dependencies..."
-pip install pyalsaaudio timezonefinder geocoder requests
+pip install pyalsaaudio==0.11.0 timezonefinder==8.2.1 geocoder==1.38.1 requests
 
 # Create log directory
 sudo mkdir -p /var/log/mycroft/
