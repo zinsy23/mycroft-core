@@ -617,7 +617,7 @@ Some setups may use this configuration style (replace "computer" with your wake 
   },
   "hotwords": {
     "computer": {
-      "module": "openwakeword",
+      "module": "ovos-ww-plugin-openwakeword",
       "model": "computer",
       "threshold": 0.5,
       "lang": "en-us"
