@@ -1311,6 +1311,20 @@ def handle_mycroft_ready(event):
     add_log_message("Looking for Messagebus websocket...")
 
 
+def handle_vosk_partial(event):
+    """Handle Vosk partial transcription results"""
+    utterance = event.data.get('utterance', '')
+    if utterance:
+        add_log_message(f"[VOSK] {utterance}")
+
+
+def handle_vosk_final(event):
+    """Handle Vosk final transcription results"""
+    utterance = event.data.get('utterance', '')
+    if utterance:
+        add_log_message(f"[VOSK FINAL] {utterance}")
+
+
 def gui_main(stdscr):
     global scr
     global bus
@@ -1335,6 +1349,8 @@ def gui_main(stdscr):
     bus.on('connected', handle_is_connected)
     bus.on('reconnecting', handle_reconnecting)
     bus.on('mycroft.ready', handle_mycroft_ready)
+    bus.on('mycroft.debug.vosk.partial', handle_vosk_partial)
+    bus.on('mycroft.debug.vosk.final', handle_vosk_final)
 
     add_log_message("Establishing Mycroft Messagebus connection...")
 

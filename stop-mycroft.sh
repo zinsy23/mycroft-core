@@ -32,6 +32,7 @@ help() {
     echo "  audio     stop the audio playback service"
     echo "  skills    stop the skill service"
     echo "  voice     stop voice capture service"
+    echo "  realtime  stop realtime voice capture service"
     echo "  enclosure stop enclosure (hardware/gui interface) service"
     echo
     echo "Examples:"
@@ -98,6 +99,7 @@ case ${OPT} in
         end_process skills
         end_process audio
         end_process speech
+        end_process realtime
         end_process enclosure
         end_process messagebus.service
         ;;
@@ -112,6 +114,9 @@ case ${OPT} in
         ;;
     "voice")
         end_process speech
+        ;;
+    "realtime")
+        end_process realtime
         ;;
     "enclosure")
         end_process enclosure

@@ -71,6 +71,7 @@ name_to_script_path() {
         "skills")            _module="mycroft.skills" ;;
         "audio")             _module="mycroft.audio" ;;
         "voice")             _module="mycroft.client.speech" ;;
+        "realtime")          _module="mycroft.client.realtime" ;;
         "cli")               _module="mycroft.client.text" ;;
         "audiotest")         _module="mycroft.util.audio_test" ;;
         "wakewordtest")      _module="test.wake_word" ;;
@@ -161,7 +162,16 @@ launch_all() {
     launch_background bus
     launch_background skills
     launch_background audio
-    launch_background voice
+
+    # Check if realtime service is enabled in config
+    if "${VIRTUALENV_ROOT}/bin/python3" -c "from mycroft.configuration import Configuration; import sys; sys.exit(0 if Configuration.get().get('realtime', {}).get('enabled', False) else 1)" 2>/dev/null; then
+        echo "Realtime service enabled - launching realtime (voice service disabled)"
+        launch_background realtime
+    else
+        echo "Realtime service disabled - launching traditional voice service"
+        launch_background voice
+    fi
+
     launch_background enclosure
 }
 
@@ -232,6 +242,9 @@ case ${_opt} in
         launch_background "${_opt}"
         ;;
     "voice")
+        launch_background "${_opt}"
+        ;;
+    "realtime")
         launch_background "${_opt}"
         ;;
 

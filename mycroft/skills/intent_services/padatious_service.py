@@ -123,6 +123,10 @@ class PadatiousService:
         self.bus.on('detach_intent', self.handle_detach_intent)
         self.bus.on('detach_skill', self.handle_detach_skill)
         self.bus.on('mycroft.skills.initialized', self.train)
+        self.bus.on('realtime:subscribe_intents', self.handle_subscribe_intents)
+
+        self.intent_files = {}  # Map of intent_name -> file_path
+        self.realtime_subscribed = False  # Track if realtime service wants updates
 
         self.finished_training_event = Event()
         self.finished_initial_train = False
@@ -165,6 +169,10 @@ class PadatiousService:
         if not self.finished_initial_train:
             self.bus.emit(Message('mycroft.skills.trained'))
             self.finished_initial_train = True
+
+        # Send intents to realtime if subscribed
+        if self.realtime_subscribed:
+            self._send_intents_to_realtime()
 
     def wait_and_train(self):
         """Wait for minimum time between training and start training."""
@@ -234,7 +242,11 @@ class PadatiousService:
         Args:
             message (Message): message triggering action
         """
-        self.registered_intents.append(message.data['name'])
+        intent_name = message.data['name']
+        file_name = message.data['file_name']
+
+        self.registered_intents.append(intent_name)
+        self.intent_files[intent_name] = file_name  # Track file path for sharing
         self._register_object(message, 'intent', self.container.load_intent)
 
     def register_entity(self, message):
@@ -245,6 +257,30 @@ class PadatiousService:
         """
         self.registered_entities.append(message.data)
         self._register_object(message, 'entity', self.container.load_entity)
+
+    def handle_subscribe_intents(self, message):
+        """Handle subscription request from realtime service.
+
+        Sends intents immediately if available, marks subscription for future updates.
+
+        Args:
+            message (Message): subscription request
+        """
+        LOG.info("Realtime service subscribed to intent updates")
+        self.realtime_subscribed = True
+
+        # Send intents immediately if we've already trained
+        if self.finished_initial_train and self.intent_files:
+            self._send_intents_to_realtime()
+        else:
+            LOG.info("Intents not ready yet - will send after training completes")
+
+    def _send_intents_to_realtime(self):
+        """Send all registered intent file paths to realtime service."""
+        LOG.info(f"Sending {len(self.intent_files)} intent files to realtime service")
+        self.bus.emit(Message('padatious:intents_ready', data={
+            'intent_files': self.intent_files
+        }))
 
     def calc_intent(self, utt):
         """Cached version of container calc_intent.
