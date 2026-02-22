@@ -1,0 +1,22 @@
+{
+  "realtime": {
+    "stt_backend": "riva",
+    "riva": {
+      "server_uri": "localhost:50051",
+      "model_name": "conformer-xl-en-US-asr-streaming-asr-bls-ensemble"
+    },
+    "whisper_model": "large-v3",
+    "whisper_device": "cuda",
+    "whisper_compute_type": "float16",
+    "whisper_chunk_seconds": 0.5,
+    "whisper_window_seconds": 3.0,
+    "trigger_words": [],
+    "session_timeout_seconds": 15,
+    "debug": true,
+    "filler_words": {
+      "base_max": 4,
+      "in_command_base": 5,
+      "increment_per_word": 1
+    }
+  }
+}
