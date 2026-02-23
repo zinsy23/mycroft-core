@@ -180,11 +180,12 @@ class MatcherPath:
         self.base_max_fillers = filler_config.get('base_max', 4)
         self.fitness_score = 0  # Number of valid words matched
 
-    def try_add_word(self, word):
+    def try_add_word(self, word, stream_type="FINAL"):
         """Try to add a word to this path.
 
         Args:
             word: The word to try adding
+            stream_type: "INTERIM" or "FINAL" - determines if filler impacts local budget
 
         Returns:
             bool: True if word was valid and added, False if it's a filler
@@ -219,7 +220,10 @@ class MatcherPath:
         else:
             # Filler word - not added
             self.consecutive_fillers += 1
-            self.local_budget = max(0, self.local_budget - 1)
+            # INTERIM/FINAL split: Only FINAL fillers decrease path's local budget
+            # INTERIM fillers don't impact budget (survival of the fittest - valid paths survive INTERIM garbage)
+            if stream_type == "FINAL":
+                self.local_budget = max(0, self.local_budget - 1)
             return False
 
     def _get_matching_sequences(self):
@@ -317,11 +321,9 @@ class MatcherPath:
         if self.consecutive_fillers >= self.base_max_fillers:
             return False
 
-        # No possible continuations
-        matching_sequences = self._get_matching_sequences()
-        if not matching_sequences:
-            return False
-
+        # Path is viable as long as it has budget and hasn't hit filler limit
+        # Don't check for continuations here - paths should survive waiting for next word
+        # Survival of the fittest: paths die naturally when wrong words arrive
         return True
 
 
@@ -381,7 +383,7 @@ class StreamingCommandMatcher:
 
         LOG.debug(f"Registered {len(pattern_lines)} patterns for {intent_name}")
 
-    def add_word(self, word):
+    def add_word(self, word, stream_type="FINAL"):
         """Process a new word from STT using multi-path matching.
 
         Creates a new matcher path starting with this word, and tries adding
@@ -389,6 +391,7 @@ class StreamingCommandMatcher:
 
         Args:
             word (str): The word to process
+            stream_type (str): "INTERIM" or "FINAL" - determines budget impact
 
         Returns:
             dict or None: Match result if complete command matched, else None
@@ -403,8 +406,9 @@ class StreamingCommandMatcher:
         word_accepted = False
 
         # Try adding word to all existing paths
+        # Pass stream_type so path knows whether to decrease local_budget for fillers
         for path in self.active_paths:
-            if path.try_add_word(word):
+            if path.try_add_word(word, stream_type=stream_type):
                 word_accepted = True
 
         # Check if word is valid as a first word (start of new path)
@@ -424,23 +428,42 @@ class StreamingCommandMatcher:
         if word in valid_first_words or '<ENTITY>' in valid_first_words:
             new_path = MatcherPath(self.next_path_id, self.global_budget, self.all_sequences, self.filler_config)
             self.next_path_id += 1
-            new_path.try_add_word(word)
+            new_path.try_add_word(word, stream_type=stream_type)
             self.active_paths.append(new_path)
             word_accepted = True
             LOG.info(f"  ✓ Created new path {new_path.path_id} starting with '{word}'")
 
-        # If word wasn't accepted anywhere, it's a true filler - decrease global budget
-        if not word_accepted:
-            self.global_budget = max(0, self.global_budget - 1)
-            LOG.info(f"  ✗ True filler '{word}'. Global budget now: {self.global_budget}")
+        # INTERIM/FINAL Budget Split:
+        # - INTERIM filler words do NOT impact global budget (optimistic matching)
+        # - FINAL filler words DO impact global budget (authoritative - what Riva officially decided)
+        # - Only decrease budget if word was rejected by competing paths (survival of the fittest)
+        # - Without active paths, there's no competition, so budget shouldn't be impacted
+        if not word_accepted and len(self.active_paths) > 0:
+            if stream_type == "FINAL":
+                self.global_budget = max(0, self.global_budget - 1)
+                LOG.info(f"  ✗ FINAL filler rejected by {len(self.active_paths)} paths. Global budget now: {self.global_budget}")
+            else:
+                LOG.info(f"  ○ INTERIM filler (no budget impact): '{word}' rejected by {len(self.active_paths)} paths")
+        elif not word_accepted and len(self.active_paths) == 0:
+            if stream_type == "FINAL":
+                LOG.info(f"  ○ FINAL word '{word}' not valid (no active paths to compete)")
+            else:
+                LOG.info(f"  ○ INTERIM word '{word}' not valid (no active paths to compete)")
 
         # Prune unviable paths
         before_count = len(self.active_paths)
-        self.active_paths = [p for p in self.active_paths if p.is_viable()]
+        pruned_paths = [(p, p.is_viable()) for p in self.active_paths]
+        self.active_paths = [p for p, viable in pruned_paths if viable]
         pruned_count = before_count - len(self.active_paths)
 
         if pruned_count > 0:
-            LOG.debug(f"  Pruned {pruned_count} weak paths, {len(self.active_paths)} remain")
+            LOG.info(f"  ⚠️  Pruned {pruned_count} paths, {len(self.active_paths)} remain")
+            for path, viable in pruned_paths:
+                if not viable:
+                    reason = "budget exhausted" if path.local_budget <= 0 else \
+                            "too many fillers" if path.consecutive_fillers >= path.base_max_fillers else \
+                            "no continuations"
+                    LOG.info(f"     Path {path.path_id} pruned: {path.matched_words} - {reason}")
 
         # Log top paths for debugging
         if self.active_paths:

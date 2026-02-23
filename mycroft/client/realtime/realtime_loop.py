@@ -383,9 +383,34 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # The filler budget system will handle garbage, and this allows
         # multi-part commands like "set color ... blue"
         if current_count > len(words):
-            LOG.debug(f"[RIVA {stream_name}] New segment detected (count={current_count} > len={len(words)}), continuing with matcher state")
-            # Just reset word count to process from beginning of new segment
-            # Matcher state is preserved so "set color [pause] blue" still works
+            LOG.debug(f"[RIVA {stream_name}] Word count dropped (had {current_count}, now {len(words)})")
+
+            # When word count drops, we need to determine if this is:
+            # A) Riva refining the transcript (e.g., ["tago", "p"] → ["tago"]) - RESET matcher
+            # B) True segment after pause (e.g., ["set", "color"] → ["blue"]) - PRESERVE matcher
+            #
+            # Heuristic: If the new transcript starts with any words from the old transcript,
+            # it's likely a refinement. If it's completely different words, it's a new segment.
+            prev_transcript = self.prev_final_transcript if is_final else self.prev_interim_transcript
+            prev_words = prev_transcript.split() if prev_transcript else []
+
+            # Check if any of the new words match the start of the previous transcript
+            is_refinement = False
+            if prev_words and words:
+                # If first word of new transcript matches any word in prev transcript, it's a refinement
+                if words[0] in prev_words:
+                    is_refinement = True
+                    LOG.debug(f"[RIVA {stream_name}] Detected refinement - '{words[0]}' was in previous transcript")
+
+            # DON'T reset matcher on refinement or segment boundaries
+            # Paths will survive based on whether new words match (survival of the fittest)
+            # Resetting would kill valid paths that could continue with the new transcript
+            if is_refinement:
+                LOG.debug(f"[RIVA {stream_name}] Detected refinement - letting paths compete with new words")
+            else:
+                LOG.debug(f"[RIVA {stream_name}] True segment boundary - preserving matcher state")
+
+            # Reset word count to process from beginning
             current_count = 0
             if is_final:
                 self.riva_final_word_count = 0
@@ -395,10 +420,10 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 self.prev_interim_transcript = ""
             # Budget is NOT reset - continues from current value
 
-            # Clear dedup history - this is a NEW segment, so stale FINALs from
-            # previous segments should not block fresh commands
-            self.executed_utterances_history.clear()
-            LOG.debug(f"[RIVA {stream_name}] Cleared dedup history for new segment")
+            # DON'T clear dedup history on segment boundaries - the 3-second time window
+            # already handles stale entries naturally. Clearing causes issues when INTERIM
+            # and FINAL streams have different word counts, where one stream's segment
+            # detection clears the other stream's recent dedup entries.
         elif current_count > 0:
             # Additional check: Detect if Riva changed its mind about previous words
             # Example: 'h' (1 word) -> 'turn' (1 word) - count stays 1 but words changed!
@@ -409,8 +434,9 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
             if prev_words != curr_words:
                 LOG.debug(f"[RIVA {stream_name}] Transcript changed: {prev_words} → {curr_words}")
-                LOG.debug(f"[RIVA {stream_name}] Resetting matcher and reprocessing from start")
-                matcher.reset()
+                LOG.debug(f"[RIVA {stream_name}] Words changed - letting paths compete with new transcript")
+                # DON'T reset matcher - let paths survive based on whether they match new words
+                # Reset word count to reprocess from start, but keep active paths
                 current_count = 0
                 if is_final:
                     self.riva_final_word_count = 0
@@ -455,7 +481,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             # Add word to THIS stream's matcher
             # Only creates paths for valid next words (or valid first words)
             # Returns match if command completes
-            match = matcher.add_word(word)
+            # Pass stream_type so matcher knows whether filler words impact global budget
+            match = matcher.add_word(word, stream_type=stream_name)
 
             if match:
                 # Complete command matched in THIS stream!
@@ -465,6 +492,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 # Deduplication: Check if we recently executed this utterance
                 # Checks against recent history to handle interleaved commands
                 # Example: INTERIM "pause" → INTERIM "dim lights" → delayed FINAL "pause"
+                LOG.info(f"[DEDUP CHECK] Current utterance: '{utterance}' | History: {[(u, f'{now - t:.1f}s ago') for u, t in self.executed_utterances_history]}")
                 is_duplicate = False
                 for prev_utterance, prev_time in self.executed_utterances_history:
                     if utterance == prev_utterance and (now - prev_time) < self.dedup_window_seconds:
