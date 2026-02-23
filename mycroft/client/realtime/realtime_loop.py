@@ -394,6 +394,11 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 self.riva_interim_word_count = 0
                 self.prev_interim_transcript = ""
             # Budget is NOT reset - continues from current value
+
+            # Clear dedup history - this is a NEW segment, so stale FINALs from
+            # previous segments should not block fresh commands
+            self.executed_utterances_history.clear()
+            LOG.debug(f"[RIVA {stream_name}] Cleared dedup history for new segment")
         elif current_count > 0:
             # Additional check: Detect if Riva changed its mind about previous words
             # Example: 'h' (1 word) -> 'turn' (1 word) - count stays 1 but words changed!
@@ -492,8 +497,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 self.interim_matcher.reset()
                 self.final_matcher.reset()
 
-                # Mark executed to prevent re-execution
-                # Add to history and maintain size limit
+                # Mark executed to prevent re-execution within the SAME Riva segment
+                # This catches INTERIM→FINAL duplicates from the same utterance
                 self.executed_utterances_history.append((utterance, now))
                 if len(self.executed_utterances_history) > self.dedup_history_size:
                     self.executed_utterances_history.pop(0)  # Remove oldest
