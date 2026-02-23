@@ -1,8 +1,11 @@
 """
 Streaming Command Matcher for real-time intent matching.
 
-Matches commands word-by-word as they arrive from Vosk, allowing immediate
+Matches commands word-by-word as they arrive from Riva, allowing immediate
 execution without waiting for phrase completion.
+
+Uses multi-path evolutionary matching to handle Riva's changing interim results.
+Multiple candidate paths compete, weak paths are pruned, and the fittest path wins.
 """
 
 import re
@@ -57,6 +60,7 @@ class CommandPattern:
             return None
 
         # Split pattern into tokens, preserving brackets and entities as single tokens
+        # CRITICAL: Keep word[suffix] patterns together (e.g., light[s|])
         # This handles multi-word options like [how to|peanut butter]
         tokens = []
         current_token = ""
@@ -65,15 +69,14 @@ class CommandPattern:
 
         for char in pattern_str:
             if char == '[':
-                if current_token.strip():
-                    tokens.append(current_token.strip())
-                current_token = char
+                # DON'T split if we have a word immediately before the bracket
+                # This keeps word[suffix] patterns together
+                current_token += char
                 in_bracket = True
             elif char == ']':
                 current_token += char
                 in_bracket = False
-                tokens.append(current_token)
-                current_token = ""
+                # DON'T append yet - check if there's more coming (for word[s|] pattern)
             elif char == '{':
                 if current_token.strip():
                     tokens.append(current_token.strip())
@@ -151,12 +154,185 @@ class CommandPattern:
         return sequences
 
 
+class MatcherPath:
+    """Single evolutionary path tracking a potential command match.
+
+    Each path maintains its own word list and local budget. Paths compete
+    based on fitness (how many valid words matched). Weak paths get pruned,
+    strong paths survive. Winner's budget syncs to global.
+    """
+
+    def __init__(self, path_id, starting_budget, all_sequences, filler_config):
+        """Initialize a new matcher path.
+
+        Args:
+            path_id: Unique identifier for this path
+            starting_budget: Initial budget inherited from global
+            all_sequences: All command patterns to match against
+            filler_config: Filler word configuration
+        """
+        self.path_id = path_id
+        self.matched_words = []
+        self.local_budget = starting_budget
+        self.consecutive_fillers = 0
+        self.all_sequences = all_sequences
+        self.filler_config = filler_config
+        self.base_max_fillers = filler_config.get('base_max', 4)
+        self.fitness_score = 0  # Number of valid words matched
+
+    def try_add_word(self, word):
+        """Try to add a word to this path.
+
+        Args:
+            word: The word to try adding
+
+        Returns:
+            bool: True if word was valid and added, False if it's a filler
+        """
+        word = word.lower().strip()
+
+        # Get sequences matching current word list
+        matching_sequences = self._get_matching_sequences()
+
+        # Get valid next words
+        valid_next_words = self._get_valid_next_words(matching_sequences)
+
+        # Check if word is valid
+        is_valid = word in valid_next_words or '<ENTITY>' in valid_next_words
+
+        if is_valid:
+            # Valid word - add to list
+            self.matched_words.append(word)
+            self.consecutive_fillers = 0
+            self.fitness_score += 1
+
+            # Update local budget
+            if len(self.matched_words) == 1:
+                # First word - budget breaks even
+                pass
+            else:
+                # Consecutive match - increase budget
+                increment = self.filler_config.get('increment_per_word', 1)
+                self.local_budget += increment
+
+            return True
+        else:
+            # Filler word - not added
+            self.consecutive_fillers += 1
+            self.local_budget = max(0, self.local_budget - 1)
+            return False
+
+    def _get_matching_sequences(self):
+        """Get sequences matching current word list."""
+        if not self.matched_words:
+            return self.all_sequences
+
+        matching = []
+        for seq_info in self.all_sequences:
+            sequence = seq_info['sequence']
+
+            if len(sequence) < len(self.matched_words):
+                continue
+
+            match = True
+            for i, word in enumerate(self.matched_words):
+                seq_item = sequence[i]
+                if 'word' in seq_item:
+                    if seq_item['word'] != word:
+                        match = False
+                        break
+                # Entities match anything
+
+            if match:
+                matching.append(seq_info)
+
+        return matching
+
+    def _get_valid_next_words(self, matching_sequences):
+        """Get valid next words from matching sequences."""
+        valid_words = set()
+        next_position = len(self.matched_words)
+
+        for seq_info in matching_sequences:
+            sequence = seq_info['sequence']
+
+            if next_position >= len(sequence):
+                continue
+
+            next_item = sequence[next_position]
+
+            if 'word' in next_item:
+                valid_words.add(next_item['word'])
+            elif 'entity' in next_item:
+                valid_words.add('<ENTITY>')
+
+        return valid_words
+
+    def check_completion(self):
+        """Check if this path has completed a command.
+
+        Returns:
+            dict or None: Match result if complete, None otherwise
+        """
+        for seq_info in self.all_sequences:
+            sequence = seq_info['sequence']
+
+            if len(sequence) != len(self.matched_words):
+                continue
+
+            match = True
+            entities = {}
+
+            for i, word in enumerate(self.matched_words):
+                seq_item = sequence[i]
+
+                if 'word' in seq_item:
+                    if seq_item['word'] != word:
+                        match = False
+                        break
+                elif 'entity' in seq_item:
+                    entities[seq_item['entity']] = word
+
+            if match:
+                return {
+                    'intent': seq_info['intent'],
+                    'utterance': ' '.join(self.matched_words),
+                    'entities': entities,
+                    'pattern': seq_info['pattern']
+                }
+
+        return None
+
+    def is_viable(self):
+        """Check if this path is still viable (not exhausted or dead-end).
+
+        Returns:
+            bool: True if path should continue, False if it should be pruned
+        """
+        # Budget exhausted
+        if self.local_budget <= 0:
+            return False
+
+        # Too many consecutive fillers
+        if self.consecutive_fillers >= self.base_max_fillers:
+            return False
+
+        # No possible continuations
+        matching_sequences = self._get_matching_sequences()
+        if not matching_sequences:
+            return False
+
+        return True
+
+
 class StreamingCommandMatcher:
     """Matches commands incrementally as words arrive.
 
-    Uses a single word list approach: tracks one list of matched words,
-    and validates each new word against all possible sequences that match
-    the current list.
+    Uses multi-path evolutionary matching: maintains multiple competing matcher paths
+    that track different possible command interpretations. Weak paths are pruned,
+    strong paths survive, and the fittest (first to complete) wins.
+
+    Handles Riva's changing interim results by updating affected paths when words change.
     """
 
     def __init__(self, filler_config):
@@ -166,17 +342,19 @@ class StreamingCommandMatcher:
             filler_config (dict): Filler word configuration
         """
         self.patterns = []  # List of CommandPattern objects
-        self.matched_words = []  # Current word list being built
-        self.consecutive_fillers = 0  # Consecutive words that didn't extend the list
         self.filler_config = filler_config
         self.base_max_fillers = filler_config.get('base_max', 4)
 
         # Global filler budget that persists across command matches
-        # Increases with consecutive valid words, resets to base_max after command match
-        self.filler_budget = self.base_max_fillers
+        # Winner's local budget syncs here after command execution
+        self.global_budget = self.base_max_fillers
 
         # Cache of all expanded sequences for faster matching
         self.all_sequences = []  # Will be populated when patterns are registered
+
+        # Multi-path matching state
+        self.active_paths = []  # List of MatcherPath objects competing
+        self.next_path_id = 0  # For generating unique path IDs
 
     def register_intent(self, intent_name, pattern_lines):
         """Register a Padatious intent pattern.
@@ -204,10 +382,10 @@ class StreamingCommandMatcher:
         LOG.debug(f"Registered {len(pattern_lines)} patterns for {intent_name}")
 
     def add_word(self, word):
-        """Process a new word from STT.
+        """Process a new word from STT using multi-path matching.
 
-        Uses single-list approach: checks if word is valid next word based on
-        all sequences that match current list.
+        Creates a new matcher path starting with this word, and tries adding
+        the word to all existing paths. Prunes weak paths and checks for completion.
 
         Args:
             word (str): The word to process
@@ -219,177 +397,91 @@ class StreamingCommandMatcher:
         if not word:
             return None
 
-        LOG.info(f"Processing word: '{word}' | Current list: {self.matched_words} | Budget: {self.filler_budget} | Total sequences: {len(self.all_sequences)}")
+        LOG.info(f"Processing word: '{word}' | Active paths: {len(self.active_paths)} | Global budget: {self.global_budget}")
 
-        # Find all sequences that match our current word list
-        matching_sequences = self._get_matching_sequences(self.matched_words)
+        # Track if word was accepted by any path
+        word_accepted = False
 
-        LOG.info(f"  {len(matching_sequences)} sequences match current list")
+        # Try adding word to all existing paths
+        for path in self.active_paths:
+            if path.try_add_word(word):
+                word_accepted = True
 
-        # Get all valid next words from those sequences
-        valid_next_words = self._get_valid_next_words(matching_sequences)
-
-        LOG.info(f"  Valid next words: {valid_next_words}")
-
-        # Check if incoming word is valid (exact match OR entity position)
-        is_valid = word in valid_next_words or '<ENTITY>' in valid_next_words
-
-        LOG.debug(f"  Checking: '{word}' in valid_next_words? {word in valid_next_words}")
-        LOG.debug(f"  is_valid: {is_valid}")
-
-        if is_valid:
-            # Valid word - add to list
-            self.matched_words.append(word)
-            self.consecutive_fillers = 0
-
-            # Update budget
-            if len(self.matched_words) == 1:
-                # First word - budget breaks even (no change)
-                pass
-            else:
-                # Consecutive match - increase budget
-                increment = self.filler_config.get('increment_per_word', 1)
-                self.filler_budget += increment
-
-            LOG.debug(f"  ✓ Valid word added. List: {self.matched_words}, Budget: {self.filler_budget}")
-
-            # Check if we completed a command
-            completed = self._check_completion(self.matched_words)
-            if completed:
-                LOG.info(f"  ✓ COMPLETE MATCH: {completed}")
-                return completed
-
-        else:
-            # Filler word - not added to list
-            self.consecutive_fillers += 1
-            self.filler_budget = max(0, self.filler_budget - 1)
-            LOG.info(f"  ✗ Filler word '{word}'. Consecutive: {self.consecutive_fillers}/{self.base_max_fillers}, Budget: {self.filler_budget}")
-
-        return None
-
-    def _get_matching_sequences(self, word_list):
-        """Get all sequences that match the given word list so far.
-
-        Args:
-            word_list: List of words matched so far
-
-        Returns:
-            List of sequence dicts that start with these words
-        """
-        if not word_list:
-            # Empty list - all sequences are potential matches
-            return self.all_sequences
-
-        matching = []
+        # Check if word is valid as a first word (start of new path)
+        # Get valid next words for an empty path (i.e., valid first words)
+        valid_first_words = set()
         for seq_info in self.all_sequences:
-            sequence = seq_info['sequence']
+            if len(seq_info['sequence']) > 0:
+                first_item = seq_info['sequence'][0]
+                if 'word' in first_item:
+                    valid_first_words.add(first_item['word'])
+                elif 'entity' in first_item:
+                    valid_first_words.add('<ENTITY>')
 
-            # Check if sequence starts with our word list
-            if len(sequence) < len(word_list):
-                continue  # Sequence too short
+        LOG.info(f"  Valid first words count: {len(valid_first_words)}, word '{word}' valid: {word in valid_first_words}")
 
-            # Compare each position
-            match = True
-            for i, word in enumerate(word_list):
-                seq_item = sequence[i]
-                if 'word' in seq_item:
-                    if seq_item['word'] != word:
-                        match = False
-                        break
-                # Entities match any word at that position
-                elif 'entity' in seq_item:
-                    continue  # Entity matches anything
+        # If word is valid as first word, create new path
+        if word in valid_first_words or '<ENTITY>' in valid_first_words:
+            new_path = MatcherPath(self.next_path_id, self.global_budget, self.all_sequences, self.filler_config)
+            self.next_path_id += 1
+            new_path.try_add_word(word)
+            self.active_paths.append(new_path)
+            word_accepted = True
+            LOG.info(f"  ✓ Created new path {new_path.path_id} starting with '{word}'")
 
+        # If word wasn't accepted anywhere, it's a true filler - decrease global budget
+        if not word_accepted:
+            self.global_budget = max(0, self.global_budget - 1)
+            LOG.info(f"  ✗ True filler '{word}'. Global budget now: {self.global_budget}")
+
+        # Prune unviable paths
+        before_count = len(self.active_paths)
+        self.active_paths = [p for p in self.active_paths if p.is_viable()]
+        pruned_count = before_count - len(self.active_paths)
+
+        if pruned_count > 0:
+            LOG.debug(f"  Pruned {pruned_count} weak paths, {len(self.active_paths)} remain")
+
+        # Log top paths for debugging
+        if self.active_paths:
+            top_paths = sorted(self.active_paths, key=lambda p: p.fitness_score, reverse=True)[:3]
+            for path in top_paths:
+                LOG.debug(f"  Path {path.path_id}: {path.matched_words} (fitness={path.fitness_score}, budget={path.local_budget})")
+
+        # Check for complete matches - fittest wins
+        for path in sorted(self.active_paths, key=lambda p: p.fitness_score, reverse=True):
+            match = path.check_completion()
             if match:
-                matching.append(seq_info)
+                LOG.info(f"  ✓ COMPLETE MATCH from path {path.path_id}: {match}")
 
-        return matching
+                # Winner! Sync local budget to global
+                self.global_budget = path.local_budget
+                LOG.debug(f"  Winner's budget {path.local_budget} synced to global")
 
-    def _get_valid_next_words(self, matching_sequences):
-        """Get set of valid next words from matching sequences.
+                # Clear all paths for next command
+                self.active_paths = []
 
-        Args:
-            matching_sequences: List of sequences that match current word list
-
-        Returns:
-            Set of valid next words
-        """
-        valid_words = set()
-        next_position = len(self.matched_words)
-
-        for seq_info in matching_sequences:
-            sequence = seq_info['sequence']
-
-            if next_position >= len(sequence):
-                continue  # Already at end of this sequence
-
-            next_item = sequence[next_position]
-
-            if 'word' in next_item:
-                valid_words.add(next_item['word'])
-            elif 'entity' in next_item:
-                # Entity can match any word - for now, we'll accept the word
-                # This is handled specially during completion check
-                valid_words.add('<ENTITY>')
-
-        return valid_words
-
-    def _check_completion(self, word_list):
-        """Check if word list exactly matches any complete sequence.
-
-        Args:
-            word_list: Current word list
-
-        Returns:
-            Match dict if complete, None otherwise
-        """
-        for seq_info in self.all_sequences:
-            sequence = seq_info['sequence']
-
-            if len(sequence) != len(word_list):
-                continue  # Different length
-
-            # Check if all positions match
-            match = True
-            entities = {}
-
-            for i, word in enumerate(word_list):
-                seq_item = sequence[i]
-
-                if 'word' in seq_item:
-                    if seq_item['word'] != word:
-                        match = False
-                        break
-                elif 'entity' in seq_item:
-                    # Capture entity value
-                    entities[seq_item['entity']] = word
-
-            if match:
-                # Complete match found!
-                return {
-                    'intent': seq_info['intent'],
-                    'utterance': ' '.join(word_list),
-                    'entities': entities,
-                    'pattern': seq_info['pattern']
-                }
+                return match
 
         return None
 
     def should_timeout(self):
-        """Check if too many consecutive filler words to continue session."""
-        return self.consecutive_fillers >= self.base_max_fillers
+        """Check if global budget is exhausted."""
+        # Timeout only when global budget hits zero
+        # Having no active paths is normal (fillers, between commands, etc.)
+        return self.global_budget <= 0
 
     def reset(self):
         """Reset matcher state after command execution.
 
-        Budget resets to base_max if lower, otherwise stays at current level.
-        This allows chaining commands with accumulated budget from consecutive matches.
+        Clears all paths. Global budget was already synced by winner.
+        Budget stays at winner's level for command chaining.
         """
-        self.matched_words = []
-        self.consecutive_fillers = 0
+        self.active_paths = []
 
-        # Reset budget to base_max, but keep higher budget if we earned it
-        self.filler_budget = max(self.base_max_fillers, self.filler_budget)
+        # Keep global budget (already synced from winner)
+        # But ensure it's at least base_max
+        self.global_budget = max(self.base_max_fillers, self.global_budget)
 
     def reset_session(self):
         """Reset matcher state for a new session (after wake word).
@@ -397,9 +489,8 @@ class StreamingCommandMatcher:
         Completely resets budget to base_max, unlike reset() which preserves
         accumulated budget for command chaining within a session.
         """
-        self.matched_words = []
-        self.consecutive_fillers = 0
-        self.filler_budget = self.base_max_fillers
+        self.active_paths = []
+        self.global_budget = self.base_max_fillers
 
 
 def test_matcher():
@@ -482,8 +573,8 @@ def test_matcher():
 
         if not result:
             print(f"\n  ✗ No match found")
-            print(f"    Consecutive fillers: {matcher.consecutive_fillers}")
-            print(f"    Active matches: {len(matcher.active_matches)}")
+            print(f"    Active paths: {len(matcher.active_paths)}")
+            print(f"    Global budget: {matcher.global_budget}")
 
         print(f"\nExpected: {test['expected']}")
         print(f"Got: {result['utterance'] if result else 'None'}")

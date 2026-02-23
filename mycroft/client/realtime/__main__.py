@@ -392,8 +392,10 @@ def handle_intents_ready(event):
                 expanded = expand_pattern_entities(pattern, entity_expansions)
                 expanded_lines.extend(expanded)
 
-            # Register expanded patterns in the single matcher
-            loop.command_matcher.register_intent(intent_name, expanded_lines)
+            # Register expanded patterns in BOTH matchers
+            # Each matcher maintains its own all_sequences cache for fast lookups
+            loop.interim_matcher.register_intent(intent_name, expanded_lines)
+            loop.final_matcher.register_intent(intent_name, expanded_lines)
 
             if entity_expansions:
                 LOG.info(f"Expanded {len(pattern_lines)} patterns to {len(expanded_lines)} for {intent_name}")

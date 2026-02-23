@@ -128,7 +128,7 @@ class MutableStream:
 
 
 class MutableMicrophone(Microphone):
-    def __init__(self, device_index=None, sample_rate=16000, chunk_size=1024,
+    def __init__(self, device_index=None, sample_rate=16000, chunk_size=1600,
                  mute=False):
         Microphone.__init__(self, device_index=device_index,
                             sample_rate=sample_rate, chunk_size=chunk_size)

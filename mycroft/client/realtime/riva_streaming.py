@@ -2,6 +2,7 @@
 NVIDIA Riva streaming wrapper for realtime STT.
 
 Provides word-by-word streaming recognition via Riva gRPC API.
+Streams are created on-demand per command session and torn down when complete.
 """
 
 import threading
@@ -17,7 +18,12 @@ except ImportError:
 
 
 class RivaStreamingThread(threading.Thread):
-    """Thread that streams audio to Riva and provides word-by-word transcription."""
+    """Thread that streams audio to Riva and provides word-by-word transcription.
+
+    Design: Stream starts when reset() is called (after wakeword), processes audio
+    until session timeout or command completion, then stops completely. Next wakeword
+    creates a fresh stream with START flag. This prevents Riva idle timeout errors.
+    """
 
     def __init__(self, server_uri, model_name, sample_rate, word_callback=None):
         """Initialize Riva streaming thread.
@@ -45,11 +51,12 @@ class RivaStreamingThread(threading.Thread):
         self.interim_text = ""
         self.final_text = ""
 
-        # Control
+        # Control - stream only runs when session_active is set
         self._stop = threading.Event()
-        self._reset_requested = threading.Event()
+        self._session_active = threading.Event()
+        self._session_active.clear()  # Start with no active session
 
-        # Connect to Riva
+        # Connect to Riva (connection is persistent, but streams are per-session)
         try:
             self.auth = riva.client.Auth(uri=server_uri)
             self.asr_service = riva.client.ASRService(self.auth)
@@ -59,32 +66,47 @@ class RivaStreamingThread(threading.Thread):
             raise
 
     def run(self):
-        """Main thread loop - processes streaming recognition."""
+        """Main thread loop - waits for session activation then runs stream.
+
+        Stream lifecycle:
+        1. Wait for reset() to set _session_active (triggered by wakeword)
+        2. Start fresh Riva stream with START flag
+        3. Process audio until timeout or command completion
+        4. Stream ends, _session_active cleared, back to step 1
+
+        This ensures each command session gets a fresh stream and prevents
+        Riva idle timeout errors from long periods between wakewords.
+        """
         while not self._stop.is_set():
             try:
-                # Wait for reset or start streaming
-                if self._reset_requested.is_set():
-                    self._reset_requested.clear()
-                    # Clear audio queue
-                    while not self.audio_queue.empty():
-                        try:
-                            self.audio_queue.get_nowait()
-                        except queue.Empty:
-                            break
-                    self.interim_text = ""
-                    self.final_text = ""
-                    continue
+                # Wait for session to be activated (by wakeword/reset call)
+                LOG.debug("Riva: Waiting for session activation...")
+                while not self._session_active.is_set() and not self._stop.is_set():
+                    self._session_active.wait(timeout=1.0)
 
-                # Start a new streaming session
+                if self._stop.is_set():
+                    break
+
+                # Session activated - start streaming with fresh START flag
+                LOG.debug("Riva: Session activated, starting stream")
                 self._stream_session()
+
+                # Session ended - clear state and wait for next activation
+                LOG.debug("Riva: Session ended, waiting for next wakeword")
+                self._session_active.clear()
 
             except Exception as e:
                 LOG.error(f"Error in Riva streaming thread: {e}")
+                self._session_active.clear()
                 import time
                 time.sleep(0.1)
 
     def _stream_session(self):
-        """Run one streaming recognition session."""
+        """Run one streaming recognition session.
+
+        Creates a fresh gRPC stream with START flag, processes audio until
+        timeout or completion, then tears down completely.
+        """
         # Configure streaming recognition
         config = riva.client.StreamingRecognitionConfig(
             config=riva.client.RecognitionConfig(
@@ -101,7 +123,8 @@ class RivaStreamingThread(threading.Thread):
         )
 
         try:
-            # Start streaming
+            LOG.debug("Riva: Starting new stream with START flag")
+            # Start streaming - this creates a new sequence with START flag
             responses = self.asr_service.streaming_response_generator(
                 audio_chunks=self._audio_generator(),
                 streaming_config=config,
@@ -109,12 +132,19 @@ class RivaStreamingThread(threading.Thread):
 
             # Process responses
             for response in responses:
-                if self._stop.is_set() or self._reset_requested.is_set():
+                if self._stop.is_set():
+                    LOG.debug("Riva: Stream stopped")
+                    break
+
+                # Check if session was ended (end_session() called)
+                if not self._session_active.is_set():
+                    LOG.debug("Riva: Session ended, closing stream")
                     break
 
                 if not response.results:
                     continue
 
+                # Process each result - Riva sends cumulative transcripts
                 for result in response.results:
                     if not result.alternatives:
                         continue
@@ -123,12 +153,16 @@ class RivaStreamingThread(threading.Thread):
                     if not transcript:
                         continue
 
+                    # DEBUG: Log what Riva actually sends
+                    stream_type = "FINAL" if result.is_final else "INTERIM"
+                    LOG.debug(f"[RIVA RAW {stream_type}] Full transcript: '{transcript}'")
+
                     if result.is_final:
                         # Final result
                         self.final_text = transcript
                         self.interim_text = ""
 
-                        # Trigger callback with final words
+                        # Trigger callback with final words (CUMULATIVE list)
                         if self.word_callback:
                             words = transcript.split()
                             self.word_callback(words, is_final=True)
@@ -137,24 +171,33 @@ class RivaStreamingThread(threading.Thread):
                         # Interim result
                         self.interim_text = transcript
 
-                        # Trigger callback with interim words
+                        # Trigger callback with interim words (CUMULATIVE list)
                         if self.word_callback:
                             words = transcript.split()
                             self.word_callback(words, is_final=False)
 
+            LOG.debug("Riva: Streaming session ended")
+
         except Exception as e:
             if not self._stop.is_set():
-                LOG.error(f"Riva streaming session error: {e}")
+                LOG.warning(f"Riva streaming session error: {e}")
 
     def _audio_generator(self):
-        """Generator that yields audio chunks from the queue."""
-        while not self._stop.is_set() and not self._reset_requested.is_set():
+        """Generator that yields audio chunks from the queue.
+
+        Yields chunks while session is active. When session ends or times out,
+        generator exits to cleanly tear down the stream.
+        """
+        while not self._stop.is_set() and self._session_active.is_set():
             try:
-                chunk = self.audio_queue.get(timeout=0.1)
+                # Short timeout to check session status periodically
+                # Allows clean shutdown when end_session() is called
+                chunk = self.audio_queue.get(block=True, timeout=0.5)
                 if chunk is None:  # Sentinel to stop
                     break
                 yield chunk
             except queue.Empty:
+                # No audio right now, loop and check session status
                 continue
 
     def feed_audio(self, audio_chunk):
@@ -163,16 +206,40 @@ class RivaStreamingThread(threading.Thread):
         Args:
             audio_chunk: bytes, PCM audio data
         """
-        if not self._stop.is_set():
+        if not self._stop.is_set() and self._session_active.is_set():
             self.audio_queue.put(audio_chunk)
 
     def reset(self):
-        """Reset for a new recognition session."""
-        self._reset_requested.set()
+        """Start a new recognition session (called after wakeword detection).
+
+        Clears any previous state and activates streaming session.
+        """
+        # Clear audio queue from any previous session
+        while not self.audio_queue.empty():
+            try:
+                self.audio_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        # Clear transcription state
         self.interim_text = ""
         self.final_text = ""
 
+        # Activate session - this will cause run() to start a fresh stream
+        self._session_active.set()
+        LOG.debug("Riva: Session reset, stream will start")
+
+    def end_session(self):
+        """End the current recognition session (called after command completion/timeout).
+
+        This cleanly tears down the Riva stream. Next reset() will start fresh.
+        """
+        LOG.debug("Riva: Ending session")
+        self._session_active.clear()
+        # Generator will exit on next timeout check, closing the stream
+
     def stop(self):
-        """Stop the streaming thread."""
+        """Stop the streaming thread completely."""
         self._stop.set()
+        self._session_active.clear()
         self.audio_queue.put(None)  # Sentinel to unblock generator

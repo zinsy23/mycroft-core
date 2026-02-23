@@ -46,8 +46,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # Load realtime-specific config
         self.realtime_config = Configuration.get().get('realtime', {})
 
-        # STT backend selection
-        self.stt_backend = self.realtime_config.get('stt_backend', 'whisper')
+        # STT backend selection - Riva is primary
+        self.stt_backend = self.realtime_config.get('stt_backend', 'riva')
 
         # Whisper for streaming (using whisper_streaming for word-by-word)
         self.whisper_stream_thread = None
@@ -73,29 +73,49 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # Word-by-word tracking
         self.previous_partial_text = ""
 
-        # Track Riva word count through the cumulative transcript
-        # Riva sends: interim ["turn"] -> interim ["turn","off"] -> final ["turn","off"]
-        # We track how many words we've processed to extract only NEW words
-        self.riva_word_count = 0
+        # Track Riva word counts for BOTH streams separately
+        # Riva sends TWO cumulative streams:
+        # - Interim: ["turn"] -> ["turn","lights"] -> ["turn","like"] -> ["turn","lights","on"]
+        # - Final: ["turn","lights","on"]
+        # Each stream tracks separately where it left off
+        self.riva_interim_word_count = 0
+        self.riva_final_word_count = 0
 
-        # Deduplication: track last executed utterance to prevent re-execution
-        # when Riva repeatedly sends the same transcript
-        self.last_executed_utterance = None
-        self.last_executed_time = 0
+        # Track previous transcripts to detect when Riva changes its mind
+        # Example: 'h' (1 word) -> 'turn' (1 word) - count stays same but words changed!
+        self.prev_interim_transcript = ""
+        self.prev_final_transcript = ""
+
+        # Deduplication: track recent executed utterances to prevent re-execution
+        # Uses a short history to handle interleaved commands (e.g., INTERIM "pause"
+        # then INTERIM "dim lights" then delayed FINAL "pause")
+        # Format: [(utterance, timestamp), ...]
+        self.executed_utterances_history = []
+        self.dedup_window_seconds = 3.0  # Check duplicates within 3 second window (FINALs can be delayed 2+ seconds)
+        self.dedup_history_size = 5  # Keep last 5 executed commands
 
         # Debug mode
         self.debug = self.realtime_config.get('debug', True)
 
-        # Command matcher for streaming intent matching
-        # Single matcher handles both interim and final (like test script)
-        # Interim results can trigger early execution if pattern completes
-        # Final results are just higher-confidence versions of same transcript
+        # DUAL command matchers for Riva's two streams (interim and final)
+        # Both share global budget via coordination, like CDN edge nodes
+        # Interim can be more accurate than final, so both compete
+        # When EITHER completes a command -> execute and reset BOTH
         filler_config = self.realtime_config.get('filler_words', {})
-        self.command_matcher = StreamingCommandMatcher(filler_config)
+        self.interim_matcher = StreamingCommandMatcher(filler_config)
+        self.final_matcher = StreamingCommandMatcher(filler_config)
+
+        # Global budget coordination - shared between both matchers
+        # Each matcher's global_budget syncs to/from this shared value
+        # When a path wins, it syncs back to this shared budget
+        # Read from config: filler_words.base_max (default 4)
+        self.shared_global_budget = filler_config.get('base_max', 4)
 
         # Pattern list that gets populated when skills load
+        # Both matchers share the same pattern list
         self.shared_patterns = []
-        self.command_matcher.patterns = self.shared_patterns
+        self.interim_matcher.patterns = self.shared_patterns
+        self.final_matcher.patterns = self.shared_patterns
 
         # Audio batching buffer - accumulate 64ms chunks into 0.5s batches
         # This matches test script's feeding rate (2 chunks/sec not 15 chunks/sec)
@@ -200,15 +220,20 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # Reset STT backend for new session
         if self.stt_backend == 'riva' and self.riva_stream_thread:
             self.riva_stream_thread.reset()
-            self.riva_word_count = 0
+            self.riva_interim_word_count = 0
+            self.riva_final_word_count = 0
         elif self.whisper_stream_thread:
             self.whisper_stream_thread.reset()
 
         # Audio buffering
         self.audio_buffer.clear()
 
-        # Reset command matcher for new session (full reset including budget)
-        self.command_matcher.reset_session()
+        # Reset BOTH matchers for new session (full reset including budget)
+        # This resets the shared global budget to base_max_fillers
+        self.interim_matcher.reset_session()
+        self.final_matcher.reset_session()
+        # Sync shared budget from one of the matchers (they're identical after reset)
+        self.shared_global_budget = self.interim_matcher.global_budget
 
         if stream:
             stream.stream_start()
@@ -226,6 +251,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             # Check timeout
             if time.time() - self.last_word_time > self.session_timeout:
                 LOG.info("Session timeout - ending")
+                self.session_active = False
                 break
 
             # Get audio chunk
@@ -243,6 +269,11 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             self._process_audio_chunk(chunk)
 
         self.session_active = False
+
+        # End the Riva stream cleanly (if using Riva)
+        if self.stt_backend == 'riva' and self.riva_stream_thread:
+            self.riva_stream_thread.end_session()
+
         LOG.info("Session ended")
 
         if stream:
@@ -276,8 +307,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 'utterance': word
             })
 
-        # Check for command match
-        match = self.command_matcher.add_word(word)
+        # Check for command match (Whisper only uses interim_matcher)
+        match = self.interim_matcher.add_word(word)
 
         if match:
             # Complete command matched!
@@ -297,65 +328,114 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 })
 
             # Reset command matcher after successful match to prevent re-triggering
-            self.command_matcher.reset()
+            self.interim_matcher.reset()
+            self.shared_global_budget = self.interim_matcher.global_budget
 
-        # Check if we should timeout due to too many filler words
-        if self.command_matcher.should_timeout():
-            LOG.info(f"Too many consecutive filler words ({self.command_matcher.consecutive_fillers}) - ending session")
+        # Check if we should timeout (global budget exhausted)
+        if self.interim_matcher.global_budget <= 0:
+            LOG.info(f"Whisper matcher budget exhausted (budget: {self.interim_matcher.global_budget}) - ending session")
             self.session_active = False
+            # Whisper doesn't have persistent stream, so no end_session() needed
 
     def _on_words_recognized(self, words, is_final):
         """Callback when Riva recognizes words (interim or final).
 
-        Riva sends TWO SEPARATE STREAMS:
-        1. Interim stream: Multiple cumulative updates as speech is recognized
-        2. Final stream: One final cumulative result when recognition is complete
+        Based on test script's tried-and-true logic for handling Riva streams.
 
-        We maintain two parallel command matchers, one for each stream.
-        When EITHER matcher completes a command, we execute and clear BOTH.
+        Riva sends TWO SEPARATE CUMULATIVE STREAMS:
+        1. Interim stream: ["turn"] → ["turn","lights"] → ["turn","like"] → ["turn","lights","on"]
+        2. Final stream: ["turn","lights","on"]
+
+        Each stream is independent and can change words. Sometimes interim is more accurate than final!
+
+        We maintain TWO parallel evolutionary matchers with SHARED global budget:
+        - interim_matcher: Processes interim stream
+        - final_matcher: Processes final stream
+        - Both share global_budget (CDN-style coordination)
+        - When EITHER completes a command → execute and reset BOTH
 
         Args:
             words: List of recognized words (ENTIRE transcript so far, cumulative!)
             is_final: True if final result, False if interim
         """
         now = time.time()
-
         stream_name = "FINAL" if is_final else "INTERIM"
-        current_count = self.riva_word_count
-        matcher = self.command_matcher
+
+        # Select the appropriate matcher and word count for this stream
+        if is_final:
+            matcher = self.final_matcher
+            current_count = self.riva_final_word_count
+        else:
+            matcher = self.interim_matcher
+            current_count = self.riva_interim_word_count
+
+        # BUDGET COORDINATION: Sync matcher's global_budget from shared budget before processing
+        # This ensures both matchers see the same budget (CDN-style coordination)
+        matcher.global_budget = self.shared_global_budget
+
+        # Get the full transcript as a string for change detection
+        transcript = ' '.join(words)
 
         # Detect if Riva reset its stream (word count > current transcript length)
-        # This happens when a new utterance starts or Riva completely changed the transcription
+        # This happens when Riva sends a new segment after a pause
+        # Example: ["set","color"] (pause) → ["blue"]
+        # We DON'T reset the matcher - just process new words as continuation
+        # The filler budget system will handle garbage, and this allows
+        # multi-part commands like "set color ... blue"
         if current_count > len(words):
-            LOG.debug(f"Riva stream reset detected (count={current_count} > len={len(words)}), resetting")
-            matcher.reset()
+            LOG.debug(f"[RIVA {stream_name}] New segment detected (count={current_count} > len={len(words)}), continuing with matcher state")
+            # Just reset word count to process from beginning of new segment
+            # Matcher state is preserved so "set color [pause] blue" still works
             current_count = 0
-            self.riva_word_count = 0
+            if is_final:
+                self.riva_final_word_count = 0
+                self.prev_final_transcript = ""
+            else:
+                self.riva_interim_word_count = 0
+                self.prev_interim_transcript = ""
+            # Budget is NOT reset - continues from current value
+        elif current_count > 0:
+            # Additional check: Detect if Riva changed its mind about previous words
+            # Example: 'h' (1 word) -> 'turn' (1 word) - count stays 1 but words changed!
+            # This fixes the bug where we miss words when Riva corrects itself
+            prev_transcript = self.prev_final_transcript if is_final else self.prev_interim_transcript
+            prev_words = prev_transcript.split()[:current_count]
+            curr_words = words[:current_count]
 
-        # Change detection - check if Riva changed words we already matched
-        # This prevents building incorrect word lists when Riva changes its mind
-        if len(matcher.matched_words) > 0:
-            num_matched = len(matcher.matched_words)
-            if num_matched <= len(words):
-                riva_prefix = words[:num_matched]
-                if riva_prefix != matcher.matched_words:
-                    # Riva changed words we already committed! Reset and reprocess
-                    LOG.debug(f"Riva changed matched words: {matcher.matched_words} -> {riva_prefix}, resetting")
-                    matcher.reset()
-                    current_count = 0
-                    self.riva_word_count = 0
+            if prev_words != curr_words:
+                LOG.debug(f"[RIVA {stream_name}] Transcript changed: {prev_words} → {curr_words}")
+                LOG.debug(f"[RIVA {stream_name}] Resetting matcher and reprocessing from start")
+                matcher.reset()
+                current_count = 0
+                if is_final:
+                    self.riva_final_word_count = 0
+                    self.prev_final_transcript = ""
+                else:
+                    self.riva_interim_word_count = 0
+                    self.prev_interim_transcript = ""
 
-        # Extract only NEW words (beyond what we've already processed)
+        # Extract only NEW words beyond what we've already processed
+        # Example: processed ["turn"], new transcript ["turn","lights"] → new_words = ["lights"]
         new_words = words[current_count:]
 
         if new_words:
             LOG.debug(f"[RIVA {stream_name}] New words: {new_words} (processed {current_count}/{len(words)})")
 
-        # Process NEW words one at a time through the matcher
+        # Update previous transcript for next comparison
+        if is_final:
+            self.prev_final_transcript = transcript
+        else:
+            self.prev_interim_transcript = transcript
+
+        # Process NEW words one at a time through THIS stream's matcher
+        # Multi-path evolutionary matcher handles word changes via path competition
         for word in new_words:
-            # Update word count as we process (mark as seen before processing)
+            # Mark as seen BEFORE processing (in case of errors/breaks)
             current_count += 1
-            self.riva_word_count = current_count
+            if is_final:
+                self.riva_final_word_count = current_count
+            else:
+                self.riva_interim_word_count = current_count
 
             LOG.info(f"[RIVA {stream_name}] {word}")
 
@@ -367,18 +447,27 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 event_name = 'mycroft.debug.riva.final' if is_final else 'mycroft.debug.riva.partial'
                 self.emit(event_name, {'utterance': word})
 
-            # Check for command match in this stream's matcher
+            # Add word to THIS stream's matcher
+            # Only creates paths for valid next words (or valid first words)
+            # Returns match if command completes
             match = matcher.add_word(word)
 
             if match:
-                # Complete command matched!
+                # Complete command matched in THIS stream!
                 utterance = match['utterance']
                 LOG.info(f"✓ COMMAND MATCHED ({stream_name}): '{utterance}' (intent: {match['intent']})")
 
-                # Deduplication: Check if we just executed this exact utterance
-                # Riva may repeat the same transcript multiple times, causing re-execution
-                if utterance == self.last_executed_utterance and (now - self.last_executed_time) < 2.0:
-                    LOG.debug(f"Skipping duplicate execution of '{utterance}' (executed {now - self.last_executed_time:.1f}s ago)")
+                # Deduplication: Check if we recently executed this utterance
+                # Checks against recent history to handle interleaved commands
+                # Example: INTERIM "pause" → INTERIM "dim lights" → delayed FINAL "pause"
+                is_duplicate = False
+                for prev_utterance, prev_time in self.executed_utterances_history:
+                    if utterance == prev_utterance and (now - prev_time) < self.dedup_window_seconds:
+                        LOG.info(f"⏭️  Skipping duplicate: '{utterance}' (executed {now - prev_time:.1f}s ago)")
+                        is_duplicate = True
+                        break
+
+                if is_duplicate:
                     continue
 
                 # Emit for skills processing
@@ -393,24 +482,39 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                         'utterance': utterance
                     })
 
-                # Reset matcher - command executed, start fresh for next command in session
-                self.command_matcher.reset()
+                # BUDGET COORDINATION: Sync shared budget from winning matcher's budget
+                # The winning path's local_budget already synced to matcher.global_budget
+                self.shared_global_budget = matcher.global_budget
+                LOG.debug(f"Global budget synced: {self.shared_global_budget}")
 
-                # Mark this utterance as executed to prevent re-execution if Riva repeats it
-                self.last_executed_utterance = utterance
-                self.last_executed_time = now
+                # Reset BOTH matchers - command executed, start fresh
+                # Both matchers will inherit the updated shared_global_budget on next word
+                self.interim_matcher.reset()
+                self.final_matcher.reset()
 
-                LOG.debug(f"Matcher cleared after command execution ({stream_name})")
+                # Mark executed to prevent re-execution
+                # Add to history and maintain size limit
+                self.executed_utterances_history.append((utterance, now))
+                if len(self.executed_utterances_history) > self.dedup_history_size:
+                    self.executed_utterances_history.pop(0)  # Remove oldest
 
-                # IMPORTANT: Break out of word processing loop after command execution
-                # Riva may continue sending the same transcript repeatedly, and we don't want
-                # to re-execute the same command. We'll process new words in the next callback.
+                LOG.debug(f"Both matchers reset after {stream_name} match")
+
+                # Break out of word loop after execution
+                # Next callback will process any new words
                 break
 
-        # Check if we should timeout due to too many filler words
-        if self.command_matcher.should_timeout():
-            LOG.info(f"Too many consecutive filler words - ending session")
+        # BUDGET COORDINATION: After processing all words, sync shared budget back
+        # The matcher we just used has the authoritative budget (fillers decrease it)
+        # This is the "CDN edge node reporting back to origin" step
+        self.shared_global_budget = matcher.global_budget
+
+        # Check if we should timeout (shared budget exhausted)
+        if self.shared_global_budget <= 0:
+            LOG.info(f"Global budget exhausted (budget: {self.shared_global_budget}) - ending session")
             self.session_active = False
+            if self.stt_backend == 'riva' and self.riva_stream_thread:
+                self.riva_stream_thread.end_session()
 
     def _process_audio_chunk(self, audio_chunk):
         """Route audio chunk to appropriate STT backend."""
