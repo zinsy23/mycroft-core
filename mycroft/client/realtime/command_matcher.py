@@ -381,6 +381,12 @@ class StreamingCommandMatcher:
                     'sequence': sequence
                 })
 
+                # DEBUG: Log patterns with "coding" to see how they're parsed
+                if 'coding' in line.lower():
+                    seq_words = [item.get('word', item.get('entity', '?')) for item in sequence]
+                    LOG.info(f"DEBUG: Registered pattern with 'coding': {line}")
+                    LOG.info(f"DEBUG: Sequence: {seq_words}")
+
         LOG.debug(f"Registered {len(pattern_lines)} patterns for {intent_name}")
 
     def add_word(self, word, stream_type="FINAL"):

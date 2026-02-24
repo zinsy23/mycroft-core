@@ -89,7 +89,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # Deduplication: track recent executed utterances to prevent re-execution
         # Uses a short history to handle interleaved commands (e.g., INTERIM "pause"
         # then INTERIM "dim lights" then delayed FINAL "pause")
-        # Format: [(utterance, timestamp), ...]
+        # Format: [(utterance, timestamp, stream_name), ...]
+        # stream_name = "INTERIM" or "FINAL"
         self.executed_utterances_history = []
         self.dedup_window_seconds = 3.0  # Check duplicates within 3 second window (FINALs can be delayed 2+ seconds)
         self.dedup_history_size = 5  # Keep last 5 executed commands
@@ -402,13 +403,27 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     is_refinement = True
                     LOG.debug(f"[RIVA {stream_name}] Detected refinement - '{words[0]}' was in previous transcript")
 
-            # DON'T reset matcher on refinement or segment boundaries
-            # Paths will survive based on whether new words match (survival of the fittest)
-            # Resetting would kill valid paths that could continue with the new transcript
+            # Reset matcher on refinement to clear stale paths from old transcript
+            # When Riva changes "enter pole screen" to "play video", we don't want the
+            # path with ['enter'] to suddenly match with 'video' from the new transcript
             if is_refinement:
-                LOG.debug(f"[RIVA {stream_name}] Detected refinement - letting paths compete with new words")
+                LOG.debug(f"[RIVA {stream_name}] Detected refinement - resetting matcher to clear stale paths")
+                matcher.reset()
             else:
-                LOG.debug(f"[RIVA {stream_name}] True segment boundary - preserving matcher state")
+                LOG.debug(f"[RIVA {stream_name}] True segment boundary - resetting matcher")
+
+                # Clear INTERIM dedup entries on segment boundary (new speech segment)
+                # This allows you to say the same command again in a new segment
+                # Keep FINAL entries for cross-stream deduplication (INTERIM→FINAL)
+                if not is_final:  # Only clear on INTERIM segment boundaries
+                    before_count = len(self.executed_utterances_history)
+                    self.executed_utterances_history = [
+                        (u, t, s) for u, t, s in self.executed_utterances_history
+                        if s == "FINAL"  # Keep only FINAL entries
+                    ]
+                    cleared_count = before_count - len(self.executed_utterances_history)
+                    if cleared_count > 0:
+                        LOG.info(f"[SEGMENT BOUNDARY] Cleared {cleared_count} INTERIM dedup entries (kept {len(self.executed_utterances_history)} FINAL entries)")
 
             # Reset word count to process from beginning
             current_count = 0
@@ -419,11 +434,6 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 self.riva_interim_word_count = 0
                 self.prev_interim_transcript = ""
             # Budget is NOT reset - continues from current value
-
-            # DON'T clear dedup history on segment boundaries - the 3-second time window
-            # already handles stale entries naturally. Clearing causes issues when INTERIM
-            # and FINAL streams have different word counts, where one stream's segment
-            # detection clears the other stream's recent dedup entries.
         elif current_count > 0:
             # Additional check: Detect if Riva changed its mind about previous words
             # Example: 'h' (1 word) -> 'turn' (1 word) - count stays 1 but words changed!
@@ -434,9 +444,11 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
             if prev_words != curr_words:
                 LOG.debug(f"[RIVA {stream_name}] Transcript changed: {prev_words} → {curr_words}")
-                LOG.debug(f"[RIVA {stream_name}] Words changed - letting paths compete with new transcript")
-                # DON'T reset matcher - let paths survive based on whether they match new words
-                # Reset word count to reprocess from start, but keep active paths
+                LOG.debug(f"[RIVA {stream_name}] Riva corrected itself - resetting matcher to prevent double execution")
+                # CRITICAL: Reset matcher when Riva changes its mind!
+                # Example: "play full screen" (matched & executed) → "enter full screen"
+                # Without reset, BOTH would execute. With reset, only the final correct one executes.
+                matcher.reset()
                 current_count = 0
                 if is_final:
                     self.riva_final_word_count = 0
@@ -492,11 +504,11 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 # Deduplication: Check if we recently executed this utterance
                 # Checks against recent history to handle interleaved commands
                 # Example: INTERIM "pause" → INTERIM "dim lights" → delayed FINAL "pause"
-                LOG.info(f"[DEDUP CHECK] Current utterance: '{utterance}' | History: {[(u, f'{now - t:.1f}s ago') for u, t in self.executed_utterances_history]}")
+                LOG.info(f"[DEDUP CHECK] Current utterance: '{utterance}' | History: {[(u, f'{now - t:.1f}s ago', s) for u, t, s in self.executed_utterances_history]}")
                 is_duplicate = False
-                for prev_utterance, prev_time in self.executed_utterances_history:
+                for prev_utterance, prev_time, prev_stream in self.executed_utterances_history:
                     if utterance == prev_utterance and (now - prev_time) < self.dedup_window_seconds:
-                        LOG.info(f"⏭️  Skipping duplicate: '{utterance}' (executed {now - prev_time:.1f}s ago)")
+                        LOG.info(f"⏭️  Skipping duplicate: '{utterance}' (executed {now - prev_time:.1f}s ago by {prev_stream})")
                         is_duplicate = True
                         break
 
@@ -525,9 +537,16 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 self.interim_matcher.reset()
                 self.final_matcher.reset()
 
+                # NOTE: We do NOT reset word counts here!
+                # Word counts track our position in the current Riva segment.
+                # They only reset when Riva signals a new segment (word count drop)
+                # or when transcript changes (Riva correcting itself).
+                # This prevents us from reprocessing the same segment multiple times.
+
                 # Mark executed to prevent re-execution within the SAME Riva segment
                 # This catches INTERIM→FINAL duplicates from the same utterance
-                self.executed_utterances_history.append((utterance, now))
+                # Tag with stream_name so we can clear INTERIM entries on segment boundaries
+                self.executed_utterances_history.append((utterance, now, stream_name))
                 if len(self.executed_utterances_history) > self.dedup_history_size:
                     self.executed_utterances_history.pop(0)  # Remove oldest
 
