@@ -7,6 +7,7 @@ Wake word detection, microphone handling, and bus integration remain unchanged.
 
 import json
 import time
+import threading
 from collections import deque
 
 import numpy as np
@@ -94,6 +95,12 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.executed_utterances_history = []
         self.dedup_window_seconds = 3.0  # Check duplicates within 3 second window (FINALs can be delayed 2+ seconds)
         self.dedup_history_size = 5  # Keep last 5 executed commands
+
+        # Stability delay: wait before executing INTERIM matches to filter rapid evolution
+        # If transcript changes within this window, cancel execution
+        self.stability_delay_ms = self.realtime_config.get('stability_delay_ms', 150)
+        self.pending_executions = {}  # {match_id: (match, timestamp, stream_name, transcript)}
+        self.next_match_id = 0
 
         # Debug mode
         self.debug = self.realtime_config.get('debug', True)
@@ -338,6 +345,49 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             self.session_active = False
             # Whisper doesn't have persistent stream, so no end_session() needed
 
+    def _execute_if_stable(self, match_id, original_transcript, stream_name):
+        """Execute command if it's still valid after stability delay.
+
+        Args:
+            match_id: ID of the pending execution
+            original_transcript: Transcript when match occurred (unused, kept for reference)
+            stream_name: INTERIM or FINAL
+        """
+        # Check if match is still pending (not cancelled by transcript change)
+        if match_id not in self.pending_executions:
+            LOG.info(f"⏭️  Match {match_id} was cancelled (transcript changed)")
+            return
+
+        pending = self.pending_executions[match_id]
+        match = pending['match']
+        utterance = pending['utterance']
+        timestamp = pending['timestamp']
+
+        # Remove from pending
+        del self.pending_executions[match_id]
+
+        LOG.info(f"✅ Executing stable match: '{utterance}' ({stream_name})")
+
+        # Emit for skills processing
+        self.emit('recognizer_loop:utterance', {
+            'utterances': [utterance],
+            'lang': self.lang
+        })
+
+        # Emit for CLI display
+        if self.debug:
+            self.emit('mycroft.debug.riva.matched', {
+                'utterance': utterance
+            })
+
+        # BUDGET COORDINATION: Already synced when matchers were reset immediately after match
+        # Just mark executed for deduplication
+        self.executed_utterances_history.append((utterance, timestamp, stream_name))
+
+        # Trim history
+        if len(self.executed_utterances_history) > self.dedup_history_size:
+            self.executed_utterances_history.pop(0)
+
     def _on_words_recognized(self, words, is_final):
         """Callback when Riva recognizes words (interim or final).
 
@@ -412,6 +462,17 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             else:
                 LOG.debug(f"[RIVA {stream_name}] True segment boundary - resetting matcher")
 
+                # Cancel pending executions on segment boundary
+                cancelled_count = 0
+                for match_id in list(self.pending_executions.keys()):
+                    pending = self.pending_executions[match_id]
+                    if pending['stream_name'] == stream_name:
+                        del self.pending_executions[match_id]
+                        cancelled_count += 1
+
+                if cancelled_count > 0:
+                    LOG.info(f"Cancelled {cancelled_count} pending {stream_name} execution(s) on segment boundary")
+
                 # Clear INTERIM dedup entries on segment boundary (new speech segment)
                 # This allows you to say the same command again in a new segment
                 # Keep FINAL entries for cross-stream deduplication (INTERIM→FINAL)
@@ -445,6 +506,31 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             if prev_words != curr_words:
                 LOG.debug(f"[RIVA {stream_name}] Transcript changed: {prev_words} → {curr_words}")
                 LOG.debug(f"[RIVA {stream_name}] Riva corrected itself - resetting matcher to prevent double execution")
+
+                # CANCEL PENDING EXECUTIONS: Transcript changed, any pending matches are stale
+                cancelled_count = 0
+                for match_id in list(self.pending_executions.keys()):
+                    pending = self.pending_executions[match_id]
+                    if pending['stream_name'] == stream_name:
+                        del self.pending_executions[match_id]
+                        cancelled_count += 1
+                        LOG.info(f"❌ Cancelled pending execution: '{pending['utterance']}' (transcript changed)")
+
+                if cancelled_count > 0:
+                    LOG.info(f"Cancelled {cancelled_count} pending {stream_name} execution(s) due to transcript change")
+
+                # UNDO WINDOW: If we just executed something from this stream within 1.0s,
+                # remove it from dedup history. This prevents multiple executions when Riva
+                # evolves through valid command variations (e.g., "tago nightlight" → "targo nightlight")
+                if self.executed_utterances_history:
+                    last_utterance, last_time, last_stream = self.executed_utterances_history[-1]
+                    time_since_last = now - last_time
+
+                    if last_stream == stream_name and time_since_last < 1.0:
+                        # Remove the stale execution (it was based on wrong transcript)
+                        self.executed_utterances_history.pop()
+                        LOG.info(f"⚠️  Transcript changed {time_since_last:.1f}s after execution - removed stale dedup entry: '{last_utterance}'")
+
                 # CRITICAL: Reset matcher when Riva changes its mind!
                 # Example: "play full screen" (matched & executed) → "enter full screen"
                 # Without reset, BOTH would execute. With reset, only the final correct one executes.
@@ -515,44 +601,43 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 if is_duplicate:
                     continue
 
-                # Emit for skills processing
-                self.emit('recognizer_loop:utterance', {
-                    'utterances': [utterance],
-                    'lang': self.lang
-                })
+                # STABILITY DELAY: Schedule execution after delay to filter rapid evolution
+                # Store current transcript to detect if it changes during the delay
+                current_transcript = ' '.join(words)
+                match_id = self.next_match_id
+                self.next_match_id += 1
 
-                # Emit for CLI display
-                if self.debug:
-                    self.emit('mycroft.debug.riva.matched', {
-                        'utterance': utterance
-                    })
+                LOG.info(f"⏱️  Scheduling execution in {self.stability_delay_ms}ms (match_id: {match_id})")
+                self.pending_executions[match_id] = {
+                    'match': match,
+                    'timestamp': now,
+                    'stream_name': stream_name,
+                    'transcript': current_transcript,
+                    'utterance': utterance
+                }
+
+                # Schedule delayed execution
+                timer = threading.Timer(
+                    self.stability_delay_ms / 1000.0,
+                    self._execute_if_stable,
+                    args=(match_id, current_transcript, stream_name)
+                )
+                timer.daemon = True
+                timer.start()
 
                 # BUDGET COORDINATION: Sync shared budget from winning matcher's budget
                 # The winning path's local_budget already synced to matcher.global_budget
                 self.shared_global_budget = matcher.global_budget
                 LOG.debug(f"Global budget synced: {self.shared_global_budget}")
 
-                # Reset BOTH matchers - command executed, start fresh
-                # Both matchers will inherit the updated shared_global_budget on next word
+                # Reset BOTH matchers immediately - match has been scheduled
+                # The stability check is based on transcript changes, not matcher state
                 self.interim_matcher.reset()
                 self.final_matcher.reset()
 
-                # NOTE: We do NOT reset word counts here!
-                # Word counts track our position in the current Riva segment.
-                # They only reset when Riva signals a new segment (word count drop)
-                # or when transcript changes (Riva correcting itself).
-                # This prevents us from reprocessing the same segment multiple times.
+                LOG.debug(f"Both matchers reset after scheduling {stream_name} match")
 
-                # Mark executed to prevent re-execution within the SAME Riva segment
-                # This catches INTERIM→FINAL duplicates from the same utterance
-                # Tag with stream_name so we can clear INTERIM entries on segment boundaries
-                self.executed_utterances_history.append((utterance, now, stream_name))
-                if len(self.executed_utterances_history) > self.dedup_history_size:
-                    self.executed_utterances_history.pop(0)  # Remove oldest
-
-                LOG.debug(f"Both matchers reset after {stream_name} match")
-
-                # Break out of word loop after execution
+                # Break out of word loop after scheduling execution
                 # Next callback will process any new words
                 break
 
