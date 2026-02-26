@@ -447,16 +447,55 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 LOG.debug(f"[RIVA {stream_name}] Riva corrected itself - resetting matcher to prevent double execution")
 
                 # UNDO WINDOW: If we just executed something from this stream within 1.0s,
-                # remove it from dedup history. This prevents multiple executions when Riva
-                # evolves through valid command variations (e.g., "tago nightlight" → "targo nightlight")
+                # check if the MATCHED WORDS AT THEIR POSITION changed. Only remove from dedup
+                # if the words that were actually matched (at their specific position) are different.
+                # This prevents removing dedup when Riva just adds/changes words AFTER the match.
                 if self.executed_utterances_history:
-                    last_utterance, last_time, last_stream = self.executed_utterances_history[-1]
+                    last_entry = self.executed_utterances_history[-1]
+                    if len(last_entry) == 5:
+                        # New format with position: (utterance, timestamp, stream_name, matched_words, match_position)
+                        last_utterance, last_time, last_stream, last_matched_words, last_match_position = last_entry
+                    elif len(last_entry) == 4:
+                        # Old format without position: (utterance, timestamp, stream_name, matched_words)
+                        last_utterance, last_time, last_stream, last_matched_words = last_entry
+                        last_match_position = None
+                    else:
+                        # Very old format: (utterance, timestamp, stream_name)
+                        last_utterance, last_time, last_stream = last_entry
+                        last_matched_words = None
+                        last_match_position = None
+
                     time_since_last = now - last_time
 
                     if last_stream == stream_name and time_since_last < 1.0:
-                        # Remove the stale execution (it was based on wrong transcript)
-                        self.executed_utterances_history.pop()
-                        LOG.info(f"⚠️  Transcript changed {time_since_last:.1f}s after execution - removed stale dedup entry: '{last_utterance}'")
+                        # Check if the matched words themselves changed
+                        should_undo = False
+
+                        if last_matched_words is None or last_match_position is None:
+                            # Old format entry - use old behavior (always undo on transcript change)
+                            should_undo = True
+                            LOG.info(f"⚠️  Transcript changed {time_since_last:.1f}s after execution - removed stale dedup entry: '{last_utterance}' (no position tracked)")
+                        else:
+                            # Check if the words at the MATCH POSITION are still the same
+                            matched_word_count = len(last_matched_words)
+                            # Extract words from curr_words at the same position where the match occurred
+                            if last_match_position + matched_word_count <= len(curr_words):
+                                current_matched_words = curr_words[last_match_position:last_match_position + matched_word_count]
+                            else:
+                                # Position no longer exists in transcript (words were removed)
+                                current_matched_words = []
+
+                            if current_matched_words != last_matched_words:
+                                # The matched words at their position changed - this is a genuine Riva correction
+                                should_undo = True
+                                LOG.info(f"⚠️  Matched words changed {time_since_last:.1f}s after execution at position {last_match_position}: {last_matched_words} → {current_matched_words} - removed stale dedup entry: '{last_utterance}'")
+                            else:
+                                # Matched words at their position are the same - Riva just changed words elsewhere
+                                # Don't remove from dedup - this prevents the spam issue
+                                LOG.debug(f"Transcript changed but matched words '{' '.join(last_matched_words)}' at position {last_match_position} unchanged - keeping dedup protection")
+
+                        if should_undo:
+                            self.executed_utterances_history.pop()
 
                 # CRITICAL: Reset matcher when Riva changes its mind!
                 # Example: "play full screen" (matched & executed) → "enter full screen"
@@ -517,9 +556,17 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 # Deduplication: Check if we recently executed this utterance
                 # Checks against recent history to handle interleaved commands
                 # Example: INTERIM "pause" → INTERIM "dim lights" → delayed FINAL "pause"
-                LOG.info(f"[DEDUP CHECK] Current utterance: '{utterance}' | History: {[(u, f'{now - t:.1f}s ago', s) for u, t, s in self.executed_utterances_history]}")
+                LOG.info(f"[DEDUP CHECK] Current utterance: '{utterance}' | History: {[(entry[0], f'{now - entry[1]:.1f}s ago', entry[2]) for entry in self.executed_utterances_history]}")
                 is_duplicate = False
-                for prev_utterance, prev_time, prev_stream in self.executed_utterances_history:
+                for entry in self.executed_utterances_history:
+                    # Handle old (3-tuple), medium (4-tuple), and new (5-tuple) formats
+                    if len(entry) == 5:
+                        prev_utterance, prev_time, prev_stream, _, _ = entry
+                    elif len(entry) == 4:
+                        prev_utterance, prev_time, prev_stream, _ = entry
+                    else:
+                        prev_utterance, prev_time, prev_stream = entry
+
                     if utterance == prev_utterance and (now - prev_time) < self.dedup_window_seconds:
                         LOG.info(f"⏭️  Skipping duplicate: '{utterance}' (executed {now - prev_time:.1f}s ago by {prev_stream})")
                         is_duplicate = True
@@ -559,7 +606,21 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 # Mark executed to prevent re-execution within the SAME Riva segment
                 # This catches INTERIM→FINAL duplicates from the same utterance
                 # Tag with stream_name so we can clear INTERIM entries on segment boundaries
-                self.executed_utterances_history.append((utterance, now, stream_name))
+                # Also store matched words and their position for smarter UNDO logic
+                matched_words = utterance.split()
+
+                # Calculate where in the transcript this match occurred
+                # We need to find the position to properly detect if THESE SPECIFIC words changed
+                match_position = None
+                if len(matched_words) > 0:
+                    # Find where the matched phrase appears in the current transcript
+                    # Start from the end since we process words sequentially
+                    for i in range(len(words) - len(matched_words) + 1):
+                        if words[i:i+len(matched_words)] == matched_words:
+                            match_position = i
+                            # Don't break - take the last match (most recent in transcript)
+
+                self.executed_utterances_history.append((utterance, now, stream_name, matched_words, match_position))
                 if len(self.executed_utterances_history) > self.dedup_history_size:
                     self.executed_utterances_history.pop(0)  # Remove oldest
 
