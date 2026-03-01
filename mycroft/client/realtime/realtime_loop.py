@@ -395,33 +395,30 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # The filler budget system will handle garbage, and this allows
         # multi-part commands like "set color ... blue"
         if current_count > len(words):
-            LOG.debug(f"[RIVA {stream_name}] Word count dropped (had {current_count}, now {len(words)})")
+            LOG.info(f"[RIVA {stream_name}] Word count dropped (had {current_count}, now {len(words)}) | Active paths: {len(matcher.active_paths)}")
 
             # When word count drops, we need to determine if this is:
             # A) Riva refining the transcript (e.g., ["tago", "p"] → ["tago"]) - RESET matcher
             # B) True segment after pause (e.g., ["set", "color"] → ["blue"]) - PRESERVE matcher
             #
-            # Heuristic: If the new transcript starts with any words from the old transcript,
-            # it's likely a refinement. If it's completely different words, it's a new segment.
+            # Heuristic: If new transcript starts with same first word as old, it's a refinement.
             prev_transcript = self.prev_final_transcript if is_final else self.prev_interim_transcript
             prev_words = prev_transcript.split() if prev_transcript else []
 
-            # Check if any of the new words match the start of the previous transcript
+            # Check if new transcript starts with the same word as the old transcript.
+            # If so, it's a refinement (Riva shortening/correcting the same utterance).
+            # If the first word is different, it's a true new segment after a pause.
             is_refinement = False
             if prev_words and words:
-                # If first word of new transcript matches any word in prev transcript, it's a refinement
-                if words[0] in prev_words:
+                if words[0] == prev_words[0]:
                     is_refinement = True
-                    LOG.debug(f"[RIVA {stream_name}] Detected refinement - '{words[0]}' was in previous transcript")
+                    LOG.info(f"[RIVA {stream_name}] Refinement: prev='{prev_transcript}' new='{transcript}' - resetting matcher")
 
             # Reset matcher on refinement to clear stale paths from old transcript
-            # When Riva changes "enter pole screen" to "play video", we don't want the
-            # path with ['enter'] to suddenly match with 'video' from the new transcript
             if is_refinement:
-                LOG.debug(f"[RIVA {stream_name}] Detected refinement - resetting matcher to clear stale paths")
                 matcher.reset()
             else:
-                LOG.debug(f"[RIVA {stream_name}] True segment boundary - preserving active paths for mid-command survival")
+                LOG.info(f"[RIVA {stream_name}] True segment boundary: prev='{prev_transcript}' new='{transcript}' - preserving {len(matcher.active_paths)} paths")
                 # Do NOT reset matcher - active paths should survive segment boundaries
                 # so commands can span pauses (e.g. "pause ... video" across two segments)
                 # Survival of the fittest: paths keep competing across boundaries
@@ -450,8 +447,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             curr_words = words[:current_count]
 
             if prev_words != curr_words:
-                LOG.debug(f"[RIVA {stream_name}] Transcript changed: {prev_words} → {curr_words}")
-                LOG.debug(f"[RIVA {stream_name}] Riva corrected itself - resetting matcher to prevent double execution")
+                LOG.info(f"[RIVA {stream_name}] Transcript changed: {prev_words} → {curr_words} | Active paths: {len(matcher.active_paths)}")
 
                 # UNDO WINDOW: Only trigger when FINAL stream contradicts a prior INTERIM execution.
                 # INTERIM self-corrections (e.g. "full"→"foll"→"full" wobbles) are transient noise
