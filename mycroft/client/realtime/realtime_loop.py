@@ -86,6 +86,15 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.prev_interim_transcript = ""
         self.prev_final_transcript = ""
 
+        # Consumed word ranges: when a command executes, we record the word positions
+        # it consumed. When current_count resets to 0 (transcript change or segment
+        # boundary), we skip over these consumed ranges instead of replaying them.
+        # This prevents cross-command stitching where old "enter" path grabs "video"
+        # from the next command during replay.
+        # Format: list of (start, end_exclusive) position tuples, per-stream
+        self.interim_consumed_ranges = []  # [(start, end), ...]
+        self.final_consumed_ranges = []
+
         # Deduplication: track recent executed utterances to prevent re-execution
         # Uses a short history to handle interleaved commands (e.g., INTERIM "pause"
         # then INTERIM "dim lights" then delayed FINAL "pause")
@@ -225,6 +234,10 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             self.riva_final_word_count = 0
         elif self.whisper_stream_thread:
             self.whisper_stream_thread.reset()
+
+        # Clear consumed ranges for new session
+        self.interim_consumed_ranges = []
+        self.final_consumed_ranges = []
 
         # Audio buffering
         self.audio_buffer.clear()
@@ -409,8 +422,24 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             if is_refinement:
                 LOG.debug(f"[RIVA {stream_name}] Detected refinement - resetting matcher to clear stale paths")
                 matcher.reset()
+                # Also clear consumed ranges - refinement means the transcript changed,
+                # so old position-based consumed ranges are no longer valid
+                if is_final:
+                    self.final_consumed_ranges = []
+                else:
+                    self.interim_consumed_ranges = []
             else:
-                LOG.debug(f"[RIVA {stream_name}] True segment boundary - resetting matcher")
+                LOG.debug(f"[RIVA {stream_name}] True segment boundary - preserving active paths for mid-command survival")
+                # Do NOT reset matcher - active paths should survive segment boundaries
+                # so commands can span pauses (e.g. "pause ... video" across two segments)
+                # Survival of the fittest: paths keep competing across boundaries
+
+                # Clear consumed ranges on true segment boundary - new segment starts at 0,
+                # so old position-based ranges from the previous segment are no longer relevant
+                if is_final:
+                    self.final_consumed_ranges = []
+                else:
+                    self.interim_consumed_ranges = []
 
                 # Clear INTERIM dedup entries on segment boundary (new speech segment)
                 # This allows you to say the same command again in a new segment
@@ -418,8 +447,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 if not is_final:  # Only clear on INTERIM segment boundaries
                     before_count = len(self.executed_utterances_history)
                     self.executed_utterances_history = [
-                        (u, t, s) for u, t, s in self.executed_utterances_history
-                        if s == "FINAL"  # Keep only FINAL entries
+                        entry for entry in self.executed_utterances_history
+                        if entry[2] == "FINAL"  # Keep only FINAL entries
                     ]
                     cleared_count = before_count - len(self.executed_utterances_history)
                     if cleared_count > 0:
@@ -446,11 +475,12 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 LOG.debug(f"[RIVA {stream_name}] Transcript changed: {prev_words} → {curr_words}")
                 LOG.debug(f"[RIVA {stream_name}] Riva corrected itself - resetting matcher to prevent double execution")
 
-                # UNDO WINDOW: If we just executed something from this stream within 1.0s,
-                # check if the MATCHED WORDS AT THEIR POSITION changed. Only remove from dedup
-                # if the words that were actually matched (at their specific position) are different.
-                # This prevents removing dedup when Riva just adds/changes words AFTER the match.
-                if self.executed_utterances_history:
+                # UNDO WINDOW: Only trigger when FINAL stream contradicts a prior INTERIM execution.
+                # INTERIM self-corrections (e.g. "full"→"foll"→"full" wobbles) are transient noise
+                # and should NOT strip dedup protection - that causes repeated re-execution of prior
+                # commands while saying the next command. Only FINAL is authoritative enough to
+                # justify undoing a prior INTERIM execution.
+                if is_final and self.executed_utterances_history:
                     last_entry = self.executed_utterances_history[-1]
                     if len(last_entry) == 5:
                         # New format with position: (utterance, timestamp, stream_name, matched_words, match_position)
@@ -467,7 +497,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
                     time_since_last = now - last_time
 
-                    if last_stream == stream_name and time_since_last < 1.0:
+                    if last_stream == "INTERIM" and time_since_last < 1.0:
                         # Check if the matched words themselves changed
                         should_undo = False
 
@@ -481,18 +511,40 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                             # Extract words from curr_words at the same position where the match occurred
                             if last_match_position + matched_word_count <= len(curr_words):
                                 current_matched_words = curr_words[last_match_position:last_match_position + matched_word_count]
+                                if current_matched_words != last_matched_words:
+                                    # Words changed - only UNDO if every replacement word is valid
+                                    # at its position in the matcher (not just Riva noise like "toggo")
+                                    # Build valid words at each position given preceding context
+                                    words_before_match = curr_words[:last_match_position]
+                                    replacement_all_valid = True
+                                    for i, replacement_word in enumerate(current_matched_words):
+                                        position_context = words_before_match + current_matched_words[:i]
+                                        valid_at_position = set()
+                                        for seq_info in self.final_matcher.all_sequences:
+                                            seq = seq_info['sequence']
+                                            pos = len(position_context)
+                                            if pos < len(seq):
+                                                # Check if context matches so far
+                                                context_matches = all(
+                                                    seq[j].get('word') == position_context[j]
+                                                    for j in range(pos)
+                                                    if 'word' in seq[j]
+                                                )
+                                                if context_matches and 'word' in seq[pos]:
+                                                    valid_at_position.add(seq[pos]['word'])
+                                        if replacement_word not in valid_at_position:
+                                            replacement_all_valid = False
+                                            LOG.debug(f"Replacement word '{replacement_word}' at position {last_match_position + i} is not valid - keeping dedup protection")
+                                            break
+                                    if replacement_all_valid:
+                                        should_undo = True
+                                        LOG.info(f"⚠️  Matched words changed {time_since_last:.1f}s after execution at position {last_match_position}: {last_matched_words} → {current_matched_words} - removed stale dedup entry: '{last_utterance}'")
+                                else:
+                                    # Matched words at their position are the same - Riva just changed words elsewhere
+                                    LOG.debug(f"Transcript changed but matched words '{' '.join(last_matched_words)}' at position {last_match_position} unchanged - keeping dedup protection")
                             else:
-                                # Position no longer exists in transcript (words were removed)
-                                current_matched_words = []
-
-                            if current_matched_words != last_matched_words:
-                                # The matched words at their position changed - this is a genuine Riva correction
-                                should_undo = True
-                                LOG.info(f"⚠️  Matched words changed {time_since_last:.1f}s after execution at position {last_match_position}: {last_matched_words} → {current_matched_words} - removed stale dedup entry: '{last_utterance}'")
-                            else:
-                                # Matched words at their position are the same - Riva just changed words elsewhere
-                                # Don't remove from dedup - this prevents the spam issue
-                                LOG.debug(f"Transcript changed but matched words '{' '.join(last_matched_words)}' at position {last_match_position} unchanged - keeping dedup protection")
+                                # Position no longer exists - transcript shrunk (segment boundary), not a correction
+                                LOG.debug(f"Matched words at position {last_match_position} no longer in transcript (shrunk) - keeping dedup protection")
 
                         if should_undo:
                             self.executed_utterances_history.pop()
@@ -505,9 +557,13 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 if is_final:
                     self.riva_final_word_count = 0
                     self.prev_final_transcript = ""
+                    # Transcript changed - old position-based consumed ranges are invalid
+                    self.final_consumed_ranges = []
                 else:
                     self.riva_interim_word_count = 0
                     self.prev_interim_transcript = ""
+                    # Transcript changed - old position-based consumed ranges are invalid
+                    self.interim_consumed_ranges = []
 
         # Extract only NEW words beyond what we've already processed
         # Example: processed ["turn"], new transcript ["turn","lights"] → new_words = ["lights"]
@@ -522,15 +578,30 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         else:
             self.prev_interim_transcript = transcript
 
+        # Get consumed ranges for this stream (words already matched by earlier commands)
+        consumed_ranges = self.final_consumed_ranges if is_final else self.interim_consumed_ranges
+
         # Process NEW words one at a time through THIS stream's matcher
         # Multi-path evolutionary matcher handles word changes via path competition
         for word in new_words:
+            word_position = current_count  # 0-based index of this word in the transcript
+
             # Mark as seen BEFORE processing (in case of errors/breaks)
             current_count += 1
             if is_final:
                 self.riva_final_word_count = current_count
             else:
                 self.riva_interim_word_count = current_count
+
+            # Skip words that were already consumed by a previous command execution.
+            # This prevents cross-command stitching: when current_count resets to 0
+            # (transcript change), we don't re-feed words from already-executed commands
+            # back into the matcher, which would create stale paths that stitch across
+            # command boundaries (e.g., "enter" from "enter full screen" later grabbing
+            # "video" from "play video").
+            if any(start <= word_position < end for start, end in consumed_ranges):
+                LOG.debug(f"[RIVA {stream_name}] Skipping consumed word '{word}' at position {word_position}")
+                continue
 
             LOG.info(f"[RIVA {stream_name}] {word}")
 
@@ -623,6 +694,14 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 self.executed_utterances_history.append((utterance, now, stream_name, matched_words, match_position))
                 if len(self.executed_utterances_history) > self.dedup_history_size:
                     self.executed_utterances_history.pop(0)  # Remove oldest
+
+                # Record consumed word range so replays don't re-feed these words.
+                # match_position is in the current `words` list; word_position is where
+                # the last word of the match was processed (current_count - 1 after increment).
+                if match_position is not None:
+                    consumed_end = match_position + len(matched_words)
+                    consumed_ranges.append((match_position, consumed_end))
+                    LOG.debug(f"Recorded consumed range [{match_position}, {consumed_end}) for '{utterance}'")
 
                 LOG.debug(f"Both matchers reset after {stream_name} match")
 

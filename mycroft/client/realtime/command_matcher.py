@@ -313,17 +313,13 @@ class MatcherPath:
         Returns:
             bool: True if path should continue, False if it should be pruned
         """
-        # Budget exhausted
+        # Budget exhausted - the only filler-based death condition.
+        # consecutive_fillers is NOT used here: budget already accounts for fillers
+        # per word, and paths must survive long pauses and filler words between
+        # valid command words as long as budget remains.
         if self.local_budget <= 0:
             return False
 
-        # Too many consecutive fillers
-        if self.consecutive_fillers >= self.base_max_fillers:
-            return False
-
-        # Path is viable as long as it has budget and hasn't hit filler limit
-        # Don't check for continuations here - paths should survive waiting for next word
-        # Survival of the fittest: paths die naturally when wrong words arrive
         return True
 
 
@@ -392,8 +388,9 @@ class StreamingCommandMatcher:
     def add_word(self, word, stream_type="FINAL"):
         """Process a new word from STT using multi-path matching.
 
-        Creates a new matcher path starting with this word, and tries adding
-        the word to all existing paths. Prunes weak paths and checks for completion.
+        Creates a new matcher path starting with this word (if no identical path
+        already exists), and tries adding the word to all existing paths. Prunes
+        weak paths and checks for completion.
 
         Args:
             word (str): The word to process
@@ -430,14 +427,29 @@ class StreamingCommandMatcher:
 
         LOG.info(f"  Valid first words count: {len(valid_first_words)}, word '{word}' valid: {word in valid_first_words}")
 
-        # If word is valid as first word, create new path
+        # If word is valid as first word, create new path ONLY if no existing
+        # path already starts with this word AND has advanced past the first word.
+        # An advanced path (matched_words > 1) means it's already steering toward
+        # a specific command - don't spawn a competing fresh path that could grab
+        # later words and produce spurious commands (e.g. 'enter video' when the
+        # real 'enter' path is already at ['enter','full'] heading for 'enter full screen').
+        # A path still at exactly [word] (not yet advanced) is fine to coexist with
+        # a new one - they're equivalent at that stage.
         if word in valid_first_words or '<ENTITY>' in valid_first_words:
-            new_path = MatcherPath(self.next_path_id, self.global_budget, self.all_sequences, self.filler_config)
-            self.next_path_id += 1
-            new_path.try_add_word(word, stream_type=stream_type)
-            self.active_paths.append(new_path)
-            word_accepted = True
-            LOG.info(f"  ✓ Created new path {new_path.path_id} starting with '{word}'")
+            existing_advanced_path = any(
+                len(path.matched_words) > 1 and path.matched_words[0] == word
+                for path in self.active_paths
+            )
+            if not existing_advanced_path:
+                new_path = MatcherPath(self.next_path_id, self.global_budget, self.all_sequences, self.filler_config)
+                self.next_path_id += 1
+                new_path.try_add_word(word, stream_type=stream_type)
+                self.active_paths.append(new_path)
+                word_accepted = True
+                LOG.info(f"  ✓ Created new path {new_path.path_id} starting with '{word}'")
+            else:
+                word_accepted = True  # Advanced path already covers this start word
+                LOG.info(f"  ○ Skipped new path for '{word}' (existing advanced path already starts with this word)")
 
         # INTERIM/FINAL Budget Split:
         # - INTERIM filler words do NOT impact global budget (optimistic matching)
@@ -466,9 +478,7 @@ class StreamingCommandMatcher:
             LOG.info(f"  ⚠️  Pruned {pruned_count} paths, {len(self.active_paths)} remain")
             for path, viable in pruned_paths:
                 if not viable:
-                    reason = "budget exhausted" if path.local_budget <= 0 else \
-                            "too many fillers" if path.consecutive_fillers >= path.base_max_fillers else \
-                            "no continuations"
+                    reason = "budget exhausted" if path.local_budget <= 0 else "unknown"
                     LOG.info(f"     Path {path.path_id} pruned: {path.matched_words} - {reason}")
 
         # Log top paths for debugging
