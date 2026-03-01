@@ -523,12 +523,13 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                         if should_undo:
                             self.executed_utterances_history.pop()
 
-                # CRITICAL: Reset matcher when Riva changes its mind!
-                # Example: "play full screen" (matched & executed) → "enter full screen"
-                # Without reset, BOTH would execute. With reset, only the final correct one executes.
-                matcher.reset()
-                # Start replay from min_replay_pos, not 0, so already-executed command words
-                # don't re-enter the matcher and create stale cross-command paths.
+                # Do NOT reset matcher on transcript change - active paths should survive.
+                # Example: ['play'] → ['uh'] during a pause: the 'play' path should keep
+                # waiting for its next word rather than being killed. Stale paths that were
+                # building on words Riva corrected will just fail to get valid next words
+                # and sit harmlessly until session end or budget exhaustion.
+                # Cross-command stitching is still prevented by min_replay_pos.
+                # The old reset here was the cause of paths dying during pauses with fillers.
                 min_replay_pos = self.final_min_replay_pos if is_final else self.interim_min_replay_pos
                 current_count = min_replay_pos
                 if is_final:
