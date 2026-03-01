@@ -162,7 +162,7 @@ class MatcherPath:
     strong paths survive. Winner's budget syncs to global.
     """
 
-    def __init__(self, path_id, starting_budget, all_sequences, filler_config):
+    def __init__(self, path_id, starting_budget, all_sequences, filler_config, start_position=0):
         """Initialize a new matcher path.
 
         Args:
@@ -170,6 +170,10 @@ class MatcherPath:
             starting_budget: Initial budget inherited from global
             all_sequences: All command patterns to match against
             filler_config: Filler word configuration
+            start_position: Transcript position where this path's first word came from.
+                Used to prevent replay from feeding earlier-position words into this path,
+                which would cause cross-positional matches (e.g. path started at pos 7
+                grabbing 'full' from pos 5 during replay).
         """
         self.path_id = path_id
         self.matched_words = []
@@ -179,6 +183,7 @@ class MatcherPath:
         self.filler_config = filler_config
         self.base_max_fillers = filler_config.get('base_max', 4)
         self.fitness_score = 0  # Number of valid words matched
+        self.start_position = start_position  # Transcript position of first word
 
     def try_add_word(self, word, stream_type="FINAL"):
         """Try to add a word to this path.
@@ -385,7 +390,7 @@ class StreamingCommandMatcher:
 
         LOG.debug(f"Registered {len(pattern_lines)} patterns for {intent_name}")
 
-    def add_word(self, word, stream_type="FINAL"):
+    def add_word(self, word, stream_type="FINAL", transcript_position=None):
         """Process a new word from STT using multi-path matching.
 
         Creates a new matcher path starting with this word, and tries adding
@@ -394,6 +399,10 @@ class StreamingCommandMatcher:
         Args:
             word (str): The word to process
             stream_type (str): "INTERIM" or "FINAL" - determines budget impact
+            transcript_position (int): Position of this word in the current transcript.
+                Used to guard existing paths against receiving words from earlier positions
+                during replay (prevents cross-positional matches like a path that started
+                at position 7 consuming 'full' from position 5 during replay).
 
         Returns:
             dict or None: Match result if complete command matched, else None
@@ -407,9 +416,13 @@ class StreamingCommandMatcher:
         # Track if word was accepted by any path
         word_accepted = False
 
-        # Try adding word to all existing paths
-        # Pass stream_type so path knows whether to decrease local_budget for fillers
+        # Try adding word to all existing paths.
+        # Skip paths whose start_position is after the current transcript position -
+        # those paths started later in the transcript and must not receive earlier words
+        # during replay (would cause cross-positional matches).
         for path in self.active_paths:
+            if transcript_position is not None and transcript_position < path.start_position:
+                continue
             if path.try_add_word(word, stream_type=stream_type):
                 word_accepted = True
 
@@ -426,14 +439,15 @@ class StreamingCommandMatcher:
 
         LOG.info(f"  Valid first words count: {len(valid_first_words)}, word '{word}' valid: {word in valid_first_words}")
 
-        # If word is valid as first word, create new path
+        # If word is valid as first word, create new path with its transcript position
         if word in valid_first_words or '<ENTITY>' in valid_first_words:
-            new_path = MatcherPath(self.next_path_id, self.global_budget, self.all_sequences, self.filler_config)
+            pos = transcript_position if transcript_position is not None else 0
+            new_path = MatcherPath(self.next_path_id, self.global_budget, self.all_sequences, self.filler_config, start_position=pos)
             self.next_path_id += 1
             new_path.try_add_word(word, stream_type=stream_type)
             self.active_paths.append(new_path)
             word_accepted = True
-            LOG.info(f"  ✓ Created new path {new_path.path_id} starting with '{word}'")
+            LOG.info(f"  ✓ Created new path {new_path.path_id} starting with '{word}' at position {pos}")
 
         # INTERIM/FINAL Budget Split:
         # - INTERIM filler words do NOT impact global budget (optimistic matching)

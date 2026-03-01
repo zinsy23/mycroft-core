@@ -456,8 +456,11 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 # justify undoing a prior INTERIM execution.
                 if is_final and self.executed_utterances_history:
                     last_entry = self.executed_utterances_history[-1]
-                    if len(last_entry) == 5:
-                        # New format with position: (utterance, timestamp, stream_name, matched_words, match_position)
+                    if len(last_entry) == 6:
+                        # Current format with intent: (utterance, timestamp, stream_name, matched_words, match_position, intent)
+                        last_utterance, last_time, last_stream, last_matched_words, last_match_position, _ = last_entry
+                    elif len(last_entry) == 5:
+                        # Previous format with position: (utterance, timestamp, stream_name, matched_words, match_position)
                         last_utterance, last_time, last_stream, last_matched_words, last_match_position = last_entry
                     elif len(last_entry) == 4:
                         # Old format without position: (utterance, timestamp, stream_name, matched_words)
@@ -576,7 +579,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             # Only creates paths for valid next words (or valid first words)
             # Returns match if command completes
             # Pass stream_type so matcher knows whether filler words impact global budget
-            match = matcher.add_word(word, stream_type=stream_name)
+            match = matcher.add_word(word, stream_type=stream_name, transcript_position=current_count - 1)
 
             if match:
                 # Complete command matched in THIS stream!
@@ -589,16 +592,32 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 LOG.info(f"[DEDUP CHECK] Current utterance: '{utterance}' | History: {[(entry[0], f'{now - entry[1]:.1f}s ago', entry[2]) for entry in self.executed_utterances_history]}")
                 is_duplicate = False
                 for entry in self.executed_utterances_history:
-                    # Handle old (3-tuple), medium (4-tuple), and new (5-tuple) formats
-                    if len(entry) == 5:
+                    # Handle all tuple formats
+                    if len(entry) == 6:
+                        prev_utterance, prev_time, prev_stream, _, _, _ = entry
+                    elif len(entry) == 5:
                         prev_utterance, prev_time, prev_stream, _, _ = entry
                     elif len(entry) == 4:
                         prev_utterance, prev_time, prev_stream, _ = entry
                     else:
                         prev_utterance, prev_time, prev_stream = entry
 
-                    if utterance == prev_utterance and (now - prev_time) < self.dedup_window_seconds:
-                        LOG.info(f"⏭️  Skipping duplicate: '{utterance}' (executed {now - prev_time:.1f}s ago by {prev_stream})")
+                    elapsed = now - prev_time
+                    # Same utterance string: use full dedup window (catches INTERIM→FINAL)
+                    if utterance == prev_utterance and elapsed < self.dedup_window_seconds:
+                        LOG.info(f"⏭️  Skipping duplicate: '{utterance}' (executed {elapsed:.1f}s ago by {prev_stream})")
+                        is_duplicate = True
+                        break
+                    # Same command, different verb alias: use tight window (catches alias duplicates
+                    # like 'tago captions' → 'toggle captions' which Riva produces within ~100ms)
+                    # Compare words after position 0 (the {main} entity portion) - if identical,
+                    # it's the same command with a different verb alias, not a new command.
+                    curr_words_list = utterance.split()
+                    prev_words_list = prev_utterance.split()
+                    if (curr_words_list[1:] == prev_words_list[1:]
+                            and curr_words_list[0] != prev_words_list[0]
+                            and elapsed < 1.0):
+                        LOG.info(f"⏭️  Skipping alias duplicate: '{utterance}' same as '{prev_utterance}' with different verb ({elapsed:.2f}s ago by {prev_stream})")
                         is_duplicate = True
                         break
 
@@ -650,7 +669,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                             match_position = i
                             # Don't break - take the last match (most recent in transcript)
 
-                self.executed_utterances_history.append((utterance, now, stream_name, matched_words, match_position))
+                self.executed_utterances_history.append((utterance, now, stream_name, matched_words, match_position, match['intent']))
                 if len(self.executed_utterances_history) > self.dedup_history_size:
                     self.executed_utterances_history.pop(0)  # Remove oldest
 
