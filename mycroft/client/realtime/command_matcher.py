@@ -508,6 +508,49 @@ class StreamingCommandMatcher:
         # Having no active paths is normal (fillers, between commands, etc.)
         return self.global_budget <= 0
 
+    def prune_corrected_paths(self, changed_positions, new_words):
+        """Prune paths whose starting word was corrected to a different valid first word.
+
+        When Riva corrects a word at some position to a different valid command-starting
+        word (e.g. 'and' → 'enter'), any path that started on the old word at that
+        position should be killed — Riva is authoritatively saying it heard something
+        different. This is distinct from correction to noise/garbage (e.g. 'play' → 'uh')
+        where the path should survive because Riva is just being temporarily confused.
+
+        Args:
+            changed_positions: dict of {position: (old_word, new_word)} for positions
+                where the transcript changed
+            new_words: the new transcript word list
+        """
+        # Build set of valid first words once
+        valid_first_words = set()
+        for seq_info in self.all_sequences:
+            if seq_info['sequence']:
+                first = seq_info['sequence'][0]
+                if 'word' in first:
+                    valid_first_words.add(first['word'])
+
+        before_count = len(self.active_paths)
+        surviving = []
+        for path in self.active_paths:
+            kill = False
+            if path.start_position in changed_positions:
+                old_word, new_word = changed_positions[path.start_position]
+                if (path.matched_words and
+                        path.matched_words[0] == old_word and
+                        new_word in valid_first_words and
+                        new_word != old_word):
+                    LOG.info(f"  ✂️  Pruning path {path.path_id} ({path.matched_words}): "
+                             f"start word '{old_word}' corrected to valid command word '{new_word}' at position {path.start_position}")
+                    kill = True
+            if not kill:
+                surviving.append(path)
+
+        self.active_paths = surviving
+        pruned = before_count - len(self.active_paths)
+        if pruned > 0:
+            LOG.info(f"  ✂️  Pruned {pruned} path(s) due to Riva correction to valid command word")
+
     def reset(self):
         """Reset matcher state after command execution.
 

@@ -526,6 +526,19 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                         if should_undo:
                             self.executed_utterances_history.pop()
 
+                # Prune paths whose starting word was corrected to a different valid command
+                # word. E.g. 'and' → 'enter': the 'and' path is dead, Riva is authoritative.
+                # But 'play' → 'uh': 'uh' is not a valid first word, so the 'play' path
+                # survives (pause/filler case). Only kill when the replacement is itself a
+                # valid command-starting word — that's Riva correcting a misrecognition,
+                # not just being noisy.
+                changed_positions = {}
+                for _i, (old, new) in enumerate(zip(prev_words, curr_words)):
+                    if old != new:
+                        changed_positions[_i] = (old, new)
+                if changed_positions:
+                    matcher.prune_corrected_paths(changed_positions, curr_words)
+
                 # Do NOT reset matcher on transcript change - active paths should survive.
                 # Example: ['play'] → ['uh'] during a pause: the 'play' path should keep
                 # waiting for its next word rather than being killed. Stale paths that were
@@ -586,6 +599,43 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 utterance = match['utterance']
                 LOG.info(f"✓ COMMAND MATCHED ({stream_name}): '{utterance}' (intent: {match['intent']})")
 
+                # FINAL CROSS-COMMAND STITCH GUARD: Only for FINAL stream.
+                # When FINAL gets a segment like ['pause', 'vieo', 'exit', 'full', 'screen'],
+                # a path starting at 'pause' can skip 'vieo' and 'exit' as fillers then
+                # grab 'full screen', producing phantom 'pause full screen'.
+                # Guard: find which segment words were skipped (fillers) between start and
+                # match end — if any skipped word is itself a valid command-starting word,
+                # this match bridged across a command boundary and must be rejected.
+                if is_final:
+                    matched_words_list = utterance.split()
+                    # Find match start position in segment
+                    _match_pos = None
+                    for _i in range(len(words) - len(matched_words_list) + 1):
+                        if words[_i:_i + len(matched_words_list)] == matched_words_list:
+                            _match_pos = _i
+                    if _match_pos is not None:
+                        # Walk segment from match start to end, collecting skipped words
+                        _match_end = _match_pos + len(matched_words_list)
+                        _matched_remaining = list(matched_words_list)
+                        _skipped = []
+                        for _seg_word in words[_match_pos:_match_end]:
+                            if _matched_remaining and _seg_word == _matched_remaining[0]:
+                                _matched_remaining.pop(0)
+                            else:
+                                _skipped.append(_seg_word)
+                        # Get valid first words from all sequences
+                        _valid_first = set()
+                        for _seq in matcher.all_sequences:
+                            if _seq['sequence']:
+                                _first = _seq['sequence'][0]
+                                if 'word' in _first:
+                                    _valid_first.add(_first['word'])
+                        # Check if any skipped word is a valid command start
+                        _stitch_words = [w for w in _skipped if w in _valid_first]
+                        if _stitch_words:
+                            LOG.info(f"⛔ FINAL cross-command stitch rejected: '{utterance}' skipped over command-starting word(s) {_stitch_words} in segment")
+                            continue
+
                 # Deduplication: Check if we recently executed this utterance
                 # Checks against recent history to handle interleaved commands
                 # Example: INTERIM "pause" → INTERIM "dim lights" → delayed FINAL "pause"
@@ -616,7 +666,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     prev_words_list = prev_utterance.split()
                     if (curr_words_list[1:] == prev_words_list[1:]
                             and curr_words_list[0] != prev_words_list[0]
-                            and elapsed < 1.0):
+                            and elapsed < 1.5):
                         LOG.info(f"⏭️  Skipping alias duplicate: '{utterance}' same as '{prev_utterance}' with different verb ({elapsed:.2f}s ago by {prev_stream})")
                         is_duplicate = True
                         break
@@ -676,13 +726,18 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 # Advance min replay position past this command's words so that if the
                 # transcript resets to 0 (Riva correction), we don't replay already-executed
                 # words back into the matcher creating stale cross-command paths.
+                # If match_position is None (Riva already corrected the alias words so they
+                # don't appear consecutively in the transcript), fall back to current_count —
+                # we've processed up to here so replay should not go earlier than this.
                 if match_position is not None:
                     new_min = match_position + len(matched_words)
-                    if is_final:
-                        self.final_min_replay_pos = max(self.final_min_replay_pos, new_min)
-                    else:
-                        self.interim_min_replay_pos = max(self.interim_min_replay_pos, new_min)
-                    LOG.debug(f"Min replay pos for {stream_name} advanced to {new_min}")
+                else:
+                    new_min = current_count
+                if is_final:
+                    self.final_min_replay_pos = max(self.final_min_replay_pos, new_min)
+                else:
+                    self.interim_min_replay_pos = max(self.interim_min_replay_pos, new_min)
+                LOG.debug(f"Min replay pos for {stream_name} advanced to {new_min} ({'exact position' if match_position is not None else 'current_count fallback'})")
 
                 LOG.debug(f"Both matchers reset after {stream_name} match")
 
