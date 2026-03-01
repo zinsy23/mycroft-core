@@ -86,14 +86,12 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.prev_interim_transcript = ""
         self.prev_final_transcript = ""
 
-        # Consumed word ranges: when a command executes, we record the word positions
-        # it consumed. When current_count resets to 0 (transcript change or segment
-        # boundary), we skip over these consumed ranges instead of replaying them.
-        # This prevents cross-command stitching where old "enter" path grabs "video"
-        # from the next command during replay.
-        # Format: list of (start, end_exclusive) position tuples, per-stream
-        self.interim_consumed_ranges = []  # [(start, end), ...]
-        self.final_consumed_ranges = []
+        # Minimum replay position per stream: when a transcript change forces current_count
+        # back to 0, we skip words before this position so already-executed command words
+        # don't re-enter the matcher and create stale cross-command paths.
+        # Resets to 0 on true segment boundaries and session start.
+        self.interim_min_replay_pos = 0
+        self.final_min_replay_pos = 0
 
         # Deduplication: track recent executed utterances to prevent re-execution
         # Uses a short history to handle interleaved commands (e.g., INTERIM "pause"
@@ -235,10 +233,6 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         elif self.whisper_stream_thread:
             self.whisper_stream_thread.reset()
 
-        # Clear consumed ranges for new session
-        self.interim_consumed_ranges = []
-        self.final_consumed_ranges = []
-
         # Audio buffering
         self.audio_buffer.clear()
 
@@ -248,6 +242,10 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.final_matcher.reset_session()
         # Sync shared budget from one of the matchers (they're identical after reset)
         self.shared_global_budget = self.interim_matcher.global_budget
+
+        # Reset min replay positions for new session
+        self.interim_min_replay_pos = 0
+        self.final_min_replay_pos = 0
 
         if stream:
             stream.stream_start()
@@ -422,37 +420,17 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             if is_refinement:
                 LOG.debug(f"[RIVA {stream_name}] Detected refinement - resetting matcher to clear stale paths")
                 matcher.reset()
-                # Also clear consumed ranges - refinement means the transcript changed,
-                # so old position-based consumed ranges are no longer valid
-                if is_final:
-                    self.final_consumed_ranges = []
-                else:
-                    self.interim_consumed_ranges = []
             else:
                 LOG.debug(f"[RIVA {stream_name}] True segment boundary - preserving active paths for mid-command survival")
                 # Do NOT reset matcher - active paths should survive segment boundaries
                 # so commands can span pauses (e.g. "pause ... video" across two segments)
                 # Survival of the fittest: paths keep competing across boundaries
 
-                # Clear consumed ranges on true segment boundary - new segment starts at 0,
-                # so old position-based ranges from the previous segment are no longer relevant
+                # Reset min replay position - new segment starts fresh word numbering from 0
                 if is_final:
-                    self.final_consumed_ranges = []
+                    self.final_min_replay_pos = 0
                 else:
-                    self.interim_consumed_ranges = []
-
-                # Clear INTERIM dedup entries on segment boundary (new speech segment)
-                # This allows you to say the same command again in a new segment
-                # Keep FINAL entries for cross-stream deduplication (INTERIM→FINAL)
-                if not is_final:  # Only clear on INTERIM segment boundaries
-                    before_count = len(self.executed_utterances_history)
-                    self.executed_utterances_history = [
-                        entry for entry in self.executed_utterances_history
-                        if entry[2] == "FINAL"  # Keep only FINAL entries
-                    ]
-                    cleared_count = before_count - len(self.executed_utterances_history)
-                    if cleared_count > 0:
-                        LOG.info(f"[SEGMENT BOUNDARY] Cleared {cleared_count} INTERIM dedup entries (kept {len(self.executed_utterances_history)} FINAL entries)")
+                    self.interim_min_replay_pos = 0
 
             # Reset word count to process from beginning
             current_count = 0
@@ -553,17 +531,16 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 # Example: "play full screen" (matched & executed) → "enter full screen"
                 # Without reset, BOTH would execute. With reset, only the final correct one executes.
                 matcher.reset()
-                current_count = 0
+                # Start replay from min_replay_pos, not 0, so already-executed command words
+                # don't re-enter the matcher and create stale cross-command paths.
+                min_replay_pos = self.final_min_replay_pos if is_final else self.interim_min_replay_pos
+                current_count = min_replay_pos
                 if is_final:
-                    self.riva_final_word_count = 0
+                    self.riva_final_word_count = min_replay_pos
                     self.prev_final_transcript = ""
-                    # Transcript changed - old position-based consumed ranges are invalid
-                    self.final_consumed_ranges = []
                 else:
-                    self.riva_interim_word_count = 0
+                    self.riva_interim_word_count = min_replay_pos
                     self.prev_interim_transcript = ""
-                    # Transcript changed - old position-based consumed ranges are invalid
-                    self.interim_consumed_ranges = []
 
         # Extract only NEW words beyond what we've already processed
         # Example: processed ["turn"], new transcript ["turn","lights"] → new_words = ["lights"]
@@ -578,30 +555,15 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         else:
             self.prev_interim_transcript = transcript
 
-        # Get consumed ranges for this stream (words already matched by earlier commands)
-        consumed_ranges = self.final_consumed_ranges if is_final else self.interim_consumed_ranges
-
         # Process NEW words one at a time through THIS stream's matcher
         # Multi-path evolutionary matcher handles word changes via path competition
         for word in new_words:
-            word_position = current_count  # 0-based index of this word in the transcript
-
             # Mark as seen BEFORE processing (in case of errors/breaks)
             current_count += 1
             if is_final:
                 self.riva_final_word_count = current_count
             else:
                 self.riva_interim_word_count = current_count
-
-            # Skip words that were already consumed by a previous command execution.
-            # This prevents cross-command stitching: when current_count resets to 0
-            # (transcript change), we don't re-feed words from already-executed commands
-            # back into the matcher, which would create stale paths that stitch across
-            # command boundaries (e.g., "enter" from "enter full screen" later grabbing
-            # "video" from "play video").
-            if any(start <= word_position < end for start, end in consumed_ranges):
-                LOG.debug(f"[RIVA {stream_name}] Skipping consumed word '{word}' at position {word_position}")
-                continue
 
             LOG.info(f"[RIVA {stream_name}] {word}")
 
@@ -695,13 +657,16 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 if len(self.executed_utterances_history) > self.dedup_history_size:
                     self.executed_utterances_history.pop(0)  # Remove oldest
 
-                # Record consumed word range so replays don't re-feed these words.
-                # match_position is in the current `words` list; word_position is where
-                # the last word of the match was processed (current_count - 1 after increment).
+                # Advance min replay position past this command's words so that if the
+                # transcript resets to 0 (Riva correction), we don't replay already-executed
+                # words back into the matcher creating stale cross-command paths.
                 if match_position is not None:
-                    consumed_end = match_position + len(matched_words)
-                    consumed_ranges.append((match_position, consumed_end))
-                    LOG.debug(f"Recorded consumed range [{match_position}, {consumed_end}) for '{utterance}'")
+                    new_min = match_position + len(matched_words)
+                    if is_final:
+                        self.final_min_replay_pos = max(self.final_min_replay_pos, new_min)
+                    else:
+                        self.interim_min_replay_pos = max(self.interim_min_replay_pos, new_min)
+                    LOG.debug(f"Min replay pos for {stream_name} advanced to {new_min}")
 
                 LOG.debug(f"Both matchers reset after {stream_name} match")
 
