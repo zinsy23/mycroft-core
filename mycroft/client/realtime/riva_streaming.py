@@ -32,7 +32,9 @@ class RivaStreamingThread(threading.Thread):
             server_uri: Riva server address (e.g., "localhost:50051")
             model_name: Riva model to use (e.g., "conformer-xl-en-US-asr-streaming-asr-bls-ensemble")
             sample_rate: Audio sample rate in Hz
-            word_callback: Optional callback(words_list, is_final) for word events
+            word_callback: Optional callback(words_list, is_final, word_timings) for word events.
+                word_timings is a list of (start_sec, end_sec) floats parallel to words_list,
+                or None if timings unavailable (always None for interim results).
         """
         super().__init__(daemon=True)
 
@@ -118,6 +120,7 @@ class RivaStreamingThread(threading.Thread):
                 enable_automatic_punctuation=False,
                 verbatim_transcripts=True,
                 model=self.model_name,
+                enable_word_time_offsets=True,
             ),
             interim_results=True,
         )
@@ -162,19 +165,30 @@ class RivaStreamingThread(threading.Thread):
                         self.final_text = transcript
                         self.interim_text = ""
 
+                        # Extract word-level timings if available (enabled via enable_word_time_offsets)
+                        # Each WordInfo has start_time and end_time as Duration (seconds + nanos)
+                        word_timings = None
+                        if result.alternatives[0].words:
+                            word_timings = [
+                                (w.start_time.seconds + w.start_time.nanos / 1e9,
+                                 w.end_time.seconds + w.end_time.nanos / 1e9)
+                                for w in result.alternatives[0].words
+                            ]
+
                         # Trigger callback with final words (CUMULATIVE list)
+                        # word_timings: list of (start_sec, end_sec) parallel to words, or None
                         if self.word_callback:
                             words = transcript.split()
-                            self.word_callback(words, is_final=True)
+                            self.word_callback(words, is_final=True, word_timings=word_timings)
 
                     else:
-                        # Interim result
+                        # Interim result — no word timings (Riva only provides these on FINAL)
                         self.interim_text = transcript
 
                         # Trigger callback with interim words (CUMULATIVE list)
                         if self.word_callback:
                             words = transcript.split()
-                            self.word_callback(words, is_final=False)
+                            self.word_callback(words, is_final=False, word_timings=None)
 
             LOG.debug("Riva: Streaming session ended")
 

@@ -3,11 +3,23 @@ Pattern loading utilities for realtime intent matching.
 
 This module is shared between the realtime service and test scripts
 to ensure identical pattern loading behavior.
+
+Handles three pattern types:
+  1. Normal deterministic patterns — expanded from entity files, passed to matcher as-is
+  2. Free-text trigger patterns — patterns containing {free_text} entity; the prefix
+     before {free_text} is registered as a deterministic sequence tagged __FREE_TEXT__:intent
+  3. Repeat patterns — synthesized from the quantifiers file and repeat config;
+     registered as sequences tagged __REPEAT__:N
 """
 
 import os
+import re
 import itertools
 from mycroft.util.log import LOG
+
+# Tag prefixes used in intent names to signal mode switches
+FREE_TEXT_TAG = '__FREE_TEXT__:'
+REPEAT_TAG = '__REPEAT__:'
 
 
 def load_entity_expansions(skill_path):
@@ -20,14 +32,12 @@ def load_entity_expansions(skill_path):
         dict: Entity expansions or empty dict if not found
     """
     import importlib.util
-    import sys
 
     try:
         init_path = os.path.join(skill_path, '__init__.py')
         if not os.path.exists(init_path):
             return {}
 
-        # Load module to get ENTITY_EXPANSIONS
         spec = importlib.util.spec_from_file_location("temp_skill", init_path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -45,6 +55,9 @@ def expand_pattern_entities(pattern, entity_expansions):
     expands patterns. This allows CommandPattern._expand_pattern() to handle
     the remaining optional groups correctly.
 
+    {free_text} (or any entity with no expansion defined) is left as-is —
+    the caller detects it and handles it separately.
+
     Args:
         pattern: Pattern string like "color {color}" or "[open|close] {main}"
         entity_expansions: Dict mapping entity names to their config
@@ -55,8 +68,6 @@ def expand_pattern_entities(pattern, entity_expansions):
                 - "[open|close] gpt"
                 - "[open|close] terminal"
     """
-    import re
-
     # Find all {entity} placeholders
     entities = re.findall(r'\{(\w+)\}', pattern)
     if not entities:
@@ -66,7 +77,7 @@ def expand_pattern_entities(pattern, entity_expansions):
     entity_values = {}
     for entity_name in entities:
         if entity_name not in entity_expansions:
-            # No expansion defined, keep as-is
+            # No expansion defined — leave placeholder as-is (e.g. {free_text})
             continue
 
         config = entity_expansions[entity_name]
@@ -84,7 +95,6 @@ def expand_pattern_entities(pattern, entity_expansions):
                             continue
 
                         if format_type == 'csv':
-                            # Try semicolon first, then comma
                             if ';' in line:
                                 parts = line.split(';')
                             else:
@@ -92,7 +102,6 @@ def expand_pattern_entities(pattern, entity_expansions):
                             if len(parts) > column:
                                 values.append(parts[column].strip())
                         else:
-                            # Simple format - one value per line
                             values.append(line)
             except Exception as e:
                 LOG.warning(f"Failed to load entity file {file_path}: {e}")
@@ -100,21 +109,15 @@ def expand_pattern_entities(pattern, entity_expansions):
         if values:
             entity_values[entity_name] = values
 
-    # If no entities were expanded, return original
+    # If no entities were expanded, return original (with any {free_text} still in it)
     if not entity_values:
         return [pattern]
 
-    # Generate Cartesian product of all entity values
-    # For each combination, create a separate pattern line
-    expanded_patterns = []
-
-    # Get entity names in order they appear in pattern
+    # Generate Cartesian product of all expanded entity values
     entity_order = entities
+    value_lists = [entity_values.get(name, [f'{{{name}}}']) for name in entity_order]
 
-    # Get value lists in same order
-    value_lists = [entity_values.get(name, [name]) for name in entity_order]
-
-    # Generate all combinations
+    expanded_patterns = []
     for combination in itertools.product(*value_lists):
         expanded = pattern
         for entity_name, value in zip(entity_order, combination):
@@ -125,23 +128,160 @@ def expand_pattern_entities(pattern, entity_expansions):
     return expanded_patterns
 
 
-def load_all_intent_patterns(skills_dir, verbose=False):
+def _split_free_text_pattern(pattern, free_text_entity):
+    """Split a pattern at its {free_text} placeholder.
+
+    Returns the prefix portion (everything before {free_text}) as a string,
+    or None if the pattern contains no {free_text} entity.
+
+    The prefix may contain optional groups like [for|] which the matcher
+    will expand normally. Anything after {free_text} is discarded.
+
+    Examples:
+        "search google [for] {free_text}"  -> "search google [for]"
+        "search google {free_text} extra"  -> "search google"  (trailing ignored)
+        "type {free_text}"                 -> "type"
+        "play video"                       -> None
+    """
+    placeholder = f'{{{free_text_entity}}}'
+    if placeholder not in pattern:
+        return None
+
+    idx = pattern.index(placeholder)
+    prefix = pattern[:idx].strip()
+    return prefix if prefix else None
+
+
+def load_quantifier_patterns(repeat_config):
+    """Build synthetic repeat patterns from the quantifiers file and repeat config.
+
+    Produces two sets of pattern strings tagged for the matcher:
+      - Prefixed: "[repeat|redo] [that|] twice"  -> intent __REPEAT__:2
+      - Bare (window-only): "twice"               -> intent __REPEAT__:2
+
+    Multi-word quantifiers ("three times") become multi-word pattern sequences.
+    Only the first token of each quantifier phrase is added to the transient
+    valid-first-word set at runtime (handled by realtime_loop).
+
+    Args:
+        repeat_config: dict from realtime.repeat config block
+
+    Returns:
+        dict: intent_name -> list of pattern strings, where intent_name is
+              __REPEAT__:N for integer N.
+              Returns empty dict if repeat disabled or no quantifier file.
+    """
+    if not repeat_config.get('enabled', False):
+        return {}
+
+    quantifier_file = repeat_config.get('quantifier_file')
+    if not quantifier_file or not os.path.exists(quantifier_file):
+        LOG.warning(f"Repeat quantifier_file not found: {quantifier_file}")
+        return {}
+
+    prefix_words = repeat_config.get('prefix_words', ['repeat', 'redo', 'again'])
+    suffix_words = repeat_config.get('suffix_words', ['that'])
+    require_prefix = repeat_config.get('require_prefix', False)
+
+    # Load quantifier phrase -> N mappings
+    # Format: "phrase,N"  e.g. "twice,2" or "three times,3"
+    quantifiers = {}  # phrase (str) -> N (int)
+    try:
+        with open(quantifier_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(',')
+                if len(parts) >= 2:
+                    phrase = parts[0].strip()
+                    try:
+                        n = int(parts[1].strip())
+                        quantifiers[phrase] = n
+                    except ValueError:
+                        LOG.warning(f"Invalid quantifier line (non-integer N): '{line}'")
+    except Exception as e:
+        LOG.warning(f"Failed to load quantifier file {quantifier_file}: {e}")
+        return {}
+
+    if not quantifiers:
+        return {}
+
+    # Build prefix group string e.g. "[repeat|redo|again]"
+    prefix_group = '[' + '|'.join(prefix_words) + ']'
+    # Build optional suffix group e.g. "[that|]"
+    if suffix_words:
+        suffix_group = '[' + '|'.join(suffix_words) + '|]'
+    else:
+        suffix_group = None
+
+    patterns_by_intent = {}
+
+    for phrase, n in quantifiers.items():
+        intent_name = f'{REPEAT_TAG}{n}'
+        if intent_name not in patterns_by_intent:
+            patterns_by_intent[intent_name] = []
+
+        # Prefixed pattern: "[repeat|redo|again] [that|] three times"
+        parts = [prefix_group]
+        if suffix_group:
+            parts.append(suffix_group)
+        parts.append(phrase)
+        prefixed = ' '.join(parts)
+        patterns_by_intent[intent_name].append(prefixed)
+
+        # Bare pattern (no prefix): "three times" — only valid within window
+        # Tagged differently so realtime_loop knows it needs window check
+        if not require_prefix:
+            bare_intent = f'{REPEAT_TAG}{n}:bare'
+            if bare_intent not in patterns_by_intent:
+                patterns_by_intent[bare_intent] = []
+            patterns_by_intent[bare_intent].append(phrase)
+
+    LOG.info(f"Loaded {len(quantifiers)} repeat quantifiers → "
+             f"{len(patterns_by_intent)} repeat intent variants")
+    return patterns_by_intent
+
+
+def load_all_intent_patterns(skills_dir, verbose=False, realtime_config=None):
     """Load all intent patterns from Mycroft skills directory.
+
+    Also loads repeat patterns from config if repeat is enabled.
 
     Args:
         skills_dir: Path to skills directory
         verbose: If True, print loading progress
+        realtime_config: Full realtime config dict (for free_text entity name
+                         and repeat config). If None, uses defaults.
 
     Returns:
-        dict: Mapping of intent_name -> list of expanded pattern strings
+        tuple: (deterministic_patterns, free_text_triggers, repeat_patterns)
+          - deterministic_patterns: dict intent_name -> [pattern_str, ...]
+            Normal patterns for StreamingCommandMatcher
+          - free_text_triggers: dict intent_name -> [prefix_pattern_str, ...]
+            Prefix-only patterns tagged __FREE_TEXT__:intent, registered in
+            matcher; when matched, realtime_loop switches to free-text mode
+          - repeat_patterns: dict intent_name -> [pattern_str, ...]
+            Synthesized repeat patterns tagged __REPEAT__:N, registered in
+            matcher with transient first-word handling
     """
+    if realtime_config is None:
+        realtime_config = {}
+
+    free_text_entity = (realtime_config
+                        .get('free_text', {})
+                        .get('entity_name', 'free_text'))
+
     if verbose:
         print(f"Loading intent patterns from: {skills_dir}")
+        print(f"Free-text entity name: {{{free_text_entity}}}")
 
-    all_patterns = {}
-    total_expanded = 0
+    deterministic_patterns = {}
+    free_text_triggers = {}
+    total_deterministic = 0
+    total_free_text = 0
 
-    # Find all .intent files
+    # Walk all .intent files
     for root, dirs, files in os.walk(skills_dir):
         for file in files:
             if not file.endswith('.intent'):
@@ -150,38 +290,67 @@ def load_all_intent_patterns(skills_dir, verbose=False):
             file_path = os.path.join(root, file)
             intent_name = file[:-7]  # Remove .intent
 
-            # Determine skill path from intent file path
-            # Path format: /opt/mycroft/skills/skill-name/locale/en-us/file.intent
+            # Skill path: /opt/mycroft/skills/skill-name/locale/en-us/file.intent
             skill_path = os.path.dirname(os.path.dirname(os.path.dirname(file_path)))
 
             try:
-                # Load entity expansions from skill
                 entity_expansions = load_entity_expansions(skill_path)
 
-                # Read patterns
                 with open(file_path, 'r') as f:
                     pattern_lines = [line.strip() for line in f.readlines() if line.strip()]
 
-                # Expand patterns with entity values
-                expanded_lines = []
+                det_lines = []
+                ft_lines = []
+
                 for pattern in pattern_lines:
+                    # First expand any normal {entity} placeholders (not {free_text})
                     expanded = expand_pattern_entities(pattern, entity_expansions)
-                    expanded_lines.extend(expanded)
 
-                all_patterns[intent_name] = expanded_lines
-                total_expanded += len(expanded_lines)
+                    for exp_pattern in expanded:
+                        prefix = _split_free_text_pattern(exp_pattern, free_text_entity)
 
-                if verbose and entity_expansions:
-                    print(f"  {intent_name}: {len(pattern_lines)} → {len(expanded_lines)} patterns")
-                elif verbose:
-                    print(f"  {intent_name}: {len(pattern_lines)} patterns")
+                        if prefix is not None:
+                            # This pattern has a {free_text} trigger
+                            ft_lines.append(prefix)
+                        else:
+                            # Normal deterministic pattern
+                            det_lines.append(exp_pattern)
+
+                if det_lines:
+                    deterministic_patterns[intent_name] = det_lines
+                    total_deterministic += len(det_lines)
+
+                if ft_lines:
+                    tagged = f'{FREE_TEXT_TAG}{intent_name}'
+                    free_text_triggers[tagged] = ft_lines
+                    total_free_text += len(ft_lines)
+
+                if verbose:
+                    parts = []
+                    if det_lines:
+                        parts.append(f"{len(det_lines)} deterministic")
+                    if ft_lines:
+                        parts.append(f"{len(ft_lines)} free-text triggers")
+                    if parts:
+                        print(f"  {intent_name}: {' + '.join(parts)}")
 
             except Exception as e:
                 if verbose:
                     print(f"  Warning: Failed to load {intent_name}: {e}")
                 LOG.warning(f"Failed to load intent {intent_name} from {file_path}: {e}")
 
-    if verbose:
-        print(f"\nLoaded {len(all_patterns)} intents with {total_expanded} total patterns")
+    # Load repeat patterns from config
+    repeat_config = realtime_config.get('repeat', {})
+    repeat_patterns = load_quantifier_patterns(repeat_config)
 
-    return all_patterns
+    if verbose:
+        print(f"\nLoaded {total_deterministic} deterministic patterns across "
+              f"{len(deterministic_patterns)} intents")
+        print(f"Loaded {total_free_text} free-text trigger prefixes across "
+              f"{len(free_text_triggers)} intents")
+        if repeat_patterns:
+            total_repeat = sum(len(v) for v in repeat_patterns.values())
+            print(f"Loaded {total_repeat} repeat patterns across "
+                  f"{len(repeat_patterns)} quantifier variants")
+
+    return deterministic_patterns, free_text_triggers, repeat_patterns

@@ -246,163 +246,75 @@ def connect_loop_events(loop):
     loop.on('mycroft.debug.whisper.final', handle_whisper_final)
 
 
-def load_entity_expansions(skill_path):
-    """Load ENTITY_EXPANSIONS from a skill's __init__.py if it exists.
-
-    Args:
-        skill_path: Path to skill directory
-
-    Returns:
-        dict: Entity expansions or empty dict if not found
-    """
-    import importlib.util
-    import sys
-
-    try:
-        init_path = os.path.join(skill_path, '__init__.py')
-        if not os.path.exists(init_path):
-            return {}
-
-        # Load module to get ENTITY_EXPANSIONS
-        spec = importlib.util.spec_from_file_location("temp_skill", init_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
-        return getattr(module, 'ENTITY_EXPANSIONS', {})
-    except Exception as e:
-        LOG.debug(f"Could not load ENTITY_EXPANSIONS from {skill_path}: {e}")
-        return {}
-
-
-def expand_pattern_entities(pattern, entity_expansions):
-    """Expand {entity} placeholders in pattern with values from files.
-
-    Creates separate pattern lines for each entity value, matching how Padatious
-    expands patterns. This allows CommandPattern._expand_pattern() to handle
-    the remaining optional groups correctly.
-
-    Args:
-        pattern: Pattern string like "color {color}" or "[open|close] {main}"
-        entity_expansions: Dict mapping entity names to their config
-
-    Returns:
-        list: Multiple pattern lines, one for each entity value combination
-              Example: "[open|close] {main}" with main=[gpt,terminal] returns:
-                - "[open|close] gpt"
-                - "[open|close] terminal"
-    """
-    import re
-    import itertools
-
-    # Find all {entity} placeholders
-    entities = re.findall(r'\{(\w+)\}', pattern)
-    if not entities:
-        return [pattern]
-
-    # For each entity, load values from files
-    entity_values = {}
-    for entity_name in entities:
-        if entity_name not in entity_expansions:
-            # No expansion defined, keep as-is
-            continue
-
-        config = entity_expansions[entity_name]
-        files = config.get('files', [])
-        format_type = config.get('format', 'csv')
-        column = config.get('column', 0)
-
-        values = []
-        for file_path in files:
-            try:
-                with open(file_path, 'r') as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-
-                        if format_type == 'csv':
-                            # Try semicolon first, then comma
-                            if ';' in line:
-                                parts = line.split(';')
-                            else:
-                                parts = line.split(',')
-                            if len(parts) > column:
-                                values.append(parts[column].strip())
-                        else:
-                            # Simple format - one value per line
-                            values.append(line)
-            except Exception as e:
-                LOG.warning(f"Failed to load entity file {file_path}: {e}")
-
-        if values:
-            entity_values[entity_name] = values
-
-    # If no entities were expanded, return original
-    if not entity_values:
-        return [pattern]
-
-    # Generate Cartesian product of all entity values
-    # For each combination, create a separate pattern line
-    expanded_patterns = []
-
-    # Get entity names in order they appear in pattern
-    entity_order = entities
-
-    # Get value lists in same order
-    value_lists = [entity_values.get(name, [name]) for name in entity_order]
-
-    # Generate all combinations
-    for combination in itertools.product(*value_lists):
-        expanded = pattern
-        for entity_name, value in zip(entity_order, combination):
-            placeholder = f'{{{entity_name}}}'
-            expanded = expanded.replace(placeholder, value)
-        expanded_patterns.append(expanded)
-
-    return expanded_patterns
-
-
 def handle_intents_ready(event):
     """Receive intent patterns from skills service when available."""
+    from mycroft.client.realtime.pattern_loader import (
+        load_entity_expansions, expand_pattern_entities,
+        _split_free_text_pattern, load_quantifier_patterns,
+        FREE_TEXT_TAG, REPEAT_TAG
+    )
+    from mycroft.configuration import Configuration
+
     if not loop:
         return
 
     intent_files = event.data.get('intent_files', {})
     LOG.info(f"Received {len(intent_files)} intent files from skills service")
 
+    realtime_config = Configuration.get().get('realtime', {})
+    free_text_entity = realtime_config.get('free_text', {}).get('entity_name', 'free_text')
+    repeat_config = realtime_config.get('repeat', {})
+
     # Clear existing patterns
     loop.shared_patterns.clear()
+
+    det_count = 0
+    ft_count = 0
 
     # Load each intent file into the command matcher
     for intent_name, file_path in intent_files.items():
         try:
-            # Determine skill path from intent file path
-            # Path format: /opt/mycroft/skills/skill-name/locale/en-us/file.intent
             skill_path = os.path.dirname(os.path.dirname(os.path.dirname(file_path)))
-
-            # Load entity expansions from skill
             entity_expansions = load_entity_expansions(skill_path)
 
             with open(file_path, 'r') as f:
                 pattern_lines = [line.strip() for line in f.readlines() if line.strip()]
 
-            # Expand patterns with entity values
-            expanded_lines = []
+            det_lines = []
+            ft_lines = []
+
             for pattern in pattern_lines:
                 expanded = expand_pattern_entities(pattern, entity_expansions)
-                expanded_lines.extend(expanded)
+                for exp_pattern in expanded:
+                    prefix = _split_free_text_pattern(exp_pattern, free_text_entity)
+                    if prefix is not None:
+                        ft_lines.append(prefix)
+                    else:
+                        det_lines.append(exp_pattern)
 
-            # Register expanded patterns in BOTH matchers
-            # Each matcher maintains its own all_sequences cache for fast lookups
-            loop.interim_matcher.register_intent(intent_name, expanded_lines)
-            loop.final_matcher.register_intent(intent_name, expanded_lines)
+            if det_lines:
+                loop.interim_matcher.register_intent(intent_name, det_lines)
+                loop.final_matcher.register_intent(intent_name, det_lines)
+                det_count += len(det_lines)
 
-            if entity_expansions:
-                LOG.info(f"Expanded {len(pattern_lines)} patterns to {len(expanded_lines)} for {intent_name}")
+            if ft_lines:
+                tagged = f'{FREE_TEXT_TAG}{intent_name}'
+                loop.interim_matcher.register_intent(tagged, ft_lines)
+                loop.final_matcher.register_intent(tagged, ft_lines)
+                ft_count += len(ft_lines)
+                LOG.info(f"  {intent_name}: {len(ft_lines)} free-text trigger prefix(es)")
+
         except Exception as e:
             LOG.warning(f"Failed to load intent {intent_name} from {file_path}: {e}")
 
-    LOG.info(f"Loaded {len(loop.shared_patterns)} total patterns for streaming command matching")
+    # Register repeat patterns from quantifiers file
+    repeat_patterns = load_quantifier_patterns(repeat_config)
+    for repeat_intent, patterns in repeat_patterns.items():
+        loop.interim_matcher.register_intent(repeat_intent, patterns)
+        loop.final_matcher.register_intent(repeat_intent, patterns)
+
+    LOG.info(f"Loaded {det_count} deterministic + {ft_count} free-text trigger patterns; "
+             f"{len(repeat_patterns)} repeat intent variants")
 
 
 def connect_bus_events(bus):
