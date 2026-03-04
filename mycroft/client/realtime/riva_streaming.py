@@ -35,6 +35,7 @@ class RivaStreamingThread(threading.Thread):
             word_callback: Optional callback(words_list, is_final, word_timings) for word events.
                 word_timings is a list of (start_sec, end_sec) floats parallel to words_list,
                 or None if timings unavailable (always None for interim results).
+                Riva provides timings as int nanoseconds; converted to float seconds here.
         """
         super().__init__(daemon=True)
 
@@ -166,14 +167,16 @@ class RivaStreamingThread(threading.Thread):
                         self.interim_text = ""
 
                         # Extract word-level timings if available (enabled via enable_word_time_offsets)
-                        # Each WordInfo has start_time and end_time as Duration (seconds + nanos)
+                        # In this Riva Python client, start_time/end_time are plain ints in nanoseconds
                         word_timings = None
                         if result.alternatives[0].words:
-                            word_timings = [
-                                (w.start_time.seconds + w.start_time.nanos / 1e9,
-                                 w.end_time.seconds + w.end_time.nanos / 1e9)
-                                for w in result.alternatives[0].words
-                            ]
+                            try:
+                                word_timings = [
+                                    (w.start_time / 1e9, w.end_time / 1e9)
+                                    for w in result.alternatives[0].words
+                                ]
+                            except Exception as _e:
+                                LOG.debug(f"Could not extract word timings: {_e}")
 
                         # Trigger callback with final words (CUMULATIVE list)
                         # word_timings: list of (start_sec, end_sec) parallel to words, or None
