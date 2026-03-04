@@ -85,7 +85,7 @@ def expand_pattern_entities(pattern, entity_expansions):
         format_type = config.get('format', 'csv')
         column = config.get('column', 0)
 
-        values = []
+        values = list(config.get('values', []))
         for file_path in files:
             try:
                 with open(file_path, 'r') as f:

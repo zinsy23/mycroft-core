@@ -348,9 +348,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 if elapsed_ft > self.free_text_hard_timeout:
                     LOG.info(f"Free-text hard timeout ({self.free_text_hard_timeout}s) — executing")
                     self._execute_free_text()
-                    # Return to deterministic mode and continue session
-                    self.mode = MODE_DETERMINISTIC
-                    self.free_text_intent = None
+                    self.session_active = False
+                    break
 
                 # Free-text stop timer (silence after a content word)
                 if self.free_text_stop_timer is not None:
@@ -358,8 +357,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     if silence_elapsed > self.free_text_current_stop_silence:
                         LOG.info(f"Free-text stop silence ({silence_elapsed:.1f}s) — executing")
                         self._execute_free_text()
-                        self.mode = MODE_DETERMINISTIC
-                        self.free_text_intent = None
+                        self.session_active = False
+                        break
 
             # Close repeat window if it has expired
             if self.repeat_window_open and self.last_command_dispatch_time:
@@ -527,6 +526,23 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             LOG.warning("Whisper returned empty transcription — not dispatching")
             return
 
+        # Strip any leading words from Whisper output that duplicate the trigger prefix.
+        # This happens when the audio slice starts slightly before the trigger word's
+        # true end (INTERIM timestamps are less precise than FINAL).
+        trigger_words = self.free_text_trigger_utterance.lower().split()
+        text_words = text.split()
+        i = 0
+        for tw in trigger_words:
+            if i < len(text_words) and text_words[i].lower().rstrip('.,!?') == tw:
+                i += 1
+        if i > 0:
+            text = ' '.join(text_words[i:])
+            LOG.info(f"Stripped {i} duplicate trigger word(s) from Whisper output")
+
+        if not text:
+            LOG.warning("Whisper output was only trigger words — not dispatching")
+            return
+
         # Build the full utterance: deterministic prefix + whisper text
         full_utterance = f"{self.free_text_trigger_utterance} {text}".strip()
         LOG.info(f"✓ FREE-TEXT COMMAND: '{full_utterance}' (intent: {self.free_text_intent})")
@@ -618,7 +634,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         if self.debug:
             self.emit('mycroft.debug.whisper.partial', {'utterance': word})
 
-        match = self.interim_matcher.add_word(word)
+        match, _ = self.interim_matcher.add_word(word)
 
         if match:
             utterance = match['utterance']
@@ -668,7 +684,22 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     if self.mode != MODE_FREE_TEXT:
                         # Cancelled mid-word-loop
                         break
-            # INTERIM words ignored in free-text mode
+            else:
+                # INTERIM in free-text mode: only use transcript growth as a
+                # speech-activity signal. Riva sends hallucinated INTERIM callbacks
+                # continuously even during silence, so we can't trust content or
+                # blindly update last_word_time (that would break session timeout).
+                # Only act when the transcript is genuinely growing (new words spoken).
+                if len(words) > self.riva_interim_word_count:
+                    self.riva_interim_word_count = len(words)
+                    last_word = words[-1].lower()
+                    self.last_word_time = now
+                    if last_word not in self.filler_words:
+                        if last_word in self.non_terminal_words:
+                            self.free_text_current_stop_silence = self.free_text_stop_nonterminal
+                        else:
+                            self.free_text_current_stop_silence = self.free_text_stop_silence
+                        self.free_text_stop_timer = now
             return
 
         # ── DETERMINISTIC / REPEAT mode: full dual-matcher logic ─────────────
@@ -839,15 +870,20 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 self.riva_interim_word_count = current_count
 
             LOG.info(f"[RIVA {stream_name}] {word}")
-            self.last_word_time = now
 
             if self.debug:
                 event_name = ('mycroft.debug.riva.final' if is_final
                               else 'mycroft.debug.riva.partial')
                 self.emit(event_name, {'utterance': word})
 
-            match = matcher.add_word(word, stream_type=stream_name,
-                                     transcript_position=current_count - 1)
+            match, word_accepted = matcher.add_word(word, stream_type=stream_name,
+                                                    transcript_position=current_count - 1)
+
+            # Only update last_word_time when the word was genuinely accepted by a
+            # matcher path — hallucinated garbage words that no path accepts should
+            # not extend the session timeout.
+            if word_accepted:
+                self.last_word_time = now
 
             if match:
                 utterance = match['utterance']

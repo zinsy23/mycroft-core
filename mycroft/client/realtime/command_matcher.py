@@ -498,9 +498,9 @@ class StreamingCommandMatcher:
                 # Clear all paths for next command
                 self.active_paths = []
 
-                return match
+                return match, True
 
-        return None
+        return None, word_accepted
 
     def should_timeout(self):
         """Check if global budget is exhausted."""
