@@ -1325,6 +1325,36 @@ def handle_vosk_final(event):
         add_log_message(f"[VOSK FINAL] {utterance}")
 
 
+def handle_realtime_session_start(event):
+    add_log_message("--- Realtime session started ---")
+
+
+def handle_realtime_command_matched(event):
+    utterance = event.data.get('utterance', '')
+    stream = event.data.get('stream', '')
+    add_log_message(f"[CMD] {utterance}  ({stream})")
+
+
+def handle_realtime_mode_changed(event):
+    mode = event.data.get('mode', '')
+    if mode == 'free_text':
+        trigger = event.data.get('trigger', '')
+        add_log_message(f"[FREE TEXT] triggered by: '{trigger}'")
+    elif mode == 'repeat':
+        utterance = event.data.get('utterance', '')
+        n = event.data.get('n', 1)
+        add_log_message(f"[REPEAT] '{utterance}' x{n} more")
+
+
+def handle_realtime_manage(event):
+    action = event.data.get('action', '')
+    target = event.data.get('target', '')
+    muted = event.data.get('muted', False)
+    disabled = event.data.get('disabled', [])
+    state = 'ALL MUTED' if muted else (f"disabled: {', '.join(disabled)}" if disabled else 'all enabled')
+    add_log_message(f"[MANAGE] {action} {target}  ({state})")
+
+
 def gui_main(stdscr):
     global scr
     global bus
@@ -1351,6 +1381,10 @@ def gui_main(stdscr):
     bus.on('mycroft.ready', handle_mycroft_ready)
     bus.on('mycroft.debug.vosk.partial', handle_vosk_partial)
     bus.on('mycroft.debug.vosk.final', handle_vosk_final)
+    bus.on('mycroft.realtime.session_start', handle_realtime_session_start)
+    bus.on('mycroft.realtime.command_matched', handle_realtime_command_matched)
+    bus.on('mycroft.realtime.mode_changed', handle_realtime_mode_changed)
+    bus.on('mycroft.realtime.manage', handle_realtime_manage)
 
     add_log_message("Establishing Mycroft Messagebus connection...")
 
