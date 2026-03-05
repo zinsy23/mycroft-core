@@ -425,7 +425,7 @@ class StreamingCommandMatcher:
         if not word:
             return None
 
-        LOG.info(f"Processing word: '{word}' | Active paths: {len(self.active_paths)} | Global budget: {self.global_budget}")
+        LOG.debug(f"Processing word: '{word}' | Active paths: {len(self.active_paths)} | Global budget: {self.global_budget}")
 
         # Track if word was accepted by any path
         word_accepted = False
@@ -451,7 +451,7 @@ class StreamingCommandMatcher:
                 elif 'entity' in first_item:
                     valid_first_words.add('<ENTITY>')
 
-        LOG.info(f"  Valid first words count: {len(valid_first_words)}, word '{word}' valid: {word in valid_first_words}")
+        LOG.debug(f"  Valid first words count: {len(valid_first_words)}, word '{word}' valid: {word in valid_first_words}")
 
         # If word is valid as first word, create new path with its transcript position
         if word in valid_first_words or '<ENTITY>' in valid_first_words:
@@ -461,7 +461,7 @@ class StreamingCommandMatcher:
             new_path.try_add_word(word, stream_type=stream_type)
             self.active_paths.append(new_path)
             word_accepted = True
-            LOG.info(f"  ✓ Created new path {new_path.path_id} starting with '{word}' at position {pos}")
+            LOG.debug(f"  ✓ Created new path {new_path.path_id} starting with '{word}' at position {pos}")
 
         # INTERIM/FINAL Budget Split:
         # - INTERIM filler words do NOT impact global budget (optimistic matching)
@@ -471,14 +471,14 @@ class StreamingCommandMatcher:
         if not word_accepted and len(self.active_paths) > 0:
             if stream_type == "FINAL":
                 self.global_budget = max(0, self.global_budget - 1)
-                LOG.info(f"  ✗ FINAL filler rejected by {len(self.active_paths)} paths. Global budget now: {self.global_budget}")
+                LOG.debug(f"  ✗ FINAL filler rejected by {len(self.active_paths)} paths. Global budget now: {self.global_budget}")
             else:
-                LOG.info(f"  ○ INTERIM filler (no budget impact): '{word}' rejected by {len(self.active_paths)} paths")
+                LOG.debug(f"  ○ INTERIM filler (no budget impact): '{word}' rejected by {len(self.active_paths)} paths")
         elif not word_accepted and len(self.active_paths) == 0:
             if stream_type == "FINAL":
-                LOG.info(f"  ○ FINAL word '{word}' not valid (no active paths to compete)")
+                LOG.debug(f"  ○ FINAL word '{word}' not valid (no active paths to compete)")
             else:
-                LOG.info(f"  ○ INTERIM word '{word}' not valid (no active paths to compete)")
+                LOG.debug(f"  ○ INTERIM word '{word}' not valid (no active paths to compete)")
 
         # Prune unviable paths
         before_count = len(self.active_paths)
@@ -487,11 +487,11 @@ class StreamingCommandMatcher:
         pruned_count = before_count - len(self.active_paths)
 
         if pruned_count > 0:
-            LOG.info(f"  ⚠️  Pruned {pruned_count} paths, {len(self.active_paths)} remain")
+            LOG.debug(f"  ⚠️  Pruned {pruned_count} paths, {len(self.active_paths)} remain")
             for path, viable in pruned_paths:
                 if not viable:
                     reason = "budget exhausted" if path.local_budget <= 0 else "unknown"
-                    LOG.info(f"     Path {path.path_id} pruned: {path.matched_words} - {reason}")
+                    LOG.debug(f"     Path {path.path_id} pruned: {path.matched_words} - {reason}")
 
         # Log top paths for debugging
         if self.active_paths:

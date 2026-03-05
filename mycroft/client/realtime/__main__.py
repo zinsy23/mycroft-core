@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from threading import Lock
+from threading import Lock, Thread
 import os
 
 from mycroft import dialog
@@ -224,33 +224,32 @@ def on_error(e='Unknown'):
 
 
 def handle_whisper_partial(event):
-    """Forward Whisper partial results to messagebus for CLI display."""
-    bus.emit(Message('mycroft.debug.whisper.partial', event))
+    _emit_async('mycroft.debug.whisper.partial', event)
 
 
 def handle_whisper_final(event):
-    """Forward Whisper final results to messagebus for CLI display."""
-    bus.emit(Message('mycroft.debug.whisper.final', event))
+    _emit_async('mycroft.debug.whisper.final', event)
+
+
+def _emit_async(msg_type, data):
+    """Emit a display-only bus message off the loop thread to avoid blocking."""
+    Thread(target=bus.emit, args=(Message(msg_type, data),), daemon=True).start()
 
 
 def handle_realtime_session_start(event):
-    """Forward realtime session start to messagebus for CLI display."""
-    bus.emit(Message('mycroft.realtime.session_start', event))
+    _emit_async('mycroft.realtime.session_start', event)
 
 
 def handle_realtime_command_matched(event):
-    """Forward realtime command match to messagebus for CLI display."""
-    bus.emit(Message('mycroft.realtime.command_matched', event))
+    _emit_async('mycroft.realtime.command_matched', event)
 
 
 def handle_realtime_mode_changed(event):
-    """Forward realtime mode change to messagebus for CLI display."""
-    bus.emit(Message('mycroft.realtime.mode_changed', event))
+    _emit_async('mycroft.realtime.mode_changed', event)
 
 
 def handle_realtime_manage(event):
-    """Forward realtime enable/disable command to messagebus for CLI display."""
-    bus.emit(Message('mycroft.realtime.manage', event))
+    _emit_async('mycroft.realtime.manage', event)
 
 
 def connect_loop_events(loop):

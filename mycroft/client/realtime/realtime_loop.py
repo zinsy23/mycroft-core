@@ -998,8 +998,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         new_words = words[current_count:]
 
         if new_words:
-            LOG.debug(f"[RIVA {stream_name}] New words: {new_words} "
-                      f"(processed {current_count}/{len(words)})")
+            LOG.debug(f"[RIVA {stream_name}] New words: {new_words} (processed {current_count}/{len(words)})")
 
         # Update previous transcript
         if is_final:
@@ -1015,7 +1014,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             else:
                 self.riva_interim_word_count = current_count
 
-            LOG.info(f"[RIVA {stream_name}] {word}")
+            LOG.debug(f"[RIVA {stream_name}] {word}")
 
             if self.debug:
                 event_name = ('mycroft.debug.riva.final' if is_final
