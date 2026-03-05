@@ -390,6 +390,20 @@ class StreamingCommandMatcher:
 
         LOG.debug(f"Registered {len(pattern_lines)} patterns for {intent_name}")
 
+    def _rebuild_all_sequences(self):
+        """Rebuild all_sequences cache from current patterns list.
+
+        Called after shared_patterns is repopulated (enable/disable commands).
+        """
+        self.all_sequences = []
+        for pattern in self.patterns:
+            for sequence in pattern.word_sequences:
+                self.all_sequences.append({
+                    'intent': pattern.intent_name,
+                    'pattern': pattern.original_line,
+                    'sequence': sequence
+                })
+
     def add_word(self, word, stream_type="FINAL", transcript_position=None):
         """Process a new word from STT using multi-path matching.
 

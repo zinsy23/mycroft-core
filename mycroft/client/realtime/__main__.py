@@ -233,6 +233,26 @@ def handle_whisper_final(event):
     bus.emit(Message('mycroft.debug.whisper.final', event))
 
 
+def handle_realtime_session_start(event):
+    """Forward realtime session start to messagebus for CLI display."""
+    bus.emit(Message('mycroft.realtime.session_start', event))
+
+
+def handle_realtime_command_matched(event):
+    """Forward realtime command match to messagebus for CLI display."""
+    bus.emit(Message('mycroft.realtime.command_matched', event))
+
+
+def handle_realtime_mode_changed(event):
+    """Forward realtime mode change to messagebus for CLI display."""
+    bus.emit(Message('mycroft.realtime.mode_changed', event))
+
+
+def handle_realtime_manage(event):
+    """Forward realtime enable/disable command to messagebus for CLI display."""
+    bus.emit(Message('mycroft.realtime.manage', event))
+
+
 def connect_loop_events(loop):
     loop.on('recognizer_loop:utterance', handle_utterance)
     loop.on('recognizer_loop:speech.recognition.unknown', handle_unknown)
@@ -244,6 +264,10 @@ def connect_loop_events(loop):
     loop.on('recognizer_loop:no_internet', handle_no_internet)
     loop.on('mycroft.debug.whisper.partial', handle_whisper_partial)
     loop.on('mycroft.debug.whisper.final', handle_whisper_final)
+    loop.on('mycroft.realtime.session_start', handle_realtime_session_start)
+    loop.on('mycroft.realtime.command_matched', handle_realtime_command_matched)
+    loop.on('mycroft.realtime.mode_changed', handle_realtime_mode_changed)
+    loop.on('mycroft.realtime.manage', handle_realtime_manage)
 
 
 def handle_intents_ready(event):
@@ -251,6 +275,7 @@ def handle_intents_ready(event):
     from mycroft.client.realtime.pattern_loader import (
         load_entity_expansions, expand_pattern_entities,
         _split_free_text_pattern, load_quantifier_patterns,
+        build_management_patterns,
         FREE_TEXT_TAG, REPEAT_TAG
     )
     from mycroft.configuration import Configuration
@@ -264,14 +289,28 @@ def handle_intents_ready(event):
     realtime_config = Configuration.get().get('realtime', {})
     free_text_entity = realtime_config.get('free_text', {}).get('entity_name', 'free_text')
     repeat_config = realtime_config.get('repeat', {})
+    command_groups = realtime_config.get('command_groups', [])
 
-    # Clear existing patterns
+    # Clear all pattern state for reload
     loop.shared_patterns.clear()
+    loop.skill_pattern_groups.clear()
+    loop.protected_patterns.clear()
+    loop.interim_matcher.patterns = loop.shared_patterns
+    loop.final_matcher.patterns = loop.shared_patterns
+    loop.interim_matcher.all_sequences = []
+    loop.final_matcher.all_sequences = []
 
     det_count = 0
     ft_count = 0
 
-    # Load each intent file into the command matcher
+    # Helper: find skill_prefix for an intent_name
+    def _get_skill_prefix(intent_name):
+        for g in command_groups:
+            if intent_name.startswith(g['skill_prefix']):
+                return g['skill_prefix']
+        return None
+
+    # Load each intent file — register into skill_pattern_groups (not shared_patterns directly)
     for intent_name, file_path in intent_files.items():
         try:
             skill_path = os.path.dirname(os.path.dirname(os.path.dirname(file_path)))
@@ -292,7 +331,11 @@ def handle_intents_ready(event):
                     else:
                         det_lines.append(exp_pattern)
 
+            skill_prefix = _get_skill_prefix(intent_name)
+
             if det_lines:
+                # Register into a temporary matcher to get CommandPattern objects,
+                # then move them to skill_pattern_groups
                 loop.interim_matcher.register_intent(intent_name, det_lines)
                 loop.final_matcher.register_intent(intent_name, det_lines)
                 det_count += len(det_lines)
@@ -307,14 +350,40 @@ def handle_intents_ready(event):
         except Exception as e:
             LOG.warning(f"Failed to load intent {intent_name} from {file_path}: {e}")
 
-    # Register repeat patterns from quantifiers file
+    # Register repeat patterns (always active — go into protected layer)
     repeat_patterns = load_quantifier_patterns(repeat_config)
     for repeat_intent, patterns in repeat_patterns.items():
         loop.interim_matcher.register_intent(repeat_intent, patterns)
         loop.final_matcher.register_intent(repeat_intent, patterns)
 
+    # Build and register management patterns (always active — protected layer)
+    mgmt_patterns = build_management_patterns(command_groups)
+    for mgmt_intent, patterns in mgmt_patterns.items():
+        loop.interim_matcher.register_intent(mgmt_intent, patterns)
+        loop.final_matcher.register_intent(mgmt_intent, patterns)
+
+    # Now partition all_sequences into skill_pattern_groups vs protected_patterns
+    # by checking each pattern's intent name against command_groups
+    loop.protected_patterns.clear()
+    loop.skill_pattern_groups.clear()
+
+    for pattern in loop.shared_patterns:
+        intent_name = pattern.intent_name
+        skill_prefix = _get_skill_prefix(intent_name)
+        if skill_prefix:
+            if skill_prefix not in loop.skill_pattern_groups:
+                loop.skill_pattern_groups[skill_prefix] = []
+            loop.skill_pattern_groups[skill_prefix].append(pattern)
+        else:
+            loop.protected_patterns.append(pattern)
+
+    # Rebuild shared_patterns from the partitioned groups respecting current mute/disabled state
+    loop._rebuild_shared_patterns()
+
     LOG.info(f"Loaded {det_count} deterministic + {ft_count} free-text trigger patterns; "
-             f"{len(repeat_patterns)} repeat intent variants")
+             f"{len(repeat_patterns)} repeat intent variants; "
+             f"{len(mgmt_patterns)} management patterns; "
+             f"{len(loop.skill_pattern_groups)} skill groups")
 
 
 def connect_bus_events(bus):

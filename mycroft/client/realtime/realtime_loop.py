@@ -22,7 +22,7 @@ from mycroft.client.realtime.command_matcher import StreamingCommandMatcher
 from mycroft.client.realtime.whisper_streaming_wrapper import WhisperStreamingThread
 from mycroft.client.realtime.riva_streaming import RivaStreamingThread, RIVA_AVAILABLE
 from mycroft.client.realtime.free_text_stt import load_free_text_stt
-from mycroft.client.realtime.pattern_loader import FREE_TEXT_TAG, REPEAT_TAG
+from mycroft.client.realtime.pattern_loader import FREE_TEXT_TAG, REPEAT_TAG, MANAGE_TAG
 from mycroft.configuration import Configuration
 from mycroft.util.log import LOG
 
@@ -179,6 +179,13 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.interim_matcher.patterns = self.shared_patterns
         self.final_matcher.patterns = self.shared_patterns
 
+        # Command group management
+        self.command_groups = self.realtime_config.get('command_groups', [])
+        self.skill_pattern_groups = {}   # skill_prefix → list of CommandPattern objects
+        self.protected_patterns = []     # always-active: management commands
+        self.manually_disabled = set()   # skill_prefixes manually disabled
+        self.global_mute = False         # True when "disable commands" fired
+
         # Audio batching buffer for whisper streaming (legacy path)
         self.whisper_chunk_buffer = []
         self.whisper_chunk_size = 8000  # 0.5s at 16kHz
@@ -287,6 +294,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         recording first then transcribing.
         """
         LOG.info("🎤 Starting realtime streaming session")
+        self.emit('mycroft.realtime.session_start', {})
 
         self.session_active = True
         self.last_word_time = time.time()
@@ -463,6 +471,85 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.repeat_window_open = False
         LOG.info("Repeat window closed")
 
+    # ── Command group management ──────────────────────────────────────────────
+
+    def _is_duplicate(self, key, now):
+        """Check executed_utterances_history for a recent exact or alias match."""
+        for entry in self.executed_utterances_history:
+            if len(entry) < 3:
+                continue
+            prev_key, prev_time = entry[0], entry[1]
+            elapsed = now - prev_time
+            if key == prev_key and elapsed < self.dedup_window_seconds:
+                return True
+            curr_words_list = key.split()
+            prev_words_list = prev_key.split()
+            if (len(curr_words_list) > 1 and len(prev_words_list) > 1
+                    and curr_words_list[1:] == prev_words_list[1:]
+                    and curr_words_list[0] != prev_words_list[0]
+                    and elapsed < 1.5):
+                return True
+        return False
+
+    def _record_execution(self, key, now, stream_name, matched_words=None,
+                          match_position=None, intent=None):
+        """Append an entry to executed_utterances_history and cap its size."""
+        self.executed_utterances_history.append(
+            (key, now, stream_name, matched_words or [], match_position, intent or key)
+        )
+        if len(self.executed_utterances_history) > self.dedup_history_size:
+            self.executed_utterances_history.pop(0)
+
+    def _rebuild_shared_patterns(self):
+        """Repopulate shared_patterns from protected + enabled skill groups.
+
+        Called after any enable/disable command. shared_patterns is the same
+        list object both matchers reference, so clearing+extending it is enough.
+        all_sequences is then rebuilt on both matchers to stay in sync.
+        """
+        self.shared_patterns.clear()
+        self.shared_patterns.extend(self.protected_patterns)
+        if not self.global_mute:
+            for prefix, patterns in self.skill_pattern_groups.items():
+                if prefix not in self.manually_disabled:
+                    self.shared_patterns.extend(patterns)
+        self.interim_matcher._rebuild_all_sequences()
+        self.final_matcher._rebuild_all_sequences()
+        LOG.info(f"[MANAGE] Rebuilt shared_patterns: {len(self.shared_patterns)} patterns "
+                 f"(mute={self.global_mute}, disabled={self.manually_disabled})")
+
+    def _handle_manage_command(self, action, target):
+        """Handle an enable/disable voice command.
+
+        Args:
+            action: 'enable' or 'disable'
+            target: skill_prefix string, or None for global ('commands')
+        """
+        if action == 'disable' and target is None:
+            self.global_mute = True
+        elif action == 'enable' and target is None:
+            self.global_mute = False
+        elif action == 'disable' and target:
+            self.manually_disabled.add(target)
+        elif action == 'enable' and target:
+            self.manually_disabled.discard(target)
+        self._rebuild_shared_patterns()
+        LOG.info(f"[MANAGE] {action} '{target or 'commands'}' — "
+                 f"mute={self.global_mute} disabled={self.manually_disabled}")
+        target_label = target or 'commands'
+        prefix_to_name = {g['skill_prefix']: g['name'] for g in self.command_groups}
+        for g in self.command_groups:
+            if g.get('skill_prefix') == target:
+                target_label = g['name']
+                break
+        disabled_names = [prefix_to_name.get(p, p) for p in self.manually_disabled]
+        self.emit('mycroft.realtime.manage', {
+            'action': action,
+            'target': target_label,
+            'muted': self.global_mute,
+            'disabled': disabled_names
+        })
+
     # ── Free-text mode ────────────────────────────────────────────────────────
 
     def _enter_free_text_mode(self, intent_name, trigger_utterance, trigger_word_end_time=None):
@@ -501,6 +588,11 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
         LOG.info(f"🎙️  FREE-TEXT MODE: intent='{intent_name}' prefix='{trigger_utterance}' "
                  f"audio_start={self.free_text_audio_start_idx}")
+        self.emit('mycroft.realtime.mode_changed', {
+            'mode': 'free_text',
+            'trigger': trigger_utterance,
+            'intent': intent_name
+        })
 
     def _on_free_text_final_word(self, word):
         """Process a FINAL stream word while in free-text mode.
@@ -610,6 +702,11 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             'utterances': [full_utterance],
             'lang': self.lang
         })
+        self.emit('mycroft.realtime.command_matched', {
+            'utterance': full_utterance,
+            'intent': self.free_text_intent,
+            'stream': 'FREE_TEXT'
+        })
 
         if self.debug:
             self.emit('mycroft.debug.riva.matched', {'utterance': full_utterance})
@@ -617,11 +714,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # Record in history (free-text commands don't update last_executed_command
         # since they're not repeatable in the same way)
         now = time.time()
-        self.executed_utterances_history.append(
-            (full_utterance, now, 'FREE_TEXT', [], None, self.free_text_intent)
-        )
-        if len(self.executed_utterances_history) > self.dedup_history_size:
-            self.executed_utterances_history.pop(0)
+        self._record_execution(full_utterance, now, 'FREE_TEXT',
+                               intent=self.free_text_intent)
 
         # Reset matchers
         self.interim_matcher.reset()
@@ -653,6 +747,11 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             return
 
         LOG.info(f"🔁 REPEAT MODE: '{utterance}' × {additional} more time(s) (n={n})")
+        self.emit('mycroft.realtime.mode_changed', {
+            'mode': 'repeat',
+            'utterance': utterance,
+            'n': additional
+        })
 
         now = time.time()
         for i in range(additional):
@@ -665,10 +764,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 self.emit('mycroft.debug.riva.matched', {'utterance': utterance})
 
         # Add to dedup history (repeats themselves don't update last_executed_command)
-        repeat_entry = (f"[repeat×{additional}] {utterance}", now, 'REPEAT', [], None, intent)
-        self.executed_utterances_history.append(repeat_entry)
-        if len(self.executed_utterances_history) > self.dedup_history_size:
-            self.executed_utterances_history.pop(0)
+        self._record_execution(f"[repeat×{additional}] {utterance}", now, 'REPEAT',
+                               intent=intent)
 
         # Reset matchers and close repeat window until next non-repeat command
         self.interim_matcher.reset()
@@ -825,7 +922,9 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
                     time_since_last = now - last_time
 
-                    if last_stream == "INTERIM" and time_since_last < 1.0:
+                    if (last_stream == "INTERIM" and time_since_last < 1.0
+                            and not last_utterance.startswith(MANAGE_TAG)
+                            and not last_utterance.startswith(REPEAT_TAG)):
                         should_undo = False
 
                         if last_matched_words is None or last_match_position is None:
@@ -960,9 +1059,30 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     except ValueError:
                         LOG.warning(f"Invalid repeat intent tag: {intent}")
                         continue
+                    if self._is_duplicate(intent, now):
+                        continue
                     self.interim_matcher.reset()
                     self.final_matcher.reset()
                     self._enter_repeat_mode(n, is_bare)
+                    self._record_execution(intent, now, stream_name)
+                    break
+
+                # ── MANAGE trigger ────────────────────────────────────────────
+                if intent.startswith(MANAGE_TAG):
+                    tag_body = intent[len(MANAGE_TAG):]  # e.g. 'enable:search'
+                    action, _, target_name = tag_body.partition(':')
+                    target_prefix = None  # None = global ('commands')
+                    if target_name != 'commands':
+                        for g in self.command_groups:
+                            if g['name'] == target_name:
+                                target_prefix = g['skill_prefix']
+                                break
+                    if self._is_duplicate(intent, now):
+                        continue
+                    self.interim_matcher.reset()
+                    self.final_matcher.reset()
+                    self._handle_manage_command(action, target_prefix)
+                    self._record_execution(intent, now, stream_name)
                     break
 
                 # ── FINAL cross-command stitch guard ──────────────────────────
@@ -994,38 +1114,19 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                             continue
 
                 # ── Deduplication ─────────────────────────────────────────────
-                LOG.info(f"[DEDUP CHECK] '{utterance}' | History: "
-                         f"{[(e[0], f'{now - e[1]:.1f}s ago', e[2]) for e in self.executed_utterances_history]}")
-                is_duplicate = False
-                for entry in self.executed_utterances_history:
-                    if len(entry) >= 3:
-                        prev_utterance, prev_time = entry[0], entry[1]
-                    else:
-                        continue
-                    elapsed = now - prev_time
-                    if utterance == prev_utterance and elapsed < self.dedup_window_seconds:
-                        LOG.info(f"⏭️  Skipping duplicate: '{utterance}' "
-                                 f"({elapsed:.1f}s ago by {entry[2]})")
-                        is_duplicate = True
-                        break
-                    curr_words_list = utterance.split()
-                    prev_words_list = prev_utterance.split()
-                    if (len(curr_words_list) > 1 and len(prev_words_list) > 1
-                            and curr_words_list[1:] == prev_words_list[1:]
-                            and curr_words_list[0] != prev_words_list[0]
-                            and elapsed < 1.5):
-                        LOG.info(f"⏭️  Skipping alias duplicate: '{utterance}' same as "
-                                 f"'{prev_utterance}' ({elapsed:.2f}s ago by {entry[2]})")
-                        is_duplicate = True
-                        break
-
-                if is_duplicate:
+                if self._is_duplicate(utterance, now):
+                    LOG.info(f"⏭️  Skipping duplicate: '{utterance}'")
                     continue
 
                 # ── Dispatch ──────────────────────────────────────────────────
                 self.emit('recognizer_loop:utterance', {
                     'utterances': [utterance],
                     'lang': self.lang
+                })
+                self.emit('mycroft.realtime.command_matched', {
+                    'utterance': utterance,
+                    'intent': intent,
+                    'stream': stream_name
                 })
 
                 if self.debug:
@@ -1045,12 +1146,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 for i in range(len(words) - len(matched_words) + 1):
                     if words[i:i + len(matched_words)] == matched_words:
                         match_position = i
-
-                self.executed_utterances_history.append(
-                    (utterance, now, stream_name, matched_words, match_position, intent)
-                )
-                if len(self.executed_utterances_history) > self.dedup_history_size:
-                    self.executed_utterances_history.pop(0)
+                self._record_execution(utterance, now, stream_name, matched_words,
+                                       match_position, intent)
 
                 # Advance min replay position
                 if match_position is not None:

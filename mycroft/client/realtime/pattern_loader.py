@@ -20,6 +20,35 @@ from mycroft.util.log import LOG
 # Tag prefixes used in intent names to signal mode switches
 FREE_TEXT_TAG = '__FREE_TEXT__:'
 REPEAT_TAG = '__REPEAT__:'
+MANAGE_TAG = '__MANAGE__:'
+
+
+def build_management_patterns(command_groups):
+    """Build enable/disable management patterns from command_groups config.
+
+    Returns dict of {tagged_intent: [pattern_line]} for all combinations.
+    These are registered into the protected pattern layer (always active).
+
+    Args:
+        command_groups: list of {'name': str, 'skill_prefix': str} dicts
+
+    Returns:
+        dict mapping tagged intent names to single-element pattern lists
+    """
+    patterns = {}
+    group_names = [g['name'] for g in command_groups]
+
+    for action in ('enable', 'disable'):
+        # "enable commands" / "disable commands" — global mute/unmute
+        tagged = f'{MANAGE_TAG}{action}:commands'
+        patterns[tagged] = [f'{action} commands']
+
+        # "enable search" / "disable search" etc — per-skill
+        for name in group_names:
+            tagged = f'{MANAGE_TAG}{action}:{name}'
+            patterns[tagged] = [f'{action} {name}']
+
+    return patterns
 
 
 def load_entity_expansions(skill_path):
