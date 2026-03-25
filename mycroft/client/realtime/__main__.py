@@ -91,13 +91,22 @@ def handle_wakeword(event):
 
 def handle_utterance(event):
     LOG.info("Utterance: " + str(event['utterances']))
-    context = {'client_name': 'mycroft_listener',
-               'source': 'audio',
-               'destination': ["skills"]}
-    if 'ident' in event:
-        ident = event.pop('ident')
-        context['ident'] = ident
-    bus.emit(Message('recognizer_loop:utterance', event, context))
+    intent = event.pop('intent', None)
+    if intent:
+        # Realtime already matched — emit directly to the skill, bypassing Padatious
+        utterance = event['utterances'][0]
+        bus.emit(Message(intent, {
+            'utterance': utterance,
+            'utterances': event['utterances']
+        }))
+    else:
+        context = {'client_name': 'mycroft_listener',
+                   'source': 'audio',
+                   'destination': ["skills"]}
+        if 'ident' in event:
+            ident = event.pop('ident')
+            context['ident'] = ident
+        bus.emit(Message('recognizer_loop:utterance', event, context))
 
 
 def handle_unknown():
@@ -240,6 +249,10 @@ def handle_realtime_session_start(event):
     _emit_async('mycroft.realtime.session_start', event)
 
 
+def handle_realtime_session_end(event):
+    _emit_async('mycroft.realtime.session_end', event)
+
+
 def handle_realtime_command_matched(event):
     _emit_async('mycroft.realtime.command_matched', event)
 
@@ -264,6 +277,7 @@ def connect_loop_events(loop):
     loop.on('mycroft.debug.whisper.partial', handle_whisper_partial)
     loop.on('mycroft.debug.whisper.final', handle_whisper_final)
     loop.on('mycroft.realtime.session_start', handle_realtime_session_start)
+    loop.on('mycroft.realtime.session_end', handle_realtime_session_end)
     loop.on('mycroft.realtime.command_matched', handle_realtime_command_matched)
     loop.on('mycroft.realtime.mode_changed', handle_realtime_mode_changed)
     loop.on('mycroft.realtime.manage', handle_realtime_manage)

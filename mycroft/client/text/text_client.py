@@ -1329,6 +1329,10 @@ def handle_realtime_session_start(event):
     add_log_message("--- Realtime session started ---")
 
 
+def handle_realtime_session_end(event):
+    add_log_message("--- Realtime session ended ---")
+
+
 def handle_realtime_command_matched(event):
     utterance = event.data.get('utterance', '')
     stream = event.data.get('stream', '')
@@ -1382,6 +1386,7 @@ def gui_main(stdscr):
     bus.on('mycroft.debug.vosk.partial', handle_vosk_partial)
     bus.on('mycroft.debug.vosk.final', handle_vosk_final)
     bus.on('mycroft.realtime.session_start', handle_realtime_session_start)
+    bus.on('mycroft.realtime.session_end', handle_realtime_session_end)
     bus.on('mycroft.realtime.command_matched', handle_realtime_command_matched)
     bus.on('mycroft.realtime.mode_changed', handle_realtime_mode_changed)
     bus.on('mycroft.realtime.manage', handle_realtime_manage)

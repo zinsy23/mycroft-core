@@ -447,6 +447,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             self.riva_stream_thread.end_session()
 
         LOG.info("Session ended")
+        self.emit('mycroft.realtime.session_end', {})
 
         if stream:
             stream.stream_stop()
@@ -700,7 +701,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # Dispatch to skills
         self.emit('recognizer_loop:utterance', {
             'utterances': [full_utterance],
-            'lang': self.lang
+            'lang': self.lang,
+            'intent': self.free_text_intent
         })
         self.emit('mycroft.realtime.command_matched', {
             'utterance': full_utterance,
@@ -758,7 +760,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             LOG.info(f"  🔁 Repeat {i+1}/{additional}: '{utterance}'")
             self.emit('recognizer_loop:utterance', {
                 'utterances': [utterance],
-                'lang': self.lang
+                'lang': self.lang,
+                'intent': intent
             })
             if self.debug:
                 self.emit('mycroft.debug.riva.matched', {'utterance': utterance})
@@ -1120,7 +1123,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 # ── Dispatch ──────────────────────────────────────────────────
                 self.emit('recognizer_loop:utterance', {
                     'utterances': [utterance],
-                    'lang': self.lang
+                    'lang': self.lang,
+                    'intent': intent
                 })
                 self.emit('mycroft.realtime.command_matched', {
                     'utterance': utterance,
