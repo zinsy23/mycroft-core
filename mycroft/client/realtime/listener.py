@@ -104,9 +104,13 @@ class AudioProducer(Thread):
                         LOG.error('Restarting mic doesn\'t seem to work. '
                                   'Stopping...')
                         raise
-                except Exception:
-                    LOG.exception('Exception in AudioProducer')
-                    raise
+                except Exception as e:
+                    if 'could not broadcast input array' in str(e):
+                        # openwakeword buffer not yet full — skip this chunk
+                        LOG.warning('Wake word buffer not ready, skipping chunk')
+                    else:
+                        LOG.exception('Exception in AudioProducer')
+                        raise
                 else:
                     # Reset restart attempt counter on sucessful audio read
                     restart_attempts = 0
