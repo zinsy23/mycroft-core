@@ -12,6 +12,7 @@ command matching. Supports three operating modes:
 """
 
 import time
+import threading
 from collections import deque
 
 import numpy as np
@@ -83,7 +84,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # Whisper streaming wrapper (legacy whisper-streaming path, not used by default)
         self.whisper_stream_thread = None
 
-        # Free-text secondary STT (batch Whisper for nondeterministic commands)
+        # Free-text secondary STT (batch inference for nondeterministic commands)
         self.free_text_stt = load_free_text_stt(self.realtime_config)
 
         # Free-text config
@@ -594,6 +595,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             'trigger': trigger_utterance,
             'intent': intent_name
         })
+
 
     def _on_free_text_final_word(self, word):
         """Process a FINAL stream word while in free-text mode.
