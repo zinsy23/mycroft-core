@@ -265,8 +265,7 @@ def _initialize_skill_manager(bus, watchdog):
 
 
 def _wait_for_internet_connection():
-    while not connected():
-        time.sleep(1)
+    pass  # offline operation — don't block on internet
 
 
 def shutdown(skill_manager, event_scheduler):

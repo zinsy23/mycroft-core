@@ -141,6 +141,9 @@ class SkillManager(Thread):
         self._loaded_status = False  # True after all skills has loaded
 
         self.skill_updater = SkillUpdater()
+        data_dir = os.path.expanduser(self.config.get('data_dir', '/opt/mycroft'))
+        skills_subdir = self.config['skills'].get('msm', {}).get('directory', 'skills')
+        self._skills_dir = self.config.get('skills_dir') or os.path.join(data_dir, skills_subdir)
         self._define_message_bus_events()
         self.daemon = True
 
@@ -215,8 +218,11 @@ class SkillManager(Thread):
         self._start_settings_update()
 
     def load_priority(self):
-        skills = {skill.name: skill for skill in self.msm.all_skills}
         priority_skills = self.skills_config.get("priority_skills", [])
+        if priority_skills:
+            skills = {skill.name: skill for skill in self.msm.all_skills}
+        else:
+            skills = {}
         for skill_name in priority_skills:
             skill = skills.get(skill_name)
             if skill is not None:
@@ -240,9 +246,9 @@ class SkillManager(Thread):
     def run(self):
         """Load skills and update periodically from disk and internet."""
         self._remove_git_locks()
-        self._connected_event.wait()
-        if (not self.skill_updater.defaults_installed() and
-                self.skills_config["auto_update"]):
+        self._connected_event.set()  # offline operation — don't wait for internet
+        if (self.skills_config["auto_update"] and
+                not self.skill_updater.defaults_installed()):
             LOG.info('Not all default skills are installed, '
                      'performing skill update...')
             self.skill_updater.update_skills()
@@ -276,7 +282,7 @@ class SkillManager(Thread):
 
     def _remove_git_locks(self):
         """If git gets killed from an abrupt shutdown it leaves lock files."""
-        for i in glob(os.path.join(self.msm.skills_dir, '*/.git/index.lock')):
+        for i in glob(os.path.join(self._skills_dir, '*/.git/index.lock')):
             LOG.warning('Found and removed git lock file: ' + i)
             os.remove(i)
 
@@ -322,7 +328,7 @@ class SkillManager(Thread):
         return skill_loader if load_status else None
 
     def _get_skill_directories(self):
-        skill_glob = glob(os.path.join(self.msm.skills_dir, '*/'))
+        skill_glob = glob(os.path.join(self._skills_dir, '*/'))
 
         skill_directories = []
         for skill_dir in skill_glob:

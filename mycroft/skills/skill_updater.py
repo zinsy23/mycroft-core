@@ -55,7 +55,9 @@ class SkillUpdater:
         self.config = Configuration.get()
         update_interval = self.config['skills']['update_interval']
         self.update_interval = int(update_interval) * ONE_HOUR
-        self.dot_msm_path = os.path.join(self.msm.skills_dir, '.msm')
+        skills_dir = self.config['skills'].get('msm', {}).get('directory', 'skills')
+        data_dir = os.path.expanduser(self.config.get('data_dir', '/opt/mycroft'))
+        self.dot_msm_path = os.path.join(data_dir, skills_dir, '.msm')
         self.next_download = self._determine_next_download_time()
         self._log_next_download_time()
         self.installed_skills = set()
