@@ -95,11 +95,6 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self._ft_stop_nonterminal_cfg = _ft_cfg.get('stop_silence_non_terminal_seconds')
         self._ft_stop_filler_cfg = _ft_cfg.get('stop_silence_filler_seconds')
         self._ft_hard_timeout_cfg = _ft_cfg.get('hard_timeout_seconds')
-        # VAD debounce: consecutive loud chunks required before treating as speech again.
-        # Uses two thresholds: start (speech→silence transition) and resume (resets stop timer).
-        # Resume threshold is higher to avoid noise spikes resetting the timer.
-        self.free_text_vad_min_loud_chunks = _ft_cfg.get('vad_min_loud_chunks', 3)
-        self.free_text_vad_min_resume_chunks = _ft_cfg.get('vad_min_resume_chunks', 8)
         # Cancel words (multi-word phrases checked against last N FINAL words)
         self.free_text_cancel_words = [
             w.lower() for w in _ft_cfg.get('cancel_words',
@@ -198,14 +193,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # Free-text mode state
         self.free_text_intent = None            # e.g. 'websites.search'
         self.free_text_trigger_utterance = None # deterministic prefix that fired
-        self.free_text_audio_start_idx = 0      # index into audio_buffer at trigger
-        self.free_text_mode_start_time = None   # wall time when mode was entered
-        self.free_text_stop_timer = None        # wall time when silence started
-        self.free_text_current_stop_silence = self.free_text_stop_silence
-        self.free_text_last_nonfiller_word = None
-        self.free_text_vad_speaking = False     # True while audio energy is above threshold
-        self.free_text_vad_loud_chunks = 0      # consecutive loud chunks (debounce)
-        self.free_text_vad_suppressed = False   # True after non-terminal/filler silence — waiting for new speech
+        self.free_text_audio_start_idx = 0      # index into audio_buffer at trigger (legacy path)
         # Accumulate FINAL words seen in free-text mode for cancel detection
         self.free_text_final_words_seen = []
 
@@ -301,6 +289,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.last_word_time = time.time()
         self.session_start_time = self.last_word_time
         self.previous_partial_text = ""
+        self._current_source = source
+        self._current_sec_per_buffer = sec_per_buffer
 
         # Reset mode to deterministic
         self.mode = MODE_DETERMINISTIC
@@ -349,33 +339,11 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         while self.session_active:
             now = time.time()
 
-            # Check session timeout (always applies regardless of mode)
+            # Check session timeout
             if now - self.last_word_time > self.session_timeout:
                 LOG.info("Session timeout - ending")
-                if self.mode == MODE_FREE_TEXT:
-                    # Timeout while in free-text mode — execute what we have
-                    LOG.info("Session timeout during free-text mode — executing with what was recorded")
-                    self._execute_free_text()
                 self.session_active = False
                 break
-
-            # Free-text hard timeout (separate from session timeout)
-            if self.mode == MODE_FREE_TEXT:
-                elapsed_ft = now - self.free_text_mode_start_time
-                if elapsed_ft > self.free_text_hard_timeout:
-                    LOG.info(f"Free-text hard timeout ({self.free_text_hard_timeout}s) — executing")
-                    self._execute_free_text()
-                    self.session_active = False
-                    break
-
-                # Free-text stop timer (silence after a content word)
-                if self.free_text_stop_timer is not None:
-                    silence_elapsed = now - self.free_text_stop_timer
-                    if silence_elapsed > self.free_text_current_stop_silence:
-                        LOG.info(f"Free-text stop silence ({silence_elapsed:.1f}s) — executing")
-                        self._execute_free_text()
-                        self.session_active = False
-                        break
 
             # Close repeat window if it has expired
             if self.repeat_window_open and self.last_command_dispatch_time:
@@ -389,53 +357,6 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             chunk_float = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
             for sample in chunk_float:
                 self.audio_buffer.append(sample)
-
-            # ── Free-text VAD: mirrors Mycroft's _record_phrase energy check ──
-            if self.mode == MODE_FREE_TEXT:
-                rr = self.responsive_recognizer
-                energy = rr.calc_energy(chunk, source.SAMPLE_WIDTH)
-                is_loud = energy > rr.energy_threshold * rr.multiplier
-                if not is_loud:
-                    rr._adjust_threshold(energy, sec_per_buffer)
-
-                if is_loud:
-                    self.free_text_vad_loud_chunks += 1
-                    if self.free_text_vad_suppressed:
-                        # Coming back from suppression — need min_loud_chunks to re-enter speech state
-                        if self.free_text_vad_loud_chunks >= self.free_text_vad_min_loud_chunks:
-                            self.free_text_vad_speaking = True
-                            self.free_text_vad_suppressed = False
-                            LOG.info(f"[VAD] Speech resumed after suppression")
-                    elif not self.free_text_vad_speaking:
-                        # Normal silence → speech transition
-                        if self.free_text_vad_loud_chunks >= self.free_text_vad_min_loud_chunks:
-                            self.free_text_vad_speaking = True
-                            LOG.info(f"[VAD] Speech detected ({self.free_text_vad_loud_chunks} chunks)")
-                    else:
-                        # Already speaking — need min_resume_chunks to reset a running stop timer
-                        if self.free_text_vad_loud_chunks >= self.free_text_vad_min_resume_chunks:
-                            if self.free_text_stop_timer is not None:
-                                LOG.info(f"[VAD] Sustained speech — stop timer reset")
-                                self.free_text_stop_timer = None
-                else:
-                    # Silence chunk — reset loud counter
-                    self.free_text_vad_loud_chunks = 0
-                    if self.free_text_vad_speaking:
-                        # Transition: speech → silence
-                        last = self.free_text_last_nonfiller_word
-                        if last is None or (last not in self.filler_words and last not in self.non_terminal_words):
-                            # Content word (or no FINAL word yet) — start stop timer
-                            if self.free_text_stop_timer is None:
-                                self.free_text_stop_timer = now
-                                LOG.info(f"[VAD] Silence after '{last}' — stop timer started")
-                            self.free_text_vad_speaking = False
-                        else:
-                            # Non-terminal/filler — suppress, clear timer, wait for new speech
-                            self.free_text_stop_timer = None
-                            self.free_text_vad_speaking = False
-                            self.free_text_vad_suppressed = True
-                            LOG.info(f"[VAD] Silence after non-terminal/filler '{last}' — suppressed, waiting for speech")
-                    # else: already in silence (timer ticking, or suppressed waiting for speech)
 
             if stream:
                 stream.stream_chunk(chunk)
@@ -555,125 +476,103 @@ class RealtimeRecognizerLoop(RecognizerLoop):
     # ── Free-text mode ────────────────────────────────────────────────────────
 
     def _enter_free_text_mode(self, intent_name, trigger_utterance, trigger_word_end_time=None):
-        """Switch to free-text mode after a deterministic prefix matched.
+        """Record free-text using standard Mycroft VAD, then dispatch via Whisper.
+
+        Stops Riva, blocks on ResponsiveRecognizer._record_phrase until silence,
+        runs Whisper on the result, dispatches the intent, then resets state so
+        the session loop continues normally (no wake word required).
 
         Args:
             intent_name: Original intent (without __FREE_TEXT__: prefix)
             trigger_utterance: The matched deterministic prefix words
-            trigger_word_end_time: Riva end_time (session-relative seconds) of last
-                                   deterministic word, for precise audio buffer slicing.
-                                   If None, use current time estimate.
+            trigger_word_end_time: unused, kept for call-site compatibility
         """
+        if self.mode == MODE_FREE_TEXT:
+            return  # guard against duplicate callbacks
+
         self.mode = MODE_FREE_TEXT
         self.free_text_intent = intent_name
         self.free_text_trigger_utterance = trigger_utterance
-        self.free_text_mode_start_time = time.time()
-        self.free_text_stop_timer = None  # No stop timer until first silence after content word
         self.free_text_final_words_seen = []
-        self.free_text_last_nonfiller_word = None
-        self.free_text_vad_speaking = True  # Assume speaking when mode is entered
-        self.free_text_vad_loud_chunks = 0
-        self.free_text_vad_suppressed = False
 
-        # Calculate audio buffer start index for Whisper slice
-        # audio_buffer is a rolling deque of float32 samples at 16kHz
-        sample_rate = self.realtime_config.get('sample_rate', 16000)
-        if trigger_word_end_time is not None:
-            # Riva provides session-relative timestamps; convert to buffer index
-            # session_start_buffer_len is where the session started in the buffer
-            trigger_samples = int(trigger_word_end_time * sample_rate)
-            self.free_text_audio_start_idx = self.session_start_buffer_len + trigger_samples
-        else:
-            # Estimate: use current buffer length minus a small offset (~150ms)
-            offset_samples = int(0.15 * sample_rate)
-            self.free_text_audio_start_idx = max(0, len(self.audio_buffer) - offset_samples)
-
-        LOG.info(f"🎙️  FREE-TEXT MODE: intent='{intent_name}' prefix='{trigger_utterance}' "
-                 f"audio_start={self.free_text_audio_start_idx}")
+        LOG.info(f"🎙️  FREE-TEXT MODE: intent='{intent_name}' prefix='{trigger_utterance}'")
         self.emit('mycroft.realtime.mode_changed', {
             'mode': 'free_text',
             'trigger': trigger_utterance,
             'intent': intent_name
         })
 
+        # Stop Riva so it doesn't interfere with the blocking record call
+        if self.stt_backend == 'riva' and self.riva_stream_thread:
+            self.riva_stream_thread.end_session()
 
-    def _on_free_text_final_word(self, word):
-        """Process a FINAL stream word while in free-text mode.
+        source = self._current_source
+        sec_per_buffer = self._current_sec_per_buffer
 
-        Classifies word and manages the stop timer. Does not affect the matcher.
-        """
-        word_lower = word.lower()
-        self.free_text_final_words_seen.append(word_lower)
+        # Use Mycroft's built-in NoiseTracker VAD — blocks until silence detected
+        byte_data = ResponsiveRecognizer._record_phrase(
+            self.responsive_recognizer, source, sec_per_buffer
+        )
 
-        # Check for cancel (multi-word phrases — check last N words)
-        seen = self.free_text_final_words_seen
-        for cancel_phrase in self.free_text_cancel_words:
-            phrase_words = cancel_phrase.split()
-            if len(seen) >= len(phrase_words):
-                if seen[-len(phrase_words):] == phrase_words:
-                    LOG.info(f"🚫 Free-text cancelled by '{cancel_phrase}'")
-                    self.mode = MODE_DETERMINISTIC
-                    self.free_text_intent = None
-                    self.free_text_final_words_seen = []
-                    # Reset both matchers — treat cancel as a session reset
-                    self.interim_matcher.reset()
-                    self.final_matcher.reset()
-                    return
+        # Transcribe and dispatch
+        sample_rate = self.realtime_config.get('sample_rate', 16000)
+        audio = np.frombuffer(byte_data, dtype=np.int16).astype(np.float32) / 32768.0
+        self._execute_free_text(audio=audio, sample_rate=sample_rate)
 
-        # Classify word
-        if word_lower in self.filler_words:
-            # Filler — don't touch stop timer (full timeout still applies)
-            LOG.debug(f"  [free-text] filler '{word}' — timer unchanged")
-        elif word_lower in self.non_terminal_words:
-            # Non-terminal — use full session timeout as silence budget
-            self.free_text_current_stop_silence = self.free_text_stop_nonterminal
-            self.free_text_stop_timer = time.time()
-            self.free_text_last_nonfiller_word = word_lower
-            LOG.debug(f"  [free-text] non-terminal '{word}' — extended timer "
-                      f"({self.free_text_stop_nonterminal}s)")
-        else:
-            # Content word — start normal stop timer
-            self.free_text_current_stop_silence = self.free_text_stop_silence
-            self.free_text_stop_timer = time.time()
-            self.free_text_last_nonfiller_word = word_lower
-            LOG.debug(f"  [free-text] content '{word}' — stop timer "
-                      f"({self.free_text_stop_silence}s)")
-
+        # Resume streaming — reset all state, restart Riva, continue session loop
+        self.mode = MODE_DETERMINISTIC
+        self.free_text_intent = None
+        self.free_text_trigger_utterance = None
+        self.free_text_final_words_seen = []
+        self.previous_partial_text = ""
+        self.audio_buffer.clear()
+        self.session_start_buffer_len = 0
+        self.interim_matcher.reset_session()
+        self.final_matcher.reset_session()
+        self.shared_global_budget = self.interim_matcher.global_budget
+        self.interim_min_replay_pos = 0
+        self.final_min_replay_pos = 0
         self.last_word_time = time.time()
 
-    def _execute_free_text(self):
-        """Slice audio buffer, run Whisper batch inference, dispatch intent."""
+        if self.stt_backend == 'riva' and self.riva_stream_thread:
+            self.riva_stream_thread.reset()
+            self.riva_interim_word_count = 0
+            self.riva_final_word_count = 0
+
+    def _execute_free_text(self, audio=None, sample_rate=None):
+        """Run Whisper batch inference on audio and dispatch intent.
+
+        Args:
+            audio: float32 numpy array of audio samples. When provided (standard
+                   VAD path), used directly. When None, falls back to slicing the
+                   internal audio_buffer (legacy path, unused by current VAD).
+            sample_rate: sample rate of audio. Defaults to config value.
+        """
         if not self.free_text_stt:
             LOG.warning("Free-text STT not available — cannot execute free-text command")
             return
 
-        sample_rate = self.realtime_config.get('sample_rate', 16000)
+        if sample_rate is None:
+            sample_rate = self.realtime_config.get('sample_rate', 16000)
 
-        # Slice audio buffer from trigger point to now
-        buf = list(self.audio_buffer)
-        start = max(0, self.free_text_audio_start_idx - (len(self.audio_buffer) -
-                    min(len(buf), len(self.audio_buffer))))
-        # Simpler: work with current buffer length
-        # audio_buffer is a deque with maxlen; oldest samples drop off the left.
-        # We stored free_text_audio_start_idx as an absolute count from session start.
-        # Current position = session_start_buffer_len + samples_since_session_start
-        # Samples in buffer from start_idx onward:
-        buf_array = np.array(buf, dtype=np.float32)
-        buf_total_since_session = len(buf) - self.session_start_buffer_len
-        start_relative = self.free_text_audio_start_idx - self.session_start_buffer_len
-        start_in_buf = len(buf) - buf_total_since_session + start_relative
-        start_in_buf = max(0, int(start_in_buf))
+        if audio is None:
+            # Legacy buffer-slice path (kept for future entity types that may need it)
+            buf = list(self.audio_buffer)
+            buf_array = np.array(buf, dtype=np.float32)
+            buf_total_since_session = len(buf) - self.session_start_buffer_len
+            start_relative = self.free_text_audio_start_idx - self.session_start_buffer_len
+            start_in_buf = len(buf) - buf_total_since_session + start_relative
+            start_in_buf = max(0, int(start_in_buf))
+            audio = buf_array[start_in_buf:]
 
-        audio_slice = buf_array[start_in_buf:]
-
-        if len(audio_slice) < int(sample_rate * 0.3):
-            LOG.warning("Free-text audio slice too short — skipping")
+        if len(audio) < int(sample_rate * 0.3):
+            LOG.warning("Free-text audio too short — skipping")
             return
 
-        LOG.info(f"🎵 Running Whisper on {len(audio_slice)/sample_rate:.1f}s of audio "
+        LOG.info(f"🎵 Running Whisper on {len(audio)/sample_rate:.1f}s of audio "
                  f"(intent: {self.free_text_intent})")
 
-        text = self.free_text_stt.transcribe(audio_slice, sample_rate)
+        text = self.free_text_stt.transcribe(audio, sample_rate)
 
         if not text:
             LOG.warning("Whisper returned empty transcription — not dispatching")
@@ -819,7 +718,6 @@ class RealtimeRecognizerLoop(RecognizerLoop):
           Interim: ["turn"] → ["turn","lights"] → ["turn","lights","on"]
           Final:   ["turn","lights","on"]
 
-        In FREE_TEXT mode: only FINAL words are used for stop detection.
         In REPEAT mode: words are processed normally (mode resets quickly).
         In DETERMINISTIC mode: full dual-matcher logic applies.
 
@@ -831,24 +729,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         now = time.time()
         stream_name = "FINAL" if is_final else "INTERIM"
 
-        # ── FREE_TEXT mode: only process FINAL for stop detection ────────────
+        # During FREE_TEXT mode Riva is stopped, so no words arrive — ignore if any slip through.
         if self.mode == MODE_FREE_TEXT:
-            if is_final:
-                # Find new words since last FINAL callback
-                current_count = self.riva_final_word_count
-                new_words = words[current_count:]
-                self.riva_final_word_count = len(words)
-                self.prev_final_transcript = ' '.join(words)
-                for word in new_words:
-                    self._on_free_text_final_word(word)
-                    if self.mode != MODE_FREE_TEXT:
-                        # Cancelled mid-word-loop
-                        break
-            else:
-                # INTERIM in free-text mode: ignored.
-                # Stop detection is handled by audio VAD (RMS energy) in the session loop.
-                # INTERIM hallucinations during silence would otherwise keep resetting the timer.
-                pass
             return
 
         # ── DETERMINISTIC / REPEAT mode: full dual-matcher logic ─────────────
