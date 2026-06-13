@@ -1307,7 +1307,7 @@ def handle_reconnecting():
 
 def handle_mycroft_ready(event):
     """Handle the mycroft.ready event and display a green 'ready to roll' message"""
-    add_log_message("🎉 Mycroft is all loaded and ready to roll! 🎉", color=CLR_LOG1)
+    add_log_message("🎉 Mycroft is all loaded and ready to roll! 🎉")
     add_log_message("Looking for Messagebus websocket...")
 
 
