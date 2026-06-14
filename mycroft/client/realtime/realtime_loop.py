@@ -196,6 +196,9 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.free_text_audio_start_idx = 0      # index into audio_buffer at trigger (legacy path)
         # Accumulate FINAL words seen in free-text mode for cancel detection
         self.free_text_final_words_seen = []
+        # Pending free-text request set by Riva callback thread; executed by loop thread
+        # to avoid both threads competing for the audio source simultaneously.
+        self._pending_free_text = None          # (intent_name, trigger_utterance) or None
 
         # Repeat mode state
         self.last_executed_command = None       # (utterance, intent) of last non-repeat command
@@ -296,6 +299,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.mode = MODE_DETERMINISTIC
         self.free_text_intent = None
         self.free_text_final_words_seen = []
+        self._pending_free_text = None
 
         # Reset STT backend
         if self.stt_backend == 'riva' and self.riva_stream_thread:
@@ -349,6 +353,14 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             if self.repeat_window_open and self.last_command_dispatch_time:
                 if now - self.last_command_dispatch_time > self.repeat_window_seconds:
                     self._close_repeat_window()
+
+            # If Riva callback requested free-text mode, handle it here on the
+            # loop thread so we have exclusive access to source (no competing reads).
+            if self._pending_free_text is not None:
+                pending = self._pending_free_text
+                self._pending_free_text = None
+                self._do_free_text_recording(pending[0], pending[1], source, sec_per_buffer)
+                continue
 
             # Get audio chunk
             chunk = self.responsive_recognizer.record_sound_chunk(source)
@@ -476,18 +488,19 @@ class RealtimeRecognizerLoop(RecognizerLoop):
     # ── Free-text mode ────────────────────────────────────────────────────────
 
     def _enter_free_text_mode(self, intent_name, trigger_utterance, trigger_word_end_time=None):
-        """Record free-text using standard Mycroft VAD, then dispatch via Whisper.
+        """Request free-text recording from the session loop thread.
 
-        Stops Riva, blocks on ResponsiveRecognizer._record_phrase until silence,
-        runs Whisper on the result, dispatches the intent, then resets state so
-        the session loop continues normally (no wake word required).
+        Called from the Riva callback thread — must not block or read from source
+        here, because the session loop is concurrently reading from the same source
+        on its own thread. Instead, set a flag and stop Riva; the session loop will
+        detect _pending_free_text and call _do_free_text_recording from its thread.
 
         Args:
             intent_name: Original intent (without __FREE_TEXT__: prefix)
             trigger_utterance: The matched deterministic prefix words
             trigger_word_end_time: unused, kept for call-site compatibility
         """
-        if self.mode == MODE_FREE_TEXT:
+        if self.mode == MODE_FREE_TEXT or self._pending_free_text is not None:
             return  # guard against duplicate callbacks
 
         self.mode = MODE_FREE_TEXT
@@ -502,17 +515,39 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             'intent': intent_name
         })
 
-        # Stop Riva so it doesn't interfere with the blocking record call
+        # Stop Riva so no more callbacks arrive during the recording window
         if self.stt_backend == 'riva' and self.riva_stream_thread:
             self.riva_stream_thread.end_session()
 
-        source = self._current_source
-        sec_per_buffer = self._current_sec_per_buffer
+        # Pre-spawn Whisper subprocess now so model loads during VAD recording
+        if self.free_text_stt and hasattr(self.free_text_stt, 'spawn'):
+            sample_rate = self.realtime_config.get('sample_rate', 16000)
+            self.free_text_stt.spawn(sample_rate)
 
-        # Use Mycroft's built-in NoiseTracker VAD — blocks until silence detected
+        # Signal the loop thread to take over recording from source exclusively
+        self._pending_free_text = (intent_name, trigger_utterance)
+
+    def _do_free_text_recording(self, intent_name, trigger_utterance, source, sec_per_buffer):
+        """Execute free-text VAD and Whisper transcription on the loop thread.
+
+        Called exclusively from the session loop, so it has sole access to source.
+        Uses Mycroft's built-in NoiseTracker VAD, then resets all state so the
+        session loop continues normally (Riva restarts, no wake word required).
+        """
+        # Use Mycroft's built-in NoiseTracker VAD — blocks until silence detected.
+        # Running here on the loop thread means we own source exclusively.
+        _ft_cfg = self.realtime_config.get('free_text', {})
+        silence_timeout = _ft_cfg.get('recording_timeout_with_silence', None)
+        if silence_timeout is not None:
+            old_timeout = self.responsive_recognizer.recording_timeout_with_silence
+            self.responsive_recognizer.recording_timeout_with_silence = silence_timeout
+
         byte_data = ResponsiveRecognizer._record_phrase(
             self.responsive_recognizer, source, sec_per_buffer
         )
+
+        if silence_timeout is not None:
+            self.responsive_recognizer.recording_timeout_with_silence = old_timeout
 
         # Transcribe and dispatch
         sample_rate = self.realtime_config.get('sample_rate', 16000)
@@ -538,6 +573,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             self.riva_stream_thread.reset()
             self.riva_interim_word_count = 0
             self.riva_final_word_count = 0
+
+        LOG.info("Free-text complete — resumed DETERMINISTIC mode, Riva restarted")
 
     def _execute_free_text(self, audio=None, sample_rate=None):
         """Run Whisper batch inference on audio and dispatch intent.
