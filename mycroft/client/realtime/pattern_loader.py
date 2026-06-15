@@ -23,7 +23,7 @@ REPEAT_TAG = '__REPEAT__:'
 MANAGE_TAG = '__MANAGE__:'
 
 
-def build_management_patterns(command_groups):
+def build_management_patterns(command_groups, stt_manage_config=None):
     """Build enable/disable management patterns from command_groups config.
 
     Returns dict of {tagged_intent: [pattern_line]} for all combinations.
@@ -31,6 +31,8 @@ def build_management_patterns(command_groups):
 
     Args:
         command_groups: list of {'name': str, 'skill_prefix': str} dicts
+        stt_manage_config: optional dict with 'load_phrases' and 'unload_phrases'
+            lists for secondary STT load/unload voice commands
 
     Returns:
         dict mapping tagged intent names to single-element pattern lists
@@ -47,6 +49,15 @@ def build_management_patterns(command_groups):
         for name in group_names:
             tagged = f'{MANAGE_TAG}{action}:{name}'
             patterns[tagged] = [f'{action} {name}']
+
+    # Secondary STT load/unload commands
+    if stt_manage_config and stt_manage_config.get('enabled', True):
+        for phrase in stt_manage_config.get('load_phrases', []):
+            tagged = f'{MANAGE_TAG}stt:load'
+            patterns.setdefault(tagged, []).append(phrase)
+        for phrase in stt_manage_config.get('unload_phrases', []):
+            tagged = f'{MANAGE_TAG}stt:unload'
+            patterns.setdefault(tagged, []).append(phrase)
 
     return patterns
 

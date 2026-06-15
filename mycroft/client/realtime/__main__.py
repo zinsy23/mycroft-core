@@ -370,7 +370,8 @@ def handle_intents_ready(event):
         loop.final_matcher.register_intent(repeat_intent, patterns)
 
     # Build and register management patterns (always active — protected layer)
-    mgmt_patterns = build_management_patterns(command_groups)
+    stt_manage_cfg = realtime_config.get('free_text_stt', {}).get('manage_commands', {})
+    mgmt_patterns = build_management_patterns(command_groups, stt_manage_cfg)
     for mgmt_intent, patterns in mgmt_patterns.items():
         loop.interim_matcher.register_intent(mgmt_intent, patterns)
         loop.final_matcher.register_intent(mgmt_intent, patterns)
@@ -414,6 +415,9 @@ def connect_bus_events(bus):
     bus.on('recognizer_loop:audio_output_end', handle_audio_end)
     bus.on('mycroft.stop', handle_stop)
     bus.on('padatious:intents_ready', handle_intents_ready)
+    # Re-subscribe when skills finishes training — handles the race where realtime
+    # starts faster than skills connects to the bus and misses our initial subscribe.
+    bus.on('mycroft.skills.trained', lambda _: bus.emit(Message('realtime:subscribe_intents')))
 
 
 def main(ready_hook=on_ready, error_hook=on_error, stopping_hook=on_stopping,
