@@ -20,7 +20,6 @@ import numpy as np
 from mycroft.client.realtime.listener import RecognizerLoop
 from mycroft.client.realtime.mic import ResponsiveRecognizer
 from mycroft.client.realtime.command_matcher import StreamingCommandMatcher
-from mycroft.client.realtime.whisper_streaming_wrapper import WhisperStreamingThread
 from mycroft.client.realtime.riva_streaming import RivaStreamingThread, RIVA_AVAILABLE
 from mycroft.client.realtime.free_text_stt import load_free_text_stt
 from mycroft.client.realtime.pattern_loader import FREE_TEXT_TAG, REPEAT_TAG, MANAGE_TAG
@@ -86,6 +85,12 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
         # Free-text secondary STT (batch inference for nondeterministic commands)
         self.free_text_stt = load_free_text_stt(self.realtime_config)
+        _stt_cfg = self.realtime_config.get('free_text_stt', {})
+        self._stt_sample_rate = self.realtime_config.get('sample_rate', 16000)
+        self._stt_label = _stt_cfg.get('manage_commands', {}).get('label', 'secondary STT')
+        if self.free_text_stt and _stt_cfg.get('preload', False):
+            LOG.info("free_text_stt preload=true — loading persistent worker at startup")
+            self.free_text_stt.load(self._stt_sample_rate)
 
         # Free-text config
         _ft_cfg = self.realtime_config.get('free_text', {})
@@ -233,6 +238,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
     def _load_whisper_streaming(self):
         """Load Whisper streaming model for word-by-word transcription (legacy path)."""
+        from mycroft.client.realtime.whisper_streaming_wrapper import WhisperStreamingThread
         ft_cfg = self.realtime_config.get('free_text_stt', {})
         fw_cfg = ft_cfg.get('faster_whisper', {})
         model_path = fw_cfg.get('model')
@@ -454,12 +460,49 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                  f"(mute={self.global_mute}, disabled={self.manually_disabled})")
 
     def _handle_manage_command(self, action, target):
-        """Handle an enable/disable voice command.
+        """Handle an enable/disable or STT load/unload voice command.
 
         Args:
-            action: 'enable' or 'disable'
-            target: skill_prefix string, or None for global ('commands')
+            action: 'enable', 'disable', or 'stt'
+            target: skill_prefix, 'commands', or 'load'/'unload' for stt action
         """
+        # ── Secondary STT load/unload ─────────────────────────────────────────
+        if action == 'stt':
+            if not self.free_text_stt:
+                LOG.warning("[MANAGE] STT command received but free_text_stt not available")
+                return
+            label = self._stt_label
+            if target == 'load':
+                if self.free_text_stt.is_loaded:
+                    LOG.info(f"[MANAGE] {label} already loaded")
+                    self.emit('mycroft.realtime.manage', {
+                        'action': 'stt:load', 'target': 'stt',
+                        'stt_state': 'already_loaded', 'stt_label': label
+                    })
+                else:
+                    self.emit('mycroft.realtime.manage', {
+                        'action': 'stt:load', 'target': 'stt',
+                        'stt_state': 'loading', 'stt_label': label
+                    })
+                    self.free_text_stt.load(self._stt_sample_rate)
+                    self.emit('mycroft.realtime.manage', {
+                        'action': 'stt:load', 'target': 'stt',
+                        'stt_state': 'loaded' if self.free_text_stt.is_loaded else 'failed',
+                        'stt_label': label
+                    })
+            elif target == 'unload':
+                self.emit('mycroft.realtime.manage', {
+                    'action': 'stt:unload', 'target': 'stt',
+                    'stt_state': 'unloading', 'stt_label': label
+                })
+                self.free_text_stt.unload()
+                self.emit('mycroft.realtime.manage', {
+                    'action': 'stt:unload', 'target': 'stt',
+                    'stt_state': 'unloaded', 'stt_label': label
+                })
+            return
+
+        # ── Enable/disable command groups ─────────────────────────────────────
         if action == 'disable' and target is None:
             self.global_mute = True
         elif action == 'enable' and target is None:
@@ -536,18 +579,15 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         """
         # Use Mycroft's built-in NoiseTracker VAD — blocks until silence detected.
         # Running here on the loop thread means we own source exclusively.
-        _ft_cfg = self.realtime_config.get('free_text', {})
-        silence_timeout = _ft_cfg.get('recording_timeout_with_silence', None)
+        old_timeout = self.responsive_recognizer.recording_timeout_with_silence
+        silence_timeout = self.free_text_stop_silence
         if silence_timeout is not None:
-            old_timeout = self.responsive_recognizer.recording_timeout_with_silence
             self.responsive_recognizer.recording_timeout_with_silence = silence_timeout
 
         byte_data = ResponsiveRecognizer._record_phrase(
             self.responsive_recognizer, source, sec_per_buffer
         )
-
-        if silence_timeout is not None:
-            self.responsive_recognizer.recording_timeout_with_silence = old_timeout
+        self.responsive_recognizer.recording_timeout_with_silence = old_timeout
 
         # Transcribe and dispatch
         sample_rate = self.realtime_config.get('sample_rate', 16000)
@@ -994,17 +1034,22 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 if intent.startswith(MANAGE_TAG):
                     tag_body = intent[len(MANAGE_TAG):]  # e.g. 'enable:search'
                     action, _, target_name = tag_body.partition(':')
-                    target_prefix = None  # None = global ('commands')
-                    if target_name != 'commands':
+                    if action == 'stt':
+                        # STT load/unload — pass target_name ('load'/'unload') directly
+                        manage_target = target_name
+                    elif target_name == 'commands':
+                        manage_target = None  # global mute/unmute
+                    else:
+                        manage_target = None
                         for g in self.command_groups:
                             if g['name'] == target_name:
-                                target_prefix = g['skill_prefix']
+                                manage_target = g['skill_prefix']
                                 break
                     if self._is_duplicate(intent, now):
                         continue
                     self.interim_matcher.reset()
                     self.final_matcher.reset()
-                    self._handle_manage_command(action, target_prefix)
+                    self._handle_manage_command(action, manage_target)
                     self._record_execution(intent, now, stream_name)
                     break
 
@@ -1160,10 +1205,33 @@ class RealtimeRecognizerLoop(RecognizerLoop):
     # ── Loop lifecycle ────────────────────────────────────────────────────────
 
     def start_async(self):
-        """Override to add logging."""
+        """Override to skip STTFactory.create() — realtime uses Riva, not the configured STT module.
+
+        The parent's start_async() calls STTFactory.create() which loads the plugin
+        (ovos-stt-plugin-fasterwhisper) into VRAM immediately, even though realtime
+        never uses it. We replicate the producer/consumer setup with a no-op STT.
+        """
+        from queue import Queue
+        from mycroft.client.realtime.listener import AudioProducer, AudioConsumer, AudioStreamHandler
+
         LOG.info("RealtimeRecognizerLoop.start_async() called")
         try:
-            super().start_async()
+            self.state.running = True
+
+            class _NoopSTT:
+                lang = 'en-us'
+                can_stream = False
+                def execute(self, audio, language=None): return ''
+
+            stt = _NoopSTT()
+            queue = Queue()
+            self.producer = AudioProducer(self.state, queue, self.microphone,
+                                          self.responsive_recognizer, self, None)
+            self.producer.start()
+            self.consumer = AudioConsumer(self.state, queue, self,
+                                          stt, self.wakeup_recognizer,
+                                          self.wakeword_recognizer)
+            self.consumer.start()
             LOG.info("start_async() completed successfully")
         except Exception as e:
             LOG.error(f"Error in start_async(): {e}")
