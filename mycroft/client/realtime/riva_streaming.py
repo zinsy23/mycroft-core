@@ -94,9 +94,14 @@ class RivaStreamingThread(threading.Thread):
                 LOG.debug("Riva: Session activated, starting stream")
                 self._stream_session()
 
-                # Session ended - clear state and wait for next activation
-                LOG.debug("Riva: Session ended, waiting for next wakeword")
-                self._session_active.clear()
+                # Session ended - clear state and wait for next activation.
+                # Do NOT clear if reset() was already called during wind-down
+                # (e.g. free-text mode calls end_session() then reset() before
+                # _stream_session fully exits — clearing here would stomp it).
+                if not self._session_active.is_set():
+                    LOG.debug("Riva: Session ended, waiting for next wakeword")
+                else:
+                    LOG.debug("Riva: Session ended but reset() already called — keeping active")
 
             except Exception as e:
                 LOG.error(f"Error in Riva streaming thread: {e}")
