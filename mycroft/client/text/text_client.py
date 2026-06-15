@@ -1355,8 +1355,21 @@ def handle_realtime_manage(event):
     target = event.data.get('target', '')
     muted = event.data.get('muted', False)
     disabled = event.data.get('disabled', [])
-    state = 'ALL MUTED' if muted else (f"disabled: {', '.join(disabled)}" if disabled else 'all enabled')
-    add_log_message(f"[MANAGE] {action} {target}  ({state})")
+    if target == 'stt':
+        stt_state = event.data.get('stt_state', '')
+        label = event.data.get('stt_label', 'secondary STT')
+        state_map = {
+            'loading':        f'[MANAGE] {label} loading...',
+            'loaded':         f'[MANAGE] {label} loaded',
+            'already_loaded': f'[MANAGE] {label} already loaded',
+            'failed':         f'[MANAGE] {label} load FAILED',
+            'unloading':      f'[MANAGE] {label} unloading...',
+            'unloaded':       f'[MANAGE] {label} unloaded',
+        }
+        add_log_message(state_map.get(stt_state, f'[MANAGE] {label} {stt_state}'))
+    else:
+        state = 'ALL MUTED' if muted else (f"disabled: {', '.join(disabled)}" if disabled else 'all enabled')
+        add_log_message(f"[MANAGE] {action} {target}  ({state})")
 
 
 def gui_main(stdscr):
