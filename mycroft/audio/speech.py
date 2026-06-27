@@ -34,6 +34,13 @@ mimic_fallback_obj = None
 
 _last_stop_signal = 0
 
+# When the primary TTS backend (e.g. Riva) is unreachable, utterances fall
+# back to Mimic but the primary is otherwise never retried. Re-validate the
+# primary backend's connection at most this often so it self-heals once the
+# backend (e.g. a restarted Riva container) becomes reachable again.
+_RETRY_COOLDOWN_SECONDS = 30
+_last_remote_failure_time = 0
+
 
 def handle_speak(event):
     """Handle "speak" message
@@ -106,7 +113,7 @@ def mute_and_speak(utterance, ident, listen=False):
         utterance:  The sentence to be spoken
         ident:      Ident tying the utterance to the source query
     """
-    global tts_hash
+    global tts_hash, _last_remote_failure_time
     # update TTS object if configuration has changed
     if tts_hash != hash(str(config.get('tts', ''))):
         global tts
@@ -117,14 +124,39 @@ def mute_and_speak(utterance, ident, listen=False):
         tts.init(bus)
         tts_hash = hash(str(config.get('tts', '')))
 
+    _maybe_retry_primary_tts()
+
     LOG.info("Speak: " + utterance)
     try:
         tts.execute(utterance, ident, listen)
+        _last_remote_failure_time = 0
     except RemoteTTSException as e:
         LOG.error(e)
+        _last_remote_failure_time = time.time()
         mimic_fallback_tts(utterance, ident, listen)
     except Exception:
         LOG.exception('TTS execution failed.')
+
+
+def _maybe_retry_primary_tts():
+    """Re-validate the primary TTS backend's connection if it previously
+    failed and the retry cooldown has elapsed.
+
+    Without this, once Riva (or any remote backend) fails once, every
+    subsequent utterance silently falls back to Mimic forever, even if the
+    backend comes back up later (e.g. the RIVA container is restarted).
+    """
+    global _last_remote_failure_time
+    if not _last_remote_failure_time:
+        return
+    if time.time() - _last_remote_failure_time < _RETRY_COOLDOWN_SECONDS:
+        return
+    try:
+        tts.validator.validate_connection()
+        LOG.info('Primary TTS backend is reachable again.')
+        _last_remote_failure_time = 0
+    except Exception:
+        _last_remote_failure_time = time.time()
 
 
 def _get_mimic_fallback():

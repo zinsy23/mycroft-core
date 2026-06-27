@@ -83,6 +83,20 @@ name_to_script_path() {
     esac
 }
 
+# Map a service name to the name used for its PID lock file in /tmp/mycroft/
+# (set by mycroft.lock.Lock). Services not listed here don't use a lock file,
+# so liveness can't be cross-checked beyond the pgrep match.
+_lock_name=""
+name_to_lock_name() {
+    case ${1} in
+        "bus")      _lock_name="service" ;;
+        "skills")   _lock_name="skills" ;;
+        "voice")    _lock_name="voice" ;;
+        "realtime") _lock_name="realtime" ;;
+        *)          _lock_name="" ;;
+    esac
+}
+
 source_venv() {
     # Enter Python virtual environment, unless under Docker
     if [ ! -f "/.dockerenv" ] ; then
@@ -129,17 +143,38 @@ launch_background() {
 
     # Check if given module is running and start (or restart if running)
     name_to_script_path "${1}"
-    if pgrep -f "python3 (.*)-m ${_module}" > /dev/null ; then
-        if ($_force_restart) ; then
+    _matched_pid=$(pgrep -f "python3 (.*)-m ${_module}" | head -n 1)
+    if [ -n "${_matched_pid}" ] ; then
+        # A matched PID isn't enough on its own -- a hung/orphaned process from a
+        # previous failed shutdown can still match pgrep while doing nothing.
+        # Cross-check against the service's own lock file (written by mycroft.lock.Lock)
+        # so a stale orphan doesn't silently block a real instance from launching.
+        # Services without a known lock file convention fall back to trusting pgrep.
+        name_to_lock_name "${1}"
+        _is_orphan=false
+        if [ -n "${_lock_name}" ] ; then
+            _pid_file="/tmp/mycroft/${_lock_name}.pid"
+            _locked_pid=""
+            if [ -f "${_pid_file}" ] ; then
+                _locked_pid=$(cat "${_pid_file}" 2>/dev/null)
+            fi
+            if [ "${_matched_pid}" != "${_locked_pid}" ] ; then
+                _is_orphan=true
+            fi
+        fi
+
+        if ($_is_orphan) ; then
+            echo "Found orphaned ${1} process (pid ${_matched_pid}, lock file has '${_locked_pid}') - killing it"
+            kill -9 "${_matched_pid}" 2>/dev/null
+        elif ($_force_restart) ; then
             echo "Restarting: ${1}"
             "${DIR}/stop-mycroft.sh" "${1}"
         else
             # Already running, no need to restart
             return
         fi
-    else
-        echo "Starting background service $1"
     fi
+    echo "Starting background service $1"
 
     # Security warning/reminder for the user
     if [ "${1}" = "bus" ] ; then

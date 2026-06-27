@@ -86,27 +86,43 @@ class UploadQueue:
             self._queue.append(loader)
 
 
+SKILL_SHUTDOWN_TIMEOUT = 5
+
+
 def _shutdown_skill(instance):
     """Shutdown a skill.
 
-    Call the default_shutdown method of the skill, will produce a warning if
-    the shutdown process takes longer than 1 second.
+    Call the default_shutdown method of the skill in a background thread.
+    If a skill's shutdown hangs (e.g. blocked on a lock, network call, or
+    non-daemon thread join), give up after SKILL_SHUTDOWN_TIMEOUT seconds
+    rather than blocking the entire skills service shutdown forever.
 
     Args:
         instance (MycroftSkill): Skill instance to shutdown
     """
-    try:
-        ref_time = monotonic()
-        # Perform the shutdown
-        instance.default_shutdown()
+    ref_time = monotonic()
+    exc_holder = []
 
-        shutdown_time = monotonic() - ref_time
-        if shutdown_time > 1:
-            LOG.warning('{} shutdown took {} seconds'.format(instance.skill_id,
-                                                             shutdown_time))
-    except Exception:
-        LOG.exception('Failed to shut down skill: '
-                      '{}'.format(instance.skill_id))
+    def _run_shutdown():
+        try:
+            instance.default_shutdown()
+        except Exception:
+            exc_holder.append(True)
+            LOG.exception('Failed to shut down skill: '
+                          '{}'.format(instance.skill_id))
+
+    shutdown_thread = Thread(target=_run_shutdown, daemon=True)
+    shutdown_thread.start()
+    shutdown_thread.join(SKILL_SHUTDOWN_TIMEOUT)
+
+    shutdown_time = monotonic() - ref_time
+    if shutdown_thread.is_alive():
+        LOG.warning('{} shutdown did not complete within {} seconds, '
+                   'abandoning it and continuing shutdown'.format(
+                       instance.skill_id, SKILL_SHUTDOWN_TIMEOUT))
+    elif shutdown_time > 1 and not exc_holder:
+        LOG.warning('{} shutdown took {} seconds'.format(instance.skill_id,
+                                                         shutdown_time))
 
 
 class SkillManager(Thread):
