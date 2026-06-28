@@ -8,12 +8,6 @@ import riva.client.proto.riva_audio_pb2 as raudio
 from .tts import TTS, TTSValidator
 from .remote_tts import RemoteTTSException
 
-# Riva's container can take well over 5s to finish initializing its models
-# after the gRPC port starts accepting connections, so a single short-timeout
-# check at startup isn't enough -- retry with backoff before giving up.
-CONNECTION_CHECK_RETRIES = 4
-CONNECTION_CHECK_TIMEOUT = 5
-
 
 class RivaTTS(TTS):
     def __init__(self, lang, config):
@@ -57,22 +51,19 @@ class RivaTTSValidator(TTSValidator):
         pass
 
     def validate_connection(self):
-        last_error = None
-        for attempt in range(CONNECTION_CHECK_RETRIES):
-            try:
-                channel = grpc.insecure_channel(self.tts.server_uri)
-                rtts_grpc.RivaSpeechSynthesisStub(channel)
-                grpc.channel_ready_future(channel).result(
-                    timeout=CONNECTION_CHECK_TIMEOUT)
-                return
-            except Exception as e:
-                last_error = e
-
-        raise Exception(
-            f'Cannot connect to RIVA TTS at {self.tts.server_uri} after '
-            f'{CONNECTION_CHECK_RETRIES} attempts. Make sure the RIVA '
-            f'container is running and finished initializing.'
-        ) from last_error
+        # Unlike most TTS backends, Riva's container can take well over 5s
+        # to finish initializing its models after the gRPC port opens, and
+        # it may legitimately be offline/restarting at any point during
+        # normal operation, not just at audio-service startup. Gating
+        # startup on a synchronous connection check here means a slow or
+        # momentarily-down Riva falls through TTSFactory.create() to Mimic
+        # (which isn't installed) and crashes the whole audio service.
+        # Mirroring how STTFactory.create() treats remote STT backends
+        # (instantiate without probing the network), skip the eager check
+        # and let connection failures surface lazily per-request in
+        # RivaTTS.get_tts() via RemoteTTSException, with self-healing retry
+        # already handled in mycroft/audio/speech.py's mute_and_speak().
+        pass
 
     def get_tts_class(self):
         return RivaTTS

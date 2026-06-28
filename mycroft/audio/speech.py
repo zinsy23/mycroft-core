@@ -139,24 +139,24 @@ def mute_and_speak(utterance, ident, listen=False):
 
 
 def _maybe_retry_primary_tts():
-    """Re-validate the primary TTS backend's connection if it previously
-    failed and the retry cooldown has elapsed.
+    """Clear the "primary TTS backend is down" gate once the retry cooldown
+    has elapsed, so the next utterance attempts the primary backend again
+    instead of going straight to Mimic.
 
     Without this, once Riva (or any remote backend) fails once, every
     subsequent utterance silently falls back to Mimic forever, even if the
     backend comes back up later (e.g. the RIVA container is restarted).
+    Backends like Riva don't support a cheap standalone connection probe, so
+    rather than validating separately, just let the next real tts.execute()
+    in mute_and_speak() serve as the test -- if it still fails, the except
+    branch below re-arms the cooldown.
     """
     global _last_remote_failure_time
     if not _last_remote_failure_time:
         return
     if time.time() - _last_remote_failure_time < _RETRY_COOLDOWN_SECONDS:
         return
-    try:
-        tts.validator.validate_connection()
-        LOG.info('Primary TTS backend is reachable again.')
-        _last_remote_failure_time = 0
-    except Exception:
-        _last_remote_failure_time = time.time()
+    _last_remote_failure_time = 0
 
 
 def _get_mimic_fallback():
