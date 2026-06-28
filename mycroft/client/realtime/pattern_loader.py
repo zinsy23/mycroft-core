@@ -21,6 +21,7 @@ from mycroft.util.log import LOG
 FREE_TEXT_TAG = '__FREE_TEXT__:'
 REPEAT_TAG = '__REPEAT__:'
 MANAGE_TAG = '__MANAGE__:'
+QA_TAG = '__QA__:'
 
 
 def build_management_patterns(command_groups, stt_manage_config=None):
@@ -192,6 +193,24 @@ def _split_free_text_pattern(pattern, free_text_entity):
     return prefix if prefix else None
 
 
+def _split_qa_pattern(pattern, entity_expansions):
+    """Split a pattern at its {qa_text} placeholder.
+
+    Returns (prefix, qa_config) if a qa_mode entity is found, else (None, None).
+    prefix is the text before {qa_text}, qa_config is the ENTITY_EXPANSIONS entry.
+    """
+    for entity_name, config in entity_expansions.items():
+        if config.get('type') != 'qa_mode':
+            continue
+        placeholder = f'{{{entity_name}}}'
+        if placeholder not in pattern:
+            continue
+        idx = pattern.index(placeholder)
+        prefix = pattern[:idx].strip()
+        return (prefix if prefix else None), config
+    return None, None
+
+
 def load_quantifier_patterns(repeat_config):
     """Build synthetic repeat patterns from the quantifiers file and repeat config.
 
@@ -295,7 +314,7 @@ def load_all_intent_patterns(skills_dir, verbose=False, realtime_config=None):
                          and repeat config). If None, uses defaults.
 
     Returns:
-        tuple: (deterministic_patterns, free_text_triggers, repeat_patterns)
+        tuple: (deterministic_patterns, free_text_triggers, repeat_patterns, qa_triggers)
           - deterministic_patterns: dict intent_name -> [pattern_str, ...]
             Normal patterns for StreamingCommandMatcher
           - free_text_triggers: dict intent_name -> [prefix_pattern_str, ...]
@@ -304,6 +323,9 @@ def load_all_intent_patterns(skills_dir, verbose=False, realtime_config=None):
           - repeat_patterns: dict intent_name -> [pattern_str, ...]
             Synthesized repeat patterns tagged __REPEAT__:N, registered in
             matcher with transient first-word handling
+          - qa_triggers: dict intent_name -> {'prefixes': [...], 'config': {...}}
+            Prefix-only patterns tagged __QA__:intent; when matched, realtime_loop
+            switches to QA mode using the bundled qa_config from ENTITY_EXPANSIONS
     """
     if realtime_config is None:
         realtime_config = {}
@@ -318,8 +340,10 @@ def load_all_intent_patterns(skills_dir, verbose=False, realtime_config=None):
 
     deterministic_patterns = {}
     free_text_triggers = {}
+    qa_triggers = {}
     total_deterministic = 0
     total_free_text = 0
+    total_qa = 0
 
     # Walk all .intent files
     for root, dirs, files in os.walk(skills_dir):
@@ -346,7 +370,17 @@ def load_all_intent_patterns(skills_dir, verbose=False, realtime_config=None):
                     # First expand any normal {entity} placeholders (not {free_text})
                     expanded = expand_pattern_entities(pattern, entity_expansions)
 
-                    for exp_pattern in expanded:
+                    qa_lines = []
+                qa_config_for_intent = None
+
+                for exp_pattern in expanded:
+                        # Check for QA entity first
+                        qa_prefix, qa_config = _split_qa_pattern(exp_pattern, entity_expansions)
+                        if qa_prefix is not None:
+                            qa_lines.append(qa_prefix)
+                            qa_config_for_intent = qa_config
+                            continue
+
                         prefix = _split_free_text_pattern(exp_pattern, free_text_entity)
 
                         if prefix is not None:
@@ -365,12 +399,22 @@ def load_all_intent_patterns(skills_dir, verbose=False, realtime_config=None):
                     free_text_triggers[tagged] = ft_lines
                     total_free_text += len(ft_lines)
 
+                if qa_lines:
+                    tagged = f'{QA_TAG}{intent_name}'
+                    qa_triggers[tagged] = {
+                        'prefixes': qa_lines,
+                        'config': qa_config_for_intent or {},
+                    }
+                    total_qa += len(qa_lines)
+
                 if verbose:
                     parts = []
                     if det_lines:
                         parts.append(f"{len(det_lines)} deterministic")
                     if ft_lines:
                         parts.append(f"{len(ft_lines)} free-text triggers")
+                    if qa_lines:
+                        parts.append(f"{len(qa_lines)} QA triggers")
                     if parts:
                         print(f"  {intent_name}: {' + '.join(parts)}")
 
@@ -388,9 +432,12 @@ def load_all_intent_patterns(skills_dir, verbose=False, realtime_config=None):
               f"{len(deterministic_patterns)} intents")
         print(f"Loaded {total_free_text} free-text trigger prefixes across "
               f"{len(free_text_triggers)} intents")
+        if total_qa:
+            print(f"Loaded {total_qa} QA trigger prefixes across "
+                  f"{len(qa_triggers)} intents")
         if repeat_patterns:
             total_repeat = sum(len(v) for v in repeat_patterns.values())
             print(f"Loaded {total_repeat} repeat patterns across "
                   f"{len(repeat_patterns)} quantifier variants")
 
-    return deterministic_patterns, free_text_triggers, repeat_patterns
+    return deterministic_patterns, free_text_triggers, repeat_patterns, qa_triggers

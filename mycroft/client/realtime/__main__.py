@@ -35,6 +35,7 @@ bus = None  # Mycroft messagebus connection
 lock = Lock()
 loop = None
 config = None
+_intents_received = False  # True once handle_intents_ready has run at least once
 
 
 def _initialize_mic_level_file_early():
@@ -188,6 +189,9 @@ def handle_audio_end(event):
     """
     if config.get("listener").get("mute_during_output"):
         loop.unmute()  # restore
+    # Notify QA mode that TTS finished so follow-up window can open
+    if loop and loop.mode == 'qa':
+        loop._on_qa_tts_done()
 
 
 def handle_stop(event):
@@ -226,6 +230,8 @@ def on_ready():
 
 def on_stopping():
     LOG.info('Realtime service is shutting down...')
+    if loop and getattr(loop, 'free_text_stt', None):
+        loop.free_text_stt.unload()
 
 
 def on_error(e='Unknown'):
@@ -287,14 +293,17 @@ def handle_intents_ready(event):
     """Receive intent patterns from skills service when available."""
     from mycroft.client.realtime.pattern_loader import (
         load_entity_expansions, expand_pattern_entities,
-        _split_free_text_pattern, load_quantifier_patterns,
+        _split_free_text_pattern, _split_qa_pattern, load_quantifier_patterns,
         build_management_patterns,
-        FREE_TEXT_TAG, REPEAT_TAG
+        FREE_TEXT_TAG, REPEAT_TAG, QA_TAG
     )
     from mycroft.configuration import Configuration
 
     if not loop:
         return
+
+    global _intents_received
+    _intents_received = True
 
     intent_files = event.data.get('intent_files', {})
     LOG.info(f"Received {len(intent_files)} intent files from skills service")
@@ -308,6 +317,7 @@ def handle_intents_ready(event):
     loop.shared_patterns.clear()
     loop.skill_pattern_groups.clear()
     loop.protected_patterns.clear()
+    loop._qa_config_map.clear()
     loop.interim_matcher.patterns = loop.shared_patterns
     loop.final_matcher.patterns = loop.shared_patterns
     loop.interim_matcher.all_sequences = []
@@ -334,10 +344,17 @@ def handle_intents_ready(event):
 
             det_lines = []
             ft_lines = []
+            qa_lines = []
+            qa_config_for_intent = None
 
             for pattern in pattern_lines:
                 expanded = expand_pattern_entities(pattern, entity_expansions)
                 for exp_pattern in expanded:
+                    qa_prefix, qa_config = _split_qa_pattern(exp_pattern, entity_expansions)
+                    if qa_prefix is not None:
+                        qa_lines.append(qa_prefix)
+                        qa_config_for_intent = qa_config
+                        continue
                     prefix = _split_free_text_pattern(exp_pattern, free_text_entity)
                     if prefix is not None:
                         ft_lines.append(prefix)
@@ -359,6 +376,13 @@ def handle_intents_ready(event):
                 loop.final_matcher.register_intent(tagged, ft_lines)
                 ft_count += len(ft_lines)
                 LOG.info(f"  {intent_name}: {len(ft_lines)} free-text trigger prefix(es)")
+
+            if qa_lines:
+                tagged = f'{QA_TAG}{intent_name}'
+                loop.interim_matcher.register_intent(tagged, qa_lines)
+                loop.final_matcher.register_intent(tagged, qa_lines)
+                loop._qa_config_map[tagged] = qa_config_for_intent or {}
+                LOG.info(f"  {intent_name}: {len(qa_lines)} QA trigger prefix(es)")
 
         except Exception as e:
             LOG.warning(f"Failed to load intent {intent_name} from {file_path}: {e}")
@@ -400,6 +424,11 @@ def handle_intents_ready(event):
              f"{len(loop.skill_pattern_groups)} skill groups")
 
 
+def _handle_skills_trained(_event):
+    if not _intents_received:
+        bus.emit(Message('realtime:subscribe_intents'))
+
+
 def connect_bus_events(bus):
     # Register handlers for events on main Mycroft messagebus
     bus.on('open', handle_open)
@@ -417,7 +446,9 @@ def connect_bus_events(bus):
     bus.on('padatious:intents_ready', handle_intents_ready)
     # Re-subscribe when skills finishes training — handles the race where realtime
     # starts faster than skills connects to the bus and misses our initial subscribe.
-    bus.on('mycroft.skills.trained', lambda _: bus.emit(Message('realtime:subscribe_intents')))
+    # Only fires if we haven't received patterns yet, so normal retrains/reloads
+    # (which also emit mycroft.skills.trained) don't trigger a duplicate send.
+    bus.on('mycroft.skills.trained', _handle_skills_trained)
 
 
 def main(ready_hook=on_ready, error_hook=on_error, stopping_hook=on_stopping,

@@ -11,6 +11,7 @@ command matching. Supports three operating modes:
                   additional times without re-transcribing
 """
 
+import os
 import time
 import threading
 from collections import deque
@@ -22,9 +23,10 @@ from mycroft.client.realtime.mic import ResponsiveRecognizer
 from mycroft.client.realtime.command_matcher import StreamingCommandMatcher
 from mycroft.client.realtime.riva_streaming import RivaStreamingThread, RIVA_AVAILABLE
 from mycroft.client.realtime.free_text_stt import load_free_text_stt
-from mycroft.client.realtime.pattern_loader import FREE_TEXT_TAG, REPEAT_TAG, MANAGE_TAG
+from mycroft.client.realtime.pattern_loader import FREE_TEXT_TAG, REPEAT_TAG, MANAGE_TAG, QA_TAG
 from mycroft.configuration import Configuration
 from mycroft.util.log import LOG
+from mycroft.util.signal import get_ipc_directory
 
 # Non-terminal words: structural words that can't end a query.
 # Silence after these gets the full session timeout rather than stop_silence_seconds.
@@ -38,6 +40,7 @@ _DEFAULT_NON_TERMINAL_WORDS = {
 MODE_DETERMINISTIC = 'deterministic'
 MODE_FREE_TEXT = 'free_text'
 MODE_REPEAT = 'repeat'
+MODE_QA = 'qa'
 
 
 class RealtimeResponsiveRecognizer(ResponsiveRecognizer):
@@ -52,6 +55,60 @@ class RealtimeResponsiveRecognizer(ResponsiveRecognizer):
         return self.realtime_loop._stream_realtime_phrase(
             source, sec_per_buffer, stream, ww_frames
         )
+
+    def _record_phrase_qa(self, source, sec_per_buffer, max_wait_seconds=None):
+        """VAD recording for QA follow-up, abortable by _qa_abort flag.
+
+        Calls the grandparent ResponsiveRecognizer._record_phrase logic
+        but checks realtime_loop._qa_abort each chunk to allow Riva's
+        control-word detection to cut the recording short.
+
+        max_wait_seconds: hard cap before any speech is detected (follow_up_timeout).
+        Once speech starts, recording_timeout_with_silence controls the silence cutoff.
+        """
+        from mycroft.client.realtime.mic import NoiseTracker, get_silence
+        from mycroft.util import check_for_signal
+
+        loop = self.realtime_loop
+        # silence_time_limit = max_wait_seconds: how long to wait for speech onset.
+        # silence_after_loud = recording_timeout_with_silence: silence cutoff after speech ends.
+        onset_wait = max_wait_seconds if max_wait_seconds is not None else self.recording_timeout_with_silence
+        noise_tracker = NoiseTracker(0, 25, sec_per_buffer,
+                                     self.MIN_LOUD_SEC_PER_PHRASE,
+                                     onset_wait,
+                                     self.recording_timeout_with_silence)
+        timeout = max_wait_seconds if max_wait_seconds is not None else self.recording_timeout
+        max_chunks = int(timeout / sec_per_buffer)
+        num_chunks = 0
+        byte_data = get_silence(source.SAMPLE_WIDTH)
+        phrase_complete = False
+
+        while num_chunks < max_chunks and not phrase_complete:
+            if loop._qa_abort:
+                break
+            chunk = self.record_sound_chunk(source)
+            byte_data += chunk
+            num_chunks += 1
+
+            # Feed to Riva so sentinel can detect control words in real time
+            if loop.stt_backend == 'riva' and loop.riva_stream_thread:
+                loop.riva_stream_thread.feed_audio(chunk)
+
+            energy = self.calc_energy(chunk, source.SAMPLE_WIDTH)
+            test_threshold = self.energy_threshold * self.multiplier
+            is_loud = energy > test_threshold
+            noise_tracker.update(is_loud)
+            if not is_loud:
+                self._adjust_threshold(energy, sec_per_buffer)
+
+            phrase_complete = (noise_tracker.recording_complete() or
+                               check_for_signal('buttonPress'))
+
+            if num_chunks % 10 == 0:
+                self._watchdog()
+                self.write_mic_level(energy, source)
+
+        return byte_data
 
 
 class RealtimeRecognizerLoop(RecognizerLoop):
@@ -205,6 +262,18 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # to avoid both threads competing for the audio source simultaneously.
         self._pending_free_text = None          # (intent_name, trigger_utterance) or None
 
+        # QA mode state
+        self.qa_intent = None                   # intent name that triggered QA mode
+        self.qa_config = {}                     # entity config (exit_words, interrupt_words, etc.)
+        self._pending_qa = None                 # (intent_name, qa_config) set by Riva callback
+        self._qa_exit_time = None               # time.time() when last QA session ended
+        self._qa_tts_event = threading.Event()  # set when mycroft.audio.speech.end fires in QA mode
+        self._qa_stt_loaded_by_mode = False     # True if QA mode called spawn/load (not preloaded)
+        self._qa_config_map = {}                # tagged_intent -> qa_config, populated at pattern load
+        self._qa_abort = False                  # set by Riva callback to abort _record_phrase_qa early
+        self._qa_abort_reason = None            # 'exit' or 'interrupt'
+        self._qa_tts_playing = False            # True while TTS is active — sentinel suppressed during this
+
         # Repeat mode state
         self.last_executed_command = None       # (utterance, intent) of last non-repeat command
         self.last_command_dispatch_time = None  # when last_executed_command was set
@@ -306,6 +375,13 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.free_text_intent = None
         self.free_text_final_words_seen = []
         self._pending_free_text = None
+        self.qa_intent = None
+        self.qa_config = {}
+        self._pending_qa = None
+        self._qa_tts_event.clear()
+        self._qa_abort = False
+        self._qa_abort_reason = None
+        self._qa_tts_playing = False
 
         # Reset STT backend
         if self.stt_backend == 'riva' and self.riva_stream_thread:
@@ -366,6 +442,19 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 pending = self._pending_free_text
                 self._pending_free_text = None
                 self._do_free_text_recording(pending[0], pending[1], source, sec_per_buffer)
+                continue
+
+            # If Riva callback requested QA mode, handle it here on the loop thread.
+            # Ignore if within 1s of QA exit — Riva's buffer may still contain the
+            # entry phrase that just triggered QA and re-fire it immediately.
+            if self._pending_qa is not None:
+                if (self._qa_exit_time is None or
+                        time.time() - self._qa_exit_time > 1.0):
+                    pending = self._pending_qa
+                    self._pending_qa = None
+                    self._do_qa_session(pending[0], pending[1], source, sec_per_buffer)
+                else:
+                    self._pending_qa = None  # discard stale re-trigger
                 continue
 
             # Get audio chunk
@@ -551,10 +640,10 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.free_text_trigger_utterance = trigger_utterance
         self.free_text_final_words_seen = []
 
-        LOG.info(f"🎙️  FREE-TEXT MODE: intent='{intent_name}' prefix='{trigger_utterance}'")
+        LOG.info(f"🎙️  FREE-TEXT MODE: intent='{intent_name}' prefix='{str(len(trigger_utterance))}'")
         self.emit('mycroft.realtime.mode_changed', {
             'mode': 'free_text',
-            'trigger': trigger_utterance,
+            'trigger': str(len(trigger_utterance)),
             'intent': intent_name
         })
 
@@ -647,7 +736,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             return
 
         LOG.info(f"🎵 Running Whisper on {len(audio)/sample_rate:.1f}s of audio "
-                 f"(intent: {self.free_text_intent})")
+                 f"(intent: {str(len(self.free_text_intent))})")
 
         text = self.free_text_stt.transcribe(audio, sample_rate)
 
@@ -674,7 +763,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
         # Build the full utterance: deterministic prefix + whisper text
         full_utterance = f"{self.free_text_trigger_utterance} {text}".strip()
-        LOG.info(f"✓ FREE-TEXT COMMAND: '{full_utterance}' (intent: {self.free_text_intent})")
+        LOG.info(f"✓ FREE-TEXT COMMAND: '{str(len(full_utterance))}' (intent: {str(len(self.free_text_intent))})")
 
         # Dispatch to skills
         self.emit('recognizer_loop:utterance', {
@@ -701,6 +790,333 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.interim_matcher.reset()
         self.final_matcher.reset()
 
+    # ── QA mode ───────────────────────────────────────────────────────────────
+
+    def _enter_qa_mode(self, intent_name, qa_config):
+        """Request QA mode from the Riva callback thread.
+
+        Same deferred pattern as _enter_free_text_mode — sets a flag and stops
+        Riva; the loop thread picks it up and calls _do_qa_session exclusively.
+        """
+        if self.mode == MODE_QA or self._pending_qa is not None:
+            return
+
+        self.mode = MODE_QA
+        self.qa_intent = intent_name
+        self.qa_config = qa_config
+        self._qa_tts_event.clear()
+        self._qa_abort = False
+        self._qa_abort_reason = None
+
+        LOG.info(f"🗣️  QA MODE: intent='{intent_name}'")
+        self.emit('mycroft.realtime.mode_changed', {'mode': 'qa', 'intent': intent_name})
+
+        # Keep Riva running — it acts as sentinel for exit/interrupt words.
+        # Reset it so it starts fresh for QA mode word detection.
+        if self.stt_backend == 'riva' and self.riva_stream_thread:
+            self.riva_stream_thread.reset()
+            self.riva_interim_word_count = 0
+            self.riva_final_word_count = 0
+
+        # Pre-spawn secondary STT if not already loaded
+        self._qa_stt_loaded_by_mode = False
+        if self.free_text_stt:
+            if not self.free_text_stt.is_loaded:
+                self._qa_stt_loaded_by_mode = True
+            self.free_text_stt.spawn(self._stt_sample_rate)
+
+        self._pending_qa = (intent_name, qa_config)
+
+    def _handle_qa_riva_words(self, words, is_final):
+        """Riva sentinel handler during QA mode.
+
+        Only FINAL transcript is used (more accurate). Checks if any of the
+        first qa_control_word_positions words match exit or interrupt sets.
+        Sets _qa_abort / _qa_abort_reason and unblocks the TTS wait event
+        so _do_qa_session can react immediately.
+        """
+        if not is_final or not words:
+            return
+        # Suppress sentinel while TTS is active — Riva hears TTS output through mic.
+        # Use isSpeaking IPC signal: backend-agnostic, set by TTS.execute(), cleared by end_audio().
+        speaking_path = os.path.join(get_ipc_directory(), 'signal', 'isSpeaking')
+        if os.path.isfile(speaking_path):
+            return
+        if self._qa_abort:
+            return  # already aborted, don't double-fire
+
+        cfg = self.qa_config
+        exit_words = set(cfg.get('exit_words', ['stop', 'done']))
+        exit_phrases = [p.lower() for p in cfg.get('exit_phrases', ["that's all"])]
+        interrupt_words = set(cfg.get('interrupt_words', ['wait']))
+        interrupt_phrases = [p.lower() for p in cfg.get('interrupt_phrases', ['hang on'])]
+        max_pos = cfg.get('control_word_positions', 3)
+
+        transcript = ' '.join(words).lower()
+        check_words = [w.lower().rstrip('.,!?') for w in words[:max_pos]]
+
+        # Check exit
+        for w in check_words:
+            if w in exit_words:
+                LOG.info(f"QA sentinel: exit word '{w}' detected by Riva")
+                self._qa_abort = True
+                self._qa_abort_reason = 'exit'
+                self.emit('mycroft.audio.speech.stop', {})
+                self._qa_tts_event.set()
+                return
+        for phrase in exit_phrases:
+            if transcript.startswith(phrase):
+                LOG.info(f"QA sentinel: exit phrase '{phrase}' detected by Riva")
+                self._qa_abort = True
+                self._qa_abort_reason = 'exit'
+                self.emit('mycroft.audio.speech.stop', {})
+                self._qa_tts_event.set()
+                return
+
+        # Check interrupt
+        for w in check_words:
+            if w in interrupt_words:
+                LOG.info(f"QA sentinel: interrupt word '{w}' detected by Riva")
+                self._qa_abort = True
+                self._qa_abort_reason = 'interrupt'
+                self.emit('mycroft.audio.speech.stop', {})
+                self._qa_tts_event.set()
+                return
+        for phrase in interrupt_phrases:
+            if transcript.startswith(phrase):
+                LOG.info(f"QA sentinel: interrupt phrase '{phrase}' detected by Riva")
+                self._qa_abort = True
+                self._qa_abort_reason = 'interrupt'
+                self.emit('mycroft.audio.speech.stop', {})
+                self._qa_tts_event.set()
+                return
+
+    def _do_qa_session(self, intent_name, qa_config, source, sec_per_buffer):
+        """Run the QA follow-up loop on the loop thread.
+
+        Flow per question:
+          1. VAD records the question via _record_phrase (silence cutoff)
+          2. Secondary STT transcribes
+          3. Dispatch to skill
+          4. Wait for TTS to finish (mycroft.audio.speech.end)
+          5. Repeat from 1 until exit word or timeout
+        """
+        self._qa_tts_event.clear()  # ensure no stale set from before mode entry
+
+        # Calibrate once at session start — not per-iteration to avoid eating speech
+        self.responsive_recognizer.adjust_for_ambient_noise(source, 0.3)
+
+        follow_up_timeout = qa_config.get('follow_up_timeout_seconds', 15)
+        exit_words = set(qa_config.get('exit_words', ['stop', 'done']))
+        exit_phrases = [p.lower() for p in qa_config.get('exit_phrases', ["that's all"])]
+        interrupt_words = set(qa_config.get('interrupt_words', ['wait']))
+        interrupt_phrases = [p.lower() for p in qa_config.get('interrupt_phrases', ['hang on'])]
+        silence_timeout = self.free_text_stop_silence
+        sample_rate = self.realtime_config.get('sample_rate', 16000)
+
+        def _is_exit(text):
+            t = text.lower().strip()
+            words = t.split()
+            # Check first or second word against exit_words
+            for i in range(min(2, len(words))):
+                if words[i].rstrip('.,!?') in exit_words:
+                    return True
+            for phrase in exit_phrases:
+                if t.startswith(phrase):
+                    return True
+            return False
+
+        def _is_interrupt(text):
+            t = text.lower().strip()
+            words = t.split()
+            for i in range(min(2, len(words))):
+                if words[i].rstrip('.,!?') in interrupt_words:
+                    return True
+            for phrase in interrupt_phrases:
+                if t.startswith(phrase):
+                    return True
+            return False
+
+        while self.mode == MODE_QA and self.session_active:
+            # Clear abort state and reset Riva for this follow-up window
+            self._qa_abort = False
+            self._qa_abort_reason = None
+            if self.stt_backend == 'riva' and self.riva_stream_thread:
+                self.riva_stream_thread.reset()
+                self.riva_interim_word_count = 0
+                self.riva_final_word_count = 0
+
+            # Record question via abortable VAD — Riva sentinel can cut short.
+            # max_wait_seconds gives the full follow_up_timeout to start speaking;
+            # recording_timeout_with_silence (1.5s) cuts off after speech ends.
+            old_timeout = self.responsive_recognizer.recording_timeout_with_silence
+            if silence_timeout is not None:
+                self.responsive_recognizer.recording_timeout_with_silence = silence_timeout
+
+            # Flush stale audio from the mic buffer. isSpeaking clears when the
+            # player process exits but the sound card may still be draining.
+            # Flush, wait for card to go quiet, flush again.
+            def _flush_mic():
+                try:
+                    available = source.stream.wrapped_stream.get_read_available()
+                    if available > 0:
+                        source.stream.wrapped_stream.read(available, exception_on_overflow=False)
+                    return available
+                except Exception as e:
+                    LOG.warning(f"QA: could not flush mic buffer: {e}")
+                    return 0
+
+            flushed = _flush_mic()
+            if flushed > 0:
+                time.sleep(0.3)  # let sound card finish draining
+                _flush_mic()
+            LOG.info("QA: mic buffer flushed")
+
+            LOG.info("QA: mic open — waiting for follow-up speech")
+            byte_data = self.responsive_recognizer._record_phrase_qa(
+                source, sec_per_buffer, max_wait_seconds=follow_up_timeout)
+            LOG.info("QA: mic closed — sending to Whisper")
+            self.responsive_recognizer.recording_timeout_with_silence = old_timeout
+
+            # Handle Riva abort during recording
+            if self._qa_abort:
+                reason = self._qa_abort_reason
+                self._qa_abort = False
+                self._qa_abort_reason = None
+                if reason == 'exit':
+                    LOG.info("QA: exit word detected by Riva during recording — leaving QA mode")
+                    self.emit('mycroft.realtime.mode_changed', {'mode': 'qa_exit', 'reason': 'riva_exit_word'})
+                    break
+                elif reason == 'interrupt':
+                    LOG.info("QA: interrupt word detected by Riva during recording — reopening follow-up")
+                    continue
+
+            audio = np.frombuffer(byte_data, dtype=np.int16).astype(np.float32) / 32768.0
+
+            if len(audio) < int(sample_rate * 0.3):
+                LOG.info("QA: audio too short — treating as timeout, exiting QA mode")
+                break
+
+            # Transcribe with secondary STT
+            if not self.free_text_stt:
+                LOG.warning("QA: no secondary STT available")
+                break
+
+            text = self.free_text_stt.transcribe(audio, sample_rate)
+
+            if not text or not text.strip():
+                # Only exit if the recording was long enough to represent a real
+                # timeout (follow_up_timeout elapsed with no speech). Short recordings
+                # are sound-card buffer artifacts right after TTS — loop back instead.
+                audio_duration = len(audio) / sample_rate
+                if audio_duration >= follow_up_timeout * 0.8:
+                    LOG.info(f"QA: empty transcription after {audio_duration:.1f}s — follow-up timeout, exiting QA mode")
+                    break
+                else:
+                    LOG.info(f"QA: empty transcription on short recording ({audio_duration:.1f}s) — looping")
+                    continue
+
+            text = text.strip()
+            LOG.info(f"QA transcribed: '{text}'")
+
+            # Whisper-level exit/interrupt check (fallback if Riva missed it)
+            if _is_exit(text):
+                LOG.info("QA: exit word in Whisper output — leaving QA mode")
+                self.emit('mycroft.realtime.mode_changed', {'mode': 'qa_exit', 'reason': 'whisper_exit_word'})
+                break
+
+            if _is_interrupt(text):
+                LOG.info("QA: interrupt word in Whisper output — reopening follow-up")
+                continue
+
+            self._qa_abort = False
+            self._qa_abort_reason = None
+
+            # Dispatch question to skill
+            self.emit('recognizer_loop:utterance', {
+                'utterances': [text],
+                'lang': self.lang,
+                'intent': intent_name
+            })
+            self.emit('mycroft.realtime.command_matched', {
+                'utterance': text,
+                'intent': intent_name,
+                'stream': 'QA'
+            })
+
+            # Wait for TTS to finish via isSpeaking IPC signal — backend-agnostic.
+            # TTS.execute() calls create_signal("isSpeaking") before synthesis;
+            # PlaybackThread.end_audio() calls check_for_signal("isSpeaking") to clear it.
+            # Phase 1: wait for signal to appear (TTS started).
+            # Phase 2: wait for signal to disappear (TTS finished).
+            tts_safety_cap = qa_config.get('tts_safety_cap_seconds', 60)
+            speaking_path = os.path.join(get_ipc_directory(), 'signal', 'isSpeaking')
+            deadline = time.time() + tts_safety_cap
+
+            # Phase 1 — wait up to 2s for isSpeaking to appear
+            appeared = False
+            appear_deadline = time.time() + 2.0
+            while time.time() < appear_deadline:
+                if os.path.isfile(speaking_path):
+                    appeared = True
+                    break
+                time.sleep(0.005)
+
+            if appeared:
+                # Phase 2 — wait for it to disappear
+                while time.time() < deadline:
+                    if not os.path.isfile(speaking_path):
+                        break
+                    if self._qa_abort:
+                        break
+                    time.sleep(0.05)
+            else:
+                LOG.warning("QA: isSpeaking signal never appeared — TTS may have completed before we started polling")
+
+            LOG.info("QA: TTS finished (isSpeaking gone) — opening follow-up window")
+
+            # Handle abort that arrived during TTS
+            if self._qa_abort:
+                reason = self._qa_abort_reason
+                self._qa_abort = False
+                self._qa_abort_reason = None
+                if reason == 'exit':
+                    LOG.info("QA: exit word during TTS — leaving QA mode")
+                    self.emit('mycroft.realtime.mode_changed', {'mode': 'qa_exit', 'reason': 'riva_exit_during_tts'})
+                    break
+
+            # Update session keepalive
+            self.last_word_time = time.time()
+
+        # Exit QA mode — reset everything and resume DETERMINISTIC
+        self.mode = MODE_DETERMINISTIC
+        self.qa_intent = None
+        self.qa_config = {}
+        self._qa_tts_event.clear()
+        self.previous_partial_text = ""
+        self.audio_buffer.clear()
+        self.session_start_buffer_len = 0
+        self.interim_matcher.reset_session()
+        self.final_matcher.reset_session()
+        self.shared_global_budget = self.interim_matcher.global_budget
+        self.interim_min_replay_pos = 0
+        self.final_min_replay_pos = 0
+        self.last_word_time = time.time()
+
+        if self.stt_backend == 'riva' and self.riva_stream_thread:
+            self.riva_stream_thread.reset()
+            self.riva_interim_word_count = 0
+            self.riva_final_word_count = 0
+
+        self._qa_exit_time = time.time()
+        LOG.info("QA mode complete — resumed DETERMINISTIC mode, Riva restarted")
+        self.emit('mycroft.realtime.mode_changed', {'mode': 'deterministic'})
+
+    def _on_qa_tts_done(self):
+        """Called when mycroft.audio.speech.end fires during QA mode."""
+        self._qa_tts_playing = False
+        self._qa_tts_event.set()
+
     # ── Repeat mode ───────────────────────────────────────────────────────────
 
     def _enter_repeat_mode(self, n, is_bare):
@@ -726,7 +1142,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             LOG.info(f"⏩ Repeat n={n} → already ran once, 0 additional — ignoring")
             return
 
-        LOG.info(f"🔁 REPEAT MODE: '{utterance}' × {additional} more time(s) (n={n})")
+        LOG.info(f"🔁 REPEAT MODE: '{str(len(utterance))}' × {additional} more time(s) (n={n})")
         self.emit('mycroft.realtime.mode_changed', {
             'mode': 'repeat',
             'utterance': utterance,
@@ -735,7 +1151,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
         now = time.time()
         for i in range(additional):
-            LOG.info(f"  🔁 Repeat {i+1}/{additional}: '{utterance}'")
+            LOG.info(f"  🔁 Repeat {i+1}/{additional}: '{str(len(utterance))}'")
             self.emit('recognizer_loop:utterance', {
                 'utterances': [utterance],
                 'lang': self.lang,
@@ -761,9 +1177,9 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
         if self.last_batch_time:
             latency = now - self.last_batch_time
-            LOG.info(f"[WHISPER] {word} (latency: {latency*1000:.0f}ms from last batch)")
+            LOG.info(f"[WHISPER] {str(len(word))} (latency: {latency*1000:.0f}ms from last batch)")
         else:
-            LOG.info(f"[WHISPER] {word}")
+            LOG.info(f"[WHISPER] {str(len(word))}")
 
         self.last_word_time = now
 
@@ -774,7 +1190,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
         if match:
             utterance = match['utterance']
-            LOG.info(f"✓ COMMAND MATCHED: '{utterance}' (intent: {match['intent']})")
+            LOG.info(f"✓ COMMAND MATCHED: '{str(len(utterance))}' (intent: {match['intent']})")
             self.emit('recognizer_loop:utterance', {
                 'utterances': [utterance],
                 'lang': self.lang
@@ -784,7 +1200,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             self.interim_matcher.reset()
             self.shared_global_budget = self.interim_matcher.global_budget
 
-        if self.interim_matcher.global_budget <= 0:
+        if self.interim_matcher.global_budget <= 0 and self.mode != MODE_QA:
             LOG.info(f"Whisper matcher budget exhausted — ending session")
             self.session_active = False
 
@@ -806,8 +1222,14 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         now = time.time()
         stream_name = "FINAL" if is_final else "INTERIM"
 
-        # During FREE_TEXT mode Riva is stopped, so no words arrive — ignore if any slip through.
+        # During FREE_TEXT mode Riva is stopped — ignore any words that slip through.
         if self.mode == MODE_FREE_TEXT:
+            return
+
+        # During QA mode Riva acts as a sentinel — only check for control words
+        # in the first few positions; ignore everything else.
+        if self.mode == MODE_QA:
+            self._handle_qa_riva_words(words, is_final)
             return
 
         # ── DETERMINISTIC / REPEAT mode: full dual-matcher logic ─────────────
@@ -838,11 +1260,11 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
             if is_refinement:
                 LOG.info(f"[RIVA {stream_name}] Refinement: "
-                         f"prev='{prev_transcript}' new='{transcript}' — resetting matcher")
+                         f"prev='{str(len(prev_transcript))}' new='{str(len(transcript))}' — resetting matcher")
                 matcher.reset()
             else:
                 LOG.info(f"[RIVA {stream_name}] True segment boundary: "
-                         f"prev='{prev_transcript}' new='{transcript}' — "
+                         f"prev='{str(len(prev_transcript))}' new='{str(len(transcript))}' — "
                          f"preserving {len(matcher.active_paths)} paths")
                 if is_final:
                     self.final_min_replay_pos = 0
@@ -866,7 +1288,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
             if prev_words != curr_words:
                 LOG.info(f"[RIVA {stream_name}] Transcript changed: "
-                         f"{prev_words} → {curr_words} | "
+                         f"{str(len(prev_words))} → {str(len(curr_words))} | "
                          f"Active paths: {len(matcher.active_paths)}")
 
                 # UNDO WINDOW: Only FINAL stream can undo a prior INTERIM execution
@@ -894,7 +1316,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                         if last_matched_words is None or last_match_position is None:
                             should_undo = True
                             LOG.info(f"⚠️  Transcript changed {time_since_last:.1f}s after "
-                                     f"execution — removed stale dedup entry: '{last_utterance}' "
+                                     f"execution — removed stale dedup entry: '{str(len(last_utterance))}' "
                                      f"(no position tracked)")
                         else:
                             matched_word_count = len(last_matched_words)
@@ -921,15 +1343,15 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                                                     valid_at_position.add(seq[pos]['word'])
                                         if replacement_word not in valid_at_position:
                                             replacement_all_valid = False
-                                            LOG.debug(f"Replacement word '{replacement_word}' "
+                                            LOG.debug(f"Replacement word '{str(len(replacement_word))}' "
                                                       f"not valid — keeping dedup protection")
                                             break
                                     if replacement_all_valid:
                                         should_undo = True
                                         LOG.info(f"⚠️  Matched words changed {time_since_last:.1f}s "
                                                  f"after execution at position {last_match_position}: "
-                                                 f"{last_matched_words} → {current_matched_words} — "
-                                                 f"removed stale dedup entry: '{last_utterance}'")
+                                                 f"{str(len(last_matched_words))} → {str(len(current_matched_words))} — "
+                                                 f"removed stale dedup entry: '{str(len(last_utterance))}'")
                                 else:
                                     LOG.debug(f"Transcript changed but matched words unchanged "
                                               f"— keeping dedup protection")
@@ -962,7 +1384,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         new_words = words[current_count:]
 
         if new_words:
-            LOG.debug(f"[RIVA {stream_name}] New words: {new_words} (processed {current_count}/{len(words)})")
+            LOG.debug(f"[RIVA {stream_name}] New words: {str(len(new_words))} (processed {current_count}/{len(words)})")
 
         # Update previous transcript
         if is_final:
@@ -978,7 +1400,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             else:
                 self.riva_interim_word_count = current_count
 
-            LOG.debug(f"[RIVA {stream_name}] {word}")
+            LOG.debug(f"[RIVA {stream_name}] {str(len(word))}")
 
             if self.debug:
                 event_name = ('mycroft.debug.riva.final' if is_final
@@ -997,7 +1419,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             if match:
                 utterance = match['utterance']
                 intent = match['intent']
-                LOG.info(f"✓ COMMAND MATCHED ({stream_name}): '{utterance}' (intent: {intent})")
+                LOG.info(f"✓ COMMAND MATCHED ({stream_name}): '{str(len(utterance))}' (intent: {str(len(intent))})")
 
                 # ── FREE_TEXT trigger ─────────────────────────────────────────
                 if intent.startswith(FREE_TEXT_TAG):
@@ -1012,6 +1434,15 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     self.final_matcher.reset()
                     break
 
+                # ── QA trigger ────────────────────────────────────────────────
+                if intent.startswith(QA_TAG):
+                    original_intent = intent[len(QA_TAG):]
+                    qa_cfg = self._qa_config_map.get(intent, {})
+                    self._enter_qa_mode(original_intent, qa_cfg)
+                    self.interim_matcher.reset()
+                    self.final_matcher.reset()
+                    break
+
                 # ── REPEAT trigger ────────────────────────────────────────────
                 if intent.startswith(REPEAT_TAG):
                     tag_body = intent[len(REPEAT_TAG):]  # e.g. '3' or '3:bare'
@@ -1020,7 +1451,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     try:
                         n = int(n_str)
                     except ValueError:
-                        LOG.warning(f"Invalid repeat intent tag: {intent}")
+                        LOG.warning(f"Invalid repeat intent tag: {str(len(intent))}")
                         continue
                     if self._is_duplicate(intent, now):
                         continue
@@ -1077,13 +1508,13 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                                     _valid_first.add(_first['word'])
                         _stitch_words = [w for w in _skipped if w in _valid_first]
                         if _stitch_words:
-                            LOG.info(f"⛔ FINAL cross-command stitch rejected: '{utterance}' "
-                                     f"skipped over command-starting word(s) {_stitch_words}")
+                            LOG.info(f"⛔ FINAL cross-command stitch rejected: '{str(len(utterance))}' "
+                                     f"skipped over command-starting word(s) {str(len(_stitch_words))}")
                             continue
 
                 # ── Deduplication ─────────────────────────────────────────────
                 if self._is_duplicate(utterance, now):
-                    LOG.info(f"⏭️  Skipping duplicate: '{utterance}'")
+                    LOG.info(f"⏭️  Skipping duplicate: '{str(len(utterance))}'")
                     continue
 
                 # ── Dispatch ──────────────────────────────────────────────────
@@ -1143,7 +1574,10 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # Budget sync after processing all words
         self.shared_global_budget = matcher.global_budget
 
-        if self.shared_global_budget <= 0:
+        # Budget exhaustion ends the session in DETERMINISTIC mode only —
+        # in QA mode Riva runs as sentinel and words accumulating here should
+        # not kill the session.
+        if self.shared_global_budget <= 0 and self.mode != MODE_QA:
             LOG.info(f"Global budget exhausted — ending session")
             self.session_active = False
             if self.stt_backend == 'riva' and self.riva_stream_thread:
@@ -1196,7 +1630,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             segments, _ = self.whisper_backend.transcribe(buffer_array, "")
             words_list = self.whisper_backend.segments_to_words(list(segments))
             whisper_text = " ".join([w.word.strip() for w in words_list])
-            LOG.info(f"✓ WHISPER result: {whisper_text}")
+            LOG.info(f"✓ WHISPER result: {str(len(whisper_text))}")
             return whisper_text
         except Exception as e:
             LOG.error(f"Whisper processing failed: {e}")
