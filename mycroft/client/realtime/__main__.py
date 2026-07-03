@@ -275,6 +275,7 @@ def connect_loop_events(loop):
     loop.on('recognizer_loop:utterance', handle_utterance)
     loop.on('recognizer_loop:speech.recognition.unknown', handle_unknown)
     loop.on('speak', handle_speak)
+    loop.on('mycroft.audio.speech.stop', lambda e: bus.emit(Message('mycroft.audio.speech.stop', e)))
     loop.on('recognizer_loop:record_begin', handle_record_begin)
     loop.on('recognizer_loop:awoken', handle_awoken)
     loop.on('recognizer_loop:wakeword', handle_wakeword)
@@ -442,6 +443,7 @@ def connect_bus_events(bus):
     bus.on("mycroft.paired", handle_paired)
     bus.on('recognizer_loop:audio_output_start', handle_audio_start)
     bus.on('recognizer_loop:audio_output_end', handle_audio_end)
+    bus.on('question-answerer-skill:tts_done', lambda _: loop._on_qa_tts_done() if loop and loop.mode == 'qa' else None)
     bus.on('mycroft.stop', handle_stop)
     bus.on('padatious:intents_ready', handle_intents_ready)
     # Re-subscribe when skills finishes training — handles the race where realtime
