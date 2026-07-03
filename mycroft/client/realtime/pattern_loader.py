@@ -63,6 +63,13 @@ def build_management_patterns(command_groups, stt_manage_config=None):
     return patterns
 
 
+def build_audio_wake_patterns(wake_phrases):
+    """Build audio:wake patterns from a list of trigger phrases (config: audio_wake.phrases)."""
+    if not wake_phrases:
+        return {}
+    return {f'{MANAGE_TAG}audio:wake': list(wake_phrases)}
+
+
 def load_entity_expansions(skill_path):
     """Load ENTITY_EXPANSIONS from a skill's __init__.py if it exists.
 

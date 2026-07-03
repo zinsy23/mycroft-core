@@ -295,7 +295,7 @@ def handle_intents_ready(event):
     from mycroft.client.realtime.pattern_loader import (
         load_entity_expansions, expand_pattern_entities,
         _split_free_text_pattern, _split_qa_pattern, load_quantifier_patterns,
-        build_management_patterns,
+        build_management_patterns, build_audio_wake_patterns,
         FREE_TEXT_TAG, REPEAT_TAG, QA_TAG
     )
     from mycroft.configuration import Configuration
@@ -401,6 +401,12 @@ def handle_intents_ready(event):
         loop.interim_matcher.register_intent(mgmt_intent, patterns)
         loop.final_matcher.register_intent(mgmt_intent, patterns)
 
+    # Audio wake patterns (play ding to wake audio device)
+    wake_phrases = realtime_config.get('audio_wake', {}).get('phrases', [])
+    for wake_intent, patterns in build_audio_wake_patterns(wake_phrases).items():
+        loop.interim_matcher.register_intent(wake_intent, patterns)
+        loop.final_matcher.register_intent(wake_intent, patterns)
+
     # Now partition all_sequences into skill_pattern_groups vs protected_patterns
     # by checking each pattern's intent name against command_groups
     loop.protected_patterns.clear()
@@ -422,6 +428,7 @@ def handle_intents_ready(event):
     LOG.info(f"Loaded {det_count} deterministic + {ft_count} free-text trigger patterns; "
              f"{len(repeat_patterns)} repeat intent variants; "
              f"{len(mgmt_patterns)} management patterns; "
+             f"{len(wake_phrases)} audio wake phrases; "
              f"{len(loop.skill_pattern_groups)} skill groups")
 
 

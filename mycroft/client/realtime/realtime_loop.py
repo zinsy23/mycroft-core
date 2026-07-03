@@ -12,6 +12,7 @@ command matching. Supports three operating modes:
 """
 
 import os
+import subprocess
 import time
 import threading
 from collections import deque
@@ -28,6 +29,7 @@ from mycroft.client.realtime.pattern_loader import FREE_TEXT_TAG, REPEAT_TAG, MA
 from mycroft.configuration import Configuration
 from mycroft.util.log import LOG
 from mycroft.util.signal import get_ipc_directory
+from mycroft.util import resolve_resource_file
 
 # Non-terminal words: structural words that can't end a query.
 # Silence after these gets the full session timeout rather than stop_silence_seconds.
@@ -601,6 +603,16 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             action: 'enable', 'disable', or 'stt'
             target: skill_prefix, 'commands', or 'load'/'unload' for stt action
         """
+        # ── Audio device wake (play ding non-blocking) ────────────────────────
+        if action == 'audio' and target == 'wake':
+            snd = resolve_resource_file('snd/start_listening.wav')
+            if snd:
+                subprocess.Popen(['paplay', snd])
+                LOG.info("[MANAGE] audio:wake — played ding")
+            else:
+                LOG.warning("[MANAGE] audio:wake — start_listening.wav not found")
+            return
+
         # ── Secondary STT load/unload ─────────────────────────────────────────
         if action == 'stt':
             if not self.free_text_stt:
@@ -1564,8 +1576,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 if intent.startswith(MANAGE_TAG):
                     tag_body = intent[len(MANAGE_TAG):]  # e.g. 'enable:search'
                     action, _, target_name = tag_body.partition(':')
-                    if action == 'stt':
-                        # STT load/unload — pass target_name ('load'/'unload') directly
+                    if action in ('stt', 'audio'):
+                        # STT load/unload and audio:wake — pass target_name directly
                         manage_target = target_name
                     elif target_name == 'commands':
                         manage_target = None  # global mute/unmute
