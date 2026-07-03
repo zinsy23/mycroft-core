@@ -319,6 +319,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self._qa_committed_text = None         # the committed phrase text
         self._qa_trigger_words = []            # entry phrase words to strip from first FINAL
         self._qa_listen_deadline = 0.0         # reset on each FINAL so silence gap triggers timeout
+        self._qa_tts_grace_until = 0.0         # epoch time until which sentinel+accumulation are suppressed
 
         # Repeat mode state
         self.last_executed_command = None       # (utterance, intent) of last non-repeat command
@@ -875,18 +876,20 @@ class RealtimeRecognizerLoop(RecognizerLoop):
     def _handle_qa_riva_words(self, words, is_final):
         """Riva sentinel handler during QA mode.
 
-        Only FINAL transcript is used (more accurate). Checks if any of the
-        first qa_control_word_positions words match exit or interrupt sets.
+        Single exit/interrupt words fire on INTERIM for instant response.
+        Phrases require FINAL for accuracy.
         Sets _qa_abort / _qa_abort_reason and unblocks the TTS wait event
         so _do_qa_session can react immediately.
         """
-        if not is_final or not words:
+        if not words:
             return
         # Suppress sentinel while TTS is active — Riva hears TTS output through mic.
         # Use isSpeaking IPC signal: backend-agnostic, set by TTS.execute(), cleared by end_audio().
         speaking_path = os.path.join(get_ipc_directory(), 'signal', 'isSpeaking')
         if os.path.isfile(speaking_path):
             return
+        if self._qa_tts_grace_until and time.time() < self._qa_tts_grace_until:
+            return  # TTS tail grace period — discard mic pickup of speaker output
         if self._qa_abort:
             return  # already aborted, don't double-fire
 
@@ -900,35 +903,37 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         transcript = ' '.join(words).lower()
         check_words = [w.lower().rstrip('.,!?') for w in words[:max_pos]]
 
-        # Check exit
+        # Single words: fire on INTERIM for instant response (distinctive enough to be safe)
         for w in check_words:
             if w in exit_words:
-                LOG.info(f"QA sentinel: exit word '{w}' detected by Riva")
-                self.emit('mycroft.realtime.qa_debug', {'msg': f"exit word: '{w}'"})
+                LOG.info(f"QA sentinel: exit word '{w}' detected ({'INTERIM' if not is_final else 'FINAL'})")
+                self.emit('mycroft.realtime.qa_debug', {'msg': f"exit word: '{w}' ({'interim' if not is_final else 'final'})"})
                 self._qa_abort = True
                 self._qa_abort_reason = 'exit'
                 self.emit('mycroft.audio.speech.stop', {})
                 self._qa_tts_event.set()
                 self._qa_committed_event.set()
                 return
+        for w in check_words:
+            if w in interrupt_words:
+                LOG.info(f"QA sentinel: interrupt word '{w}' detected ({'INTERIM' if not is_final else 'FINAL'})")
+                self.emit('mycroft.realtime.qa_debug', {'msg': f"interrupt word: '{w}' ({'interim' if not is_final else 'final'})"})
+                self._qa_abort = True
+                self._qa_abort_reason = 'interrupt'
+                self.emit('mycroft.audio.speech.stop', {})
+                self._qa_tts_event.set()
+                self._qa_committed_event.set()
+                return
+
+        # Phrases: FINAL only for reliability
+        if not is_final:
+            return
         for phrase in exit_phrases:
             if transcript.startswith(phrase):
                 LOG.info(f"QA sentinel: exit phrase '{phrase}' detected by Riva")
                 self.emit('mycroft.realtime.qa_debug', {'msg': f"exit phrase: '{phrase}'"})
                 self._qa_abort = True
                 self._qa_abort_reason = 'exit'
-                self.emit('mycroft.audio.speech.stop', {})
-                self._qa_tts_event.set()
-                self._qa_committed_event.set()
-                return
-
-        # Check interrupt
-        for w in check_words:
-            if w in interrupt_words:
-                LOG.info(f"QA sentinel: interrupt word '{w}' detected by Riva")
-                self.emit('mycroft.realtime.qa_debug', {'msg': f"interrupt word: '{w}'"})
-                self._qa_abort = True
-                self._qa_abort_reason = 'interrupt'
                 self.emit('mycroft.audio.speech.stop', {})
                 self._qa_tts_event.set()
                 self._qa_committed_event.set()
@@ -1040,6 +1045,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         """
         follow_up_timeout = qa_config.get('follow_up_timeout_seconds', 15)
         tts_safety_cap = qa_config.get('tts_safety_cap_seconds', 60)
+        tts_grace_seconds = qa_config.get('tts_grace_seconds', 1.5)
 
         # Store trigger words so _qa_accumulate_final can strip them from the first FINAL
         self._qa_trigger_words = trigger_utterance.lower().split()
@@ -1144,26 +1150,39 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             # open a fresh follow-up window — the user wants a different answer, not to exit QA.
             if self._qa_abort:
                 reason = self._qa_abort_reason
-                self._qa_abort = False
-                self._qa_abort_reason = None
                 if reason == 'exit':
                     LOG.info("QA: exit word during TTS — killing TTS, opening next follow-up")
                     self.emit('mycroft.realtime.qa_debug', {'msg': 'exit during TTS → next follow-up'})
+                    # Reset Riva BEFORE clearing _qa_abort so the sentinel's early-return
+                    # guard stays active while the reset flushes any in-flight words.
                     if self.stt_backend == 'riva' and self.riva_stream_thread:
                         self.riva_stream_thread.reset()
                         self.riva_interim_word_count = 0
                         self.riva_final_word_count = 0
+                    self._qa_abort = False
+                    self._qa_abort_reason = None
                     self.last_word_time = time.time()
+                    self._qa_tts_grace_until = time.time() + tts_grace_seconds
                     continue
+                self._qa_abort = False
+                self._qa_abort_reason = None
 
-            LOG.info("QA: TTS done — opening next follow-up window")
+            LOG.info("QA: TTS done — grace period then opening next follow-up window")
             self.last_word_time = time.time()
+            self._qa_tts_grace_until = time.time() + tts_grace_seconds
 
-            # Reset Riva for next question
+            # Drain Riva during grace period — keeps stream healthy, discards any
+            # mic pickup of TTS tail before the listening window opens
+            grace_end = self._qa_tts_grace_until
             if self.stt_backend == 'riva' and self.riva_stream_thread:
                 self.riva_stream_thread.reset()
                 self.riva_interim_word_count = 0
                 self.riva_final_word_count = 0
+            while time.time() < grace_end:
+                chunk = self.responsive_recognizer.record_sound_chunk(source)
+                if self.stt_backend == 'riva' and self.riva_stream_thread:
+                    self.riva_stream_thread.feed_audio(chunk)
+            self._qa_tts_grace_until = 0.0
 
         # Exit QA mode — reset everything and resume DETERMINISTIC
         self.mode = MODE_DETERMINISTIC
@@ -1308,7 +1327,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # the phrase-completion classifier.
         if self.mode == MODE_QA:
             self._handle_qa_riva_words(words, is_final)
-            if is_final and not self._qa_abort and not self._qa_tts_playing:
+            if is_final and not self._qa_abort and not self._qa_tts_playing and not (self._qa_tts_grace_until and time.time() < self._qa_tts_grace_until):
                 self._qa_accumulate_final(" ".join(words))
             return
 
