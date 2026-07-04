@@ -10,6 +10,10 @@ Multiple candidate paths compete, weak paths are pruned, and the fittest path wi
 
 import re
 from mycroft.util.log import LOG
+from mycroft.client.realtime.number_parser import NUMBER_WORDS, words_to_int
+
+# Entity names that get greedy multi-word number capture
+_NUMBER_ENTITY_NAMES = frozenset({'number', 'signed_number'})
 
 
 class CommandPattern:
@@ -104,7 +108,11 @@ class CommandPattern:
             if '{' in token and '}' in token:
                 # Entity like {value}
                 entity_name = token.strip('{}')
-                all_token_options.append([{'entity': entity_name}])
+                if entity_name in _NUMBER_ENTITY_NAMES:
+                    # Number entities get a special greedy slot type
+                    all_token_options.append([{'number_slot': entity_name}])
+                else:
+                    all_token_options.append([{'entity': entity_name}])
 
             elif '[' in token and ']' in token:
                 # Check if it's a word+suffix or standalone choice
@@ -184,6 +192,10 @@ class MatcherPath:
         self.base_max_fillers = filler_config.get('base_max', 4)
         self.fitness_score = 0  # Number of valid words matched
         self.start_position = start_position  # Transcript position of first word
+        # Greedy number accumulation: when we're sitting on a number_slot,
+        # accumulate number words here until a non-number word arrives.
+        self._number_buf = []      # words collected so far for the active slot
+        self._number_slot_name = None  # entity name of the active slot
 
     def try_add_word(self, word, stream_type="FINAL"):
         """Try to add a word to this path.
@@ -197,36 +209,70 @@ class MatcherPath:
         """
         word = word.lower().strip()
 
-        # Get sequences matching current word list
-        matching_sequences = self._get_matching_sequences()
+        # ── greedy number slot ────────────────────────────────────────────────
+        # If we are currently accumulating into a number slot, keep consuming
+        # number words. A non-number word closes the slot and falls through to
+        # normal matching (the slot is "consumed" as a virtual matched word).
+        if self._number_slot_name is not None:
+            valid_for_slot = NUMBER_WORDS
+            if self._number_slot_name == 'signed_number' and not self._number_buf:
+                from mycroft.client.realtime.number_parser import SIGN_WORDS
+                valid_for_slot = SIGN_WORDS | NUMBER_WORDS
+            if word in valid_for_slot:
+                self._number_buf.append(word)
+                self.consecutive_fillers = 0
+                self.fitness_score += 1
+                increment = self.filler_config.get('increment_per_word', 1)
+                self.local_budget += increment
+                return True
+            else:
+                # Close the slot — validate the accumulated number
+                phrase = ' '.join(self._number_buf)
+                if not phrase or words_to_int(phrase) is None:
+                    # Invalid number sequence — kill this path by draining budget
+                    self.local_budget = 0
+                    return False
+                # Commit slot: record as a virtual matched word and advance
+                self.matched_words.append(f'__number__:{phrase}')
+                self._number_slot_name = None
+                self._number_buf = []
+                # Now fall through to match `word` against the next position
 
-        # Get valid next words
+        # ── normal matching ───────────────────────────────────────────────────
+        matching_sequences = self._get_matching_sequences()
         valid_next_words = self._get_valid_next_words(matching_sequences)
 
-        # Check if word is valid
+        # Check if the next position is a number slot
+        if '<NUMBER_SLOT>' in valid_next_words:
+            slot_name = self._get_next_number_slot_name(matching_sequences)
+            valid_for_slot = NUMBER_WORDS
+            if slot_name == 'signed_number':
+                from mycroft.client.realtime.number_parser import SIGN_WORDS
+                valid_for_slot = SIGN_WORDS | NUMBER_WORDS
+            if word in valid_for_slot:
+                self._number_slot_name = slot_name
+                self._number_buf = [word]
+                self.consecutive_fillers = 0
+                self.fitness_score += 1
+                if len(self.matched_words) > 0:
+                    increment = self.filler_config.get('increment_per_word', 1)
+                    self.local_budget += increment
+                return True
+
         is_valid = word in valid_next_words or '<ENTITY>' in valid_next_words
 
         if is_valid:
-            # Valid word - add to list
             self.matched_words.append(word)
             self.consecutive_fillers = 0
             self.fitness_score += 1
-
-            # Update local budget
             if len(self.matched_words) == 1:
-                # First word - budget breaks even
                 pass
             else:
-                # Consecutive match - increase budget
                 increment = self.filler_config.get('increment_per_word', 1)
                 self.local_budget += increment
-
             return True
         else:
-            # Filler word - not added
             self.consecutive_fillers += 1
-            # INTERIM/FINAL split: Only FINAL fillers decrease path's local budget
-            # INTERIM fillers don't impact budget (survival of the fittest - valid paths survive INTERIM garbage)
             if stream_type == "FINAL":
                 self.local_budget = max(0, self.local_budget - 1)
             return False
@@ -250,7 +296,12 @@ class MatcherPath:
                     if seq_item['word'] != word:
                         match = False
                         break
-                # Entities match anything
+                elif 'number_slot' in seq_item:
+                    # Virtual __number__:phrase word matches any number_slot
+                    if not word.startswith('__number__:'):
+                        match = False
+                        break
+                # plain entity matches anything
 
             if match:
                 matching.append(seq_info)
@@ -274,8 +325,21 @@ class MatcherPath:
                 valid_words.add(next_item['word'])
             elif 'entity' in next_item:
                 valid_words.add('<ENTITY>')
+            elif 'number_slot' in next_item:
+                valid_words.add('<NUMBER_SLOT>')
 
         return valid_words
+
+    def _get_next_number_slot_name(self, matching_sequences):
+        """Return the entity name of the number_slot at the current position."""
+        next_position = len(self.matched_words)
+        for seq_info in matching_sequences:
+            sequence = seq_info['sequence']
+            if next_position < len(sequence):
+                item = sequence[next_position]
+                if 'number_slot' in item:
+                    return item['number_slot']
+        return 'number'
 
     def check_completion(self):
         """Check if this path has completed a command.
@@ -283,29 +347,57 @@ class MatcherPath:
         Returns:
             dict or None: Match result if complete, None otherwise
         """
+        # If a number slot is still open (FINAL arrived mid-accumulation),
+        # close it now so we can check for completion.
+        matched = self.matched_words
+        if self._number_slot_name is not None and self._number_buf:
+            phrase = ' '.join(self._number_buf)
+            if words_to_int(phrase) is not None:
+                matched = matched + [f'__number__:{phrase}']
+
         for seq_info in self.all_sequences:
             sequence = seq_info['sequence']
 
-            if len(sequence) != len(self.matched_words):
+            if len(sequence) != len(matched):
                 continue
 
-            match = True
+            ok = True
             entities = {}
 
-            for i, word in enumerate(self.matched_words):
+            for i, word in enumerate(matched):
                 seq_item = sequence[i]
 
                 if 'word' in seq_item:
                     if seq_item['word'] != word:
-                        match = False
+                        ok = False
                         break
+                elif 'number_slot' in seq_item:
+                    if not word.startswith('__number__:'):
+                        ok = False
+                        break
+                    phrase = word[len('__number__:'):]
+                    val = words_to_int(phrase)
+                    if val is None:
+                        ok = False
+                        break
+                    entities[seq_item['number_slot']] = val
                 elif 'entity' in seq_item:
                     entities[seq_item['entity']] = word
 
-            if match:
+            if ok:
+                # Commit the open slot if we used the extended matched list
+                if matched is not self.matched_words:
+                    self.matched_words = matched
+                    self._number_slot_name = None
+                    self._number_buf = []
+                # Build clean utterance: replace __number__:phrase with spoken words
+                clean_words = [
+                    w[len('__number__:'):] if w.startswith('__number__:') else w
+                    for w in self.matched_words
+                ]
                 return {
                     'intent': seq_info['intent'],
-                    'utterance': ' '.join(self.matched_words),
+                    'utterance': ' '.join(clean_words),
                     'entities': entities,
                     'pattern': seq_info['pattern']
                 }
@@ -499,8 +591,12 @@ class StreamingCommandMatcher:
             for path in top_paths:
                 LOG.debug(f"  Path {path.path_id}: {path.matched_words} (fitness={path.fitness_score}, budget={path.local_budget})")
 
-        # Check for complete matches - fittest wins
+        # Check for complete matches - fittest wins.
+        # Skip paths with an open number slot — they're still accumulating;
+        # check_completion will be called explicitly at FINAL boundary.
         for path in sorted(self.active_paths, key=lambda p: p.fitness_score, reverse=True):
+            if path._number_slot_name is not None:
+                continue
             match = path.check_completion()
             if match:
                 LOG.info(f"  ✓ COMPLETE MATCH from path {path.path_id}: {match}")

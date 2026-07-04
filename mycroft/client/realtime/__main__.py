@@ -96,9 +96,12 @@ def handle_utterance(event):
     if intent:
         # Realtime already matched — emit directly to the skill, bypassing Padatious
         utterance = event['utterances'][0]
+        entities = event.get('entities', {})
+        LOG.info(f"handle_utterance: intent={intent} entities={entities}")
         bus.emit(Message(intent, {
             'utterance': utterance,
-            'utterances': event['utterances']
+            'utterances': event['utterances'],
+            'entities': entities,
         }))
     else:
         context = {'client_name': 'mycroft_listener',

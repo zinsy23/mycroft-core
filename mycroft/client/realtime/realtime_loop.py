@@ -1640,7 +1640,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 self.emit('recognizer_loop:utterance', {
                     'utterances': [utterance],
                     'lang': self.lang,
-                    'intent': intent
+                    'intent': intent,
+                    'entities': match.get('entities', {}),
                 })
                 self.emit('mycroft.realtime.command_matched', {
                     'utterance': utterance,
@@ -1689,6 +1690,39 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
                 LOG.debug(f"Both matchers reset after {stream_name} match")
                 break
+
+        # FINAL boundary: close any open number slots and check for completion.
+        # Number slots stay open during word processing to accumulate greedily;
+        # when the FINAL stream ends we know the user has stopped speaking.
+        if is_final:
+            for path in list(matcher.active_paths):
+                if path._number_slot_name is not None:
+                    match = path.check_completion()
+                    if match:
+                        utterance = match['utterance']
+                        intent = match['intent']
+                        LOG.info(f"✓ COMMAND MATCHED (FINAL number close): '{utterance}' (intent: {intent})")
+                        if not self._is_duplicate(utterance, now):
+                            self.emit('recognizer_loop:utterance', {
+                                'utterances': [utterance],
+                                'lang': self.lang,
+                                'intent': intent,
+                                'entities': match.get('entities', {}),
+                            })
+                            self.emit('mycroft.realtime.command_matched', {
+                                'utterance': utterance,
+                                'intent': intent,
+                                'stream': 'FINAL'
+                            })
+                            self._record_execution(utterance, now, 'FINAL',
+                                                   utterance.split(), None, intent)
+                            if self.repeat_enabled:
+                                self._open_repeat_window()
+                        self.shared_global_budget = path.local_budget
+                        matcher.global_budget = path.local_budget
+                        self.interim_matcher.reset()
+                        self.final_matcher.reset()
+                        break
 
         # Budget sync after processing all words
         self.shared_global_budget = matcher.global_budget
