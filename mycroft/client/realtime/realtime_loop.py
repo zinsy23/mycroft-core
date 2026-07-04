@@ -1076,6 +1076,10 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             self.riva_final_word_count = 0
 
         LOG.info(f"QA: session started — listening via Riva FINAL + classifier (trigger: '{trigger_utterance}')")
+        snd = resolve_resource_file('snd/start_listening.wav')
+        if snd:
+            subprocess.Popen(['paplay', snd])
+        os.system(r"/home/joseph/.local/bin/polybar-flash dunst FFA500 &")
 
         while self.mode == MODE_QA and self.session_active:
             self._qa_abort = False
@@ -1197,6 +1201,10 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             self._qa_tts_grace_until = 0.0
 
         # Exit QA mode — reset everything and resume DETERMINISTIC
+        snd = resolve_resource_file('snd/start_listening.wav')
+        if snd:
+            subprocess.Popen(['paplay', snd])
+        os.system(r"/home/joseph/.local/bin/polybar-flash dunst FFA500 &")
         self.mode = MODE_DETERMINISTIC
         self.qa_intent = None
         self.qa_config = {}
