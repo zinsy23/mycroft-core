@@ -1696,7 +1696,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # when the FINAL stream ends we know the user has stopped speaking.
         if is_final:
             for path in list(matcher.active_paths):
-                if path._number_slot_name is not None:
+                if path._number_slot_name is not None or path._calc_slot_name is not None:
                     match = path.check_completion()
                     if match:
                         utterance = match['utterance']
