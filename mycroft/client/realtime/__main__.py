@@ -296,7 +296,7 @@ def connect_loop_events(loop):
 def handle_intents_ready(event):
     """Receive intent patterns from skills service when available."""
     from mycroft.client.realtime.pattern_loader import (
-        load_entity_expansions, expand_pattern_entities,
+        load_entity_expansions, load_skill_config, expand_pattern_entities,
         _split_free_text_pattern, _split_qa_pattern, load_quantifier_patterns,
         build_management_patterns, build_audio_wake_patterns,
         FREE_TEXT_TAG, REPEAT_TAG, QA_TAG
@@ -342,6 +342,12 @@ def handle_intents_ready(event):
         try:
             skill_path = os.path.dirname(os.path.dirname(os.path.dirname(file_path)))
             entity_expansions = load_entity_expansions(skill_path)
+            skill_cfg = load_skill_config(skill_path)
+            if skill_cfg.get('repeat_exempt'):
+                # Use the skill directory name as the prefix (works regardless of command_groups)
+                skill_dir_name = os.path.basename(skill_path)
+                loop._repeat_exempt_prefixes.add(skill_dir_name)
+                LOG.info(f"Repeat-exempt skill registered: {skill_dir_name}")
 
             with open(file_path, 'r') as f:
                 pattern_lines = [line.strip() for line in f.readlines() if line.strip()]

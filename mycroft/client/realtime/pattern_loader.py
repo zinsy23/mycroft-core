@@ -70,6 +70,26 @@ def build_audio_wake_patterns(wake_phrases):
     return {f'{MANAGE_TAG}audio:wake': list(wake_phrases)}
 
 
+def load_skill_config(skill_path):
+    """Load SKILL_CONFIG from a skill's __init__.py if it exists.
+
+    Returns:
+        dict: Skill config or empty dict if not found
+    """
+    import importlib.util
+    try:
+        init_path = os.path.join(skill_path, '__init__.py')
+        if not os.path.exists(init_path):
+            return {}
+        spec = importlib.util.spec_from_file_location("temp_skill_cfg", init_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return getattr(module, 'SKILL_CONFIG', {})
+    except Exception as e:
+        LOG.debug(f"Could not load SKILL_CONFIG from {skill_path}: {e}")
+        return {}
+
+
 def load_entity_expansions(skill_path):
     """Load ENTITY_EXPANSIONS from a skill's __init__.py if it exists.
 

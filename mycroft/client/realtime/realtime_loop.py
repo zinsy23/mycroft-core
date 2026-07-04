@@ -283,6 +283,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.protected_patterns = []     # always-active: management commands
         self.manually_disabled = set()   # skill_prefixes manually disabled
         self.global_mute = False         # True when "disable commands" fired
+        self._repeat_exempt_prefixes = set()  # skill prefixes that never open repeat window
 
         # Audio batching buffer for whisper streaming (legacy path)
         self.whisper_chunk_buffer = []
@@ -460,7 +461,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
         # Open repeat window if cross-session repeat is enabled and we have a prior command
         if self.repeat_enabled and self.repeat_cross_session and self.last_executed_command:
-            self._open_repeat_window()
+            self._open_repeat_window(intent=self.last_executed_command[1])
 
         if stream:
             stream.stream_start()
@@ -533,20 +534,25 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
     # ── Repeat window helpers ─────────────────────────────────────────────────
 
-    def _open_repeat_window(self):
-        """Add quantifier first-words to the transient valid-first-word set."""
+    def _open_repeat_window(self, intent=None):
+        """Open the repeat window unless the triggering intent is from an exempt skill."""
         if not self.repeat_enabled:
             return
-        # Both matchers maintain a transient_first_words set; we populate it here.
-        # pattern_loader registered __REPEAT__:N:bare patterns — the matcher already
-        # knows those sequences. We just flag the window as open so the dispatch
-        # handler applies the window check.
+        if intent and self._repeat_exempt_prefixes:
+            skill_prefix = intent.partition(':')[0]
+            if skill_prefix in self._repeat_exempt_prefixes:
+                LOG.info(f"Repeat window suppressed — '{skill_prefix}' is repeat-exempt")
+                return
         self.repeat_window_open = True
+        self.interim_matcher.repeat_window_open = True
+        self.final_matcher.repeat_window_open = True
         LOG.info(f"Repeat window opened ({self.repeat_window_seconds}s)")
 
     def _close_repeat_window(self):
         """Remove quantifier first-words from the transient valid-first-word set."""
         self.repeat_window_open = False
+        self.interim_matcher.repeat_window_open = False
+        self.final_matcher.repeat_window_open = False
         LOG.info("Repeat window closed")
 
     # ── Command group management ──────────────────────────────────────────────
@@ -1572,6 +1578,11 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     except ValueError:
                         LOG.warning(f"Invalid repeat intent tag: {str(len(intent))}")
                         continue
+                    # Bare quantifier outside window — skip without resetting matchers
+                    # so other active paths (e.g. calc slots containing "times") survive
+                    if is_bare and not self.repeat_window_open:
+                        LOG.info(f"⏩ Bare repeat '{utterance}' outside window — skipping, leaving paths active")
+                        continue
                     if self._is_duplicate(intent, now):
                         continue
                     self.interim_matcher.reset()
@@ -1686,7 +1697,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
                 # Open repeat window for bare quantifier matching
                 if self.repeat_enabled:
-                    self._open_repeat_window()
+                    self._open_repeat_window(intent=intent)
 
                 LOG.debug(f"Both matchers reset after {stream_name} match")
                 break
@@ -1717,7 +1728,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                             self._record_execution(utterance, now, 'FINAL',
                                                    utterance.split(), None, intent)
                             if self.repeat_enabled:
-                                self._open_repeat_window()
+                                self._open_repeat_window(intent=intent)
                         self.shared_global_budget = path.local_budget
                         matcher.global_budget = path.local_budget
                         self.interim_matcher.reset()

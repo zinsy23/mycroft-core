@@ -510,6 +510,7 @@ class StreamingCommandMatcher:
 
         # Cache of all expanded sequences for faster matching
         self.all_sequences = []  # Will be populated when patterns are registered
+        self.repeat_window_open = False  # Set by realtime_loop when window opens/closes
 
         # Multi-path matching state
         self.active_paths = []  # List of MatcherPath objects competing
@@ -656,6 +657,9 @@ class StreamingCommandMatcher:
                 LOG.debug(f"  Path {path.path_id}: {path.matched_words} (fitness={path.fitness_score}, budget={path.local_budget})")
 
         # Check for complete matches - fittest wins.
+        # Skip bare repeat matches when the window is closed — leaving paths active
+        # so words like "times" can still feed into calc slots on the same stream.
+        repeat_window_open = getattr(self, 'repeat_window_open', True)
         # Skip paths that have or had a slot — number/calc intents fire on FINAL only,
         # even after the slot closes, to prevent premature INTERIM execution.
         for path in sorted(self.active_paths, key=lambda p: p.fitness_score, reverse=True):
@@ -663,6 +667,15 @@ class StreamingCommandMatcher:
                 continue
             match = path.check_completion()
             if match:
+                # Don't fire bare repeat matches when the window is closed —
+                # leave all paths active so other patterns (e.g. calc) can still match
+                from mycroft.client.realtime.pattern_loader import REPEAT_TAG
+                if (match['intent'].startswith(REPEAT_TAG) and
+                        match['intent'].endswith(':bare') and
+                        not repeat_window_open):
+                    LOG.info(f"  ⏩ Bare repeat '{match['utterance']}' suppressed in matcher — window closed")
+                    continue
+
                 LOG.info(f"  ✓ COMPLETE MATCH from path {path.path_id}: {match}")
 
                 # Winner! Sync local budget to global
