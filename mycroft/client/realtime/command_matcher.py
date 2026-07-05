@@ -230,7 +230,9 @@ class MatcherPath:
                 self._number_buf.append(word)
                 self.consecutive_fillers = 0
                 self.fitness_score += 1
-                self.local_budget += self.filler_config.get('increment_per_word', 1)
+                # First slot word already incremented budget on slot entry — skip
+                if len(self._number_buf) > 1:
+                    self.local_budget += self.filler_config.get('increment_per_word', 1)
                 return True
             # Not a slot word — check if it's a valid post-entity pattern word.
             # Only attempt to close if buffer holds a valid complete number.
@@ -258,7 +260,9 @@ class MatcherPath:
                 self._calc_buf.append(word)
                 self.consecutive_fillers = 0
                 self.fitness_score += 1
-                self.local_budget += self.filler_config.get('increment_per_word', 1)
+                # First slot word already incremented budget on slot entry — skip
+                if len(self._calc_buf) > 1:
+                    self.local_budget += self.filler_config.get('increment_per_word', 1)
                 return True
             # Not a slot word — check if it's a valid post-entity pattern word.
             # Only attempt to close if buffer holds a valid complete expression.
