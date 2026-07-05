@@ -233,11 +233,11 @@ CALC_WORDS = (NUMBER_WORDS | SIGN_WORDS | frozenset(OPERATOR_WORDS)
 
 # ── tokenizer ────────────────────────────────────────────────────────────────
 
-def _tokenize_calc(tokens: list[str]) -> list | None:
+def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
     """Convert a spoken token list into a mixed list of numbers and operator symbols.
 
     "forty two plus negative eighteen times three" →
-        [42, '+', -18, '*', 3]
+        ([42, '+', -18, '*', 3], 'mixed')
 
     Sign vs operator disambiguation:
       'minus'/'negative' is a SIGN if it appears at the start or immediately
@@ -248,11 +248,14 @@ def _tokenize_calc(tokens: list[str]) -> list | None:
       infix:    "two to the power of eight" → 256
       prefix:   "square root of nine" → 3.0, "cube root of twenty seven" → 3.0
 
-    Returns None if the token list cannot be parsed as a valid expression.
+    Returns (mixed_tokens, operation) or None on failure.
+    operation: 'add' | 'subtract' | 'multiply' | 'divide' | 'modulo' |
+               'power' | 'root' | 'abs' | 'mixed'
     """
     result = []
     i = 0
     n = len(tokens)
+    _ops_seen = set()  # track which operation types appear
 
     def last_token_is_number():
         return result and isinstance(result[-1], (int, float))
@@ -291,7 +294,7 @@ def _tokenize_calc(tokens: list[str]) -> list | None:
     while i < n:
         tok = tokens[i]
 
-        # ── prefix unary (square root / cube root) ────────────────────────────
+        # ── prefix unary (square root / cube root / absolute value) ──────────
         for phrase, fn in _PREFIX_UNARY_PHRASES:
             plen = len(phrase)
             if tuple(tokens[i:i + plen]) == phrase:
@@ -313,12 +316,18 @@ def _tokenize_calc(tokens: list[str]) -> list | None:
                 operand = sign * val
                 result.append(fn(operand))
                 i = j + consumed
+                # tag operation type by which phrase matched
+                if phrase[0] in ('square', 'cube'):
+                    _ops_seen.add('root')
+                else:
+                    _ops_seen.add('abs')
                 break
         else:
             # ── sign/operator disambiguation for 'minus'/'negative' ──────────
             if tok in ('minus', 'negative'):
                 if last_token_is_number():
                     result.append('-')
+                    _ops_seen.add('subtract')
                     i += 1
                     continue
                 else:
@@ -327,6 +336,7 @@ def _tokenize_calc(tokens: list[str]) -> list | None:
             # ── postfix unary (squared / cubed) — must follow a number ────────
             elif tok in _POSTFIX_UNARY and last_token_is_number():
                 result[-1] = _POSTFIX_UNARY[tok](result[-1])
+                _ops_seen.add('power')
                 i += 1
                 continue
 
@@ -341,6 +351,7 @@ def _tokenize_calc(tokens: list[str]) -> list | None:
                 if matched_phrase:
                     plen = len(matched_phrase)
                     result.append('**')
+                    _ops_seen.add('power')
                     i += plen
                     continue
 
@@ -348,12 +359,13 @@ def _tokenize_calc(tokens: list[str]) -> list | None:
             if tok in OPERATOR_WORDS and tok not in ('minus', 'negative'):
                 sym = OPERATOR_WORDS[tok]
                 if sym is None:
-                    # helper word — skip (consumed as part of a phrase above, or filler)
                     i += 1
                     continue
                 if not last_token_is_number():
                     return None  # operator without a left operand
                 result.append(sym)
+                _ops_seen.add({'+': 'add', '-': 'subtract', '*': 'multiply',
+                               '/': 'divide', '%': 'modulo'}[sym])
                 i += 1
                 # Consume optional 'by' after 'multiplied'/'divided'
                 if i < n and tokens[i] == 'by':
@@ -389,7 +401,8 @@ def _tokenize_calc(tokens: list[str]) -> list | None:
     if not isinstance(result[-1], (int, float)):
         return None
 
-    return result
+    operation = _ops_seen.pop() if len(_ops_seen) == 1 else 'mixed'
+    return result, operation
 
 
 # ── evaluator ────────────────────────────────────────────────────────────────
@@ -489,9 +502,10 @@ def words_to_calc(phrase: str) -> dict | None:
     # multiple tokens (infix) or a result that required a unary op (postfix/prefix).
     # We defer to post-tokenize check below rather than pre-scanning words, because
     # 'minus' is ambiguous (sign vs subtraction operator).
-    mixed = _tokenize_calc(tokens)
-    if mixed is None:
+    tokenized = _tokenize_calc(tokens)
+    if tokenized is None:
         return None
+    mixed, operation = tokenized
     # Require at least one operation. A bare (possibly signed) number tokenizes to
     # a single-element list [n]. Any real operation produces either multiple tokens
     # (infix: [n, op, n, ...]) or consumed extra spoken words to produce the result
@@ -503,10 +517,40 @@ def words_to_calc(phrase: str) -> dict | None:
     result = _evaluate(mixed)
     if result is None:
         return None
-    if result == int(result):
+    if isinstance(result, float) and result == int(result):
         result = int(result)
     return {
         'result': result,
         'expr': phrase,
         'tokens': mixed,
+        'operation': operation,
     }
+
+
+def format_calc_result(
+    result_dict: dict,
+    decimal_places: int = 2,
+    overrides: dict | None = None,
+) -> int | float:
+    """Round a words_to_calc result for display.
+
+    Applies per-operation overrides first, then the global default.
+    Integer results are always returned as-is (no rounding needed).
+
+    Args:
+        result_dict:    dict returned by words_to_calc
+        decimal_places: global decimal places for float results (default 2)
+        overrides:      per-operation overrides, e.g. {'root': 4, 'divide': 3}
+                        valid keys: 'add', 'subtract', 'multiply', 'divide',
+                                    'modulo', 'power', 'root', 'abs', 'mixed'
+    """
+    value = result_dict['result']
+    if not isinstance(value, float):
+        return value
+    operation = result_dict.get('operation', 'mixed')
+    places = (overrides or {}).get(operation, decimal_places)
+    rounded = round(value, places)
+    # Convert back to int if rounding produces a whole number
+    if rounded == int(rounded):
+        return int(rounded)
+    return rounded

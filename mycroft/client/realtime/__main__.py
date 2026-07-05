@@ -342,6 +342,11 @@ def handle_intents_ready(event):
         try:
             skill_path = os.path.dirname(os.path.dirname(os.path.dirname(file_path)))
             entity_expansions = load_entity_expansions(skill_path)
+            # Register any calc entity configs (decimal_places etc.) on matchers
+            for ent_name, ent_cfg in entity_expansions.items():
+                if isinstance(ent_cfg, dict) and 'decimal_places' in ent_cfg:
+                    loop.interim_matcher.calc_entity_configs[ent_name] = ent_cfg
+                    loop.final_matcher.calc_entity_configs[ent_name] = ent_cfg
             skill_cfg = load_skill_config(skill_path)
             if skill_cfg.get('repeat_exempt'):
                 # Use the skill directory name as the prefix (works regardless of command_groups)

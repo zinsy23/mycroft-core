@@ -416,6 +416,133 @@ class TestCalcIncomplete:
 # Ensures the slot next-word sets contain expected words and exclude words
 # that should be fillers (never entering the slot buffer).
 
+# ── result metadata — operation type surfaced in return dict ──────────────────
+# words_to_calc returns 'operation' key so skills can apply per-operation
+# rounding without having to re-parse the tokens themselves.
+
+class TestCalcOperationMetadata:
+    """The return dict includes an 'operation' key identifying the top-level
+    operation type. Skills use this to choose per-operation decimal places."""
+
+    def test_addition(self):
+        r = words_to_calc('five plus three')
+        assert r['operation'] == 'add'
+
+    def test_subtraction(self):
+        r = words_to_calc('ten minus four')
+        assert r['operation'] == 'subtract'
+
+    def test_multiplication(self):
+        r = words_to_calc('three times seven')
+        assert r['operation'] == 'multiply'
+
+    def test_division(self):
+        r = words_to_calc('ten divided by two')
+        assert r['operation'] == 'divide'
+
+    def test_modulo(self):
+        r = words_to_calc('ten mod three')
+        assert r['operation'] == 'modulo'
+
+    def test_power(self):
+        r = words_to_calc('two to the power eight')
+        assert r['operation'] == 'power'
+
+    def test_squared(self):
+        r = words_to_calc('five squared')
+        assert r['operation'] == 'power'
+
+    def test_cubed(self):
+        r = words_to_calc('three cubed')
+        assert r['operation'] == 'power'
+
+    def test_square_root(self):
+        r = words_to_calc('square root sixty four')
+        assert r['operation'] == 'root'
+
+    def test_cube_root(self):
+        r = words_to_calc('cube root twenty seven')
+        assert r['operation'] == 'root'
+
+    def test_absolute_value(self):
+        r = words_to_calc('absolute value negative five')
+        assert r['operation'] == 'abs'
+
+    def test_mixed_expression_uses_dominant(self):
+        # When multiple operators are present, 'operation' is 'mixed'
+        assert words_to_calc('two plus three times four')['operation'] == 'mixed'
+        assert words_to_calc('five squared plus two')['operation'] == 'mixed'
+        assert words_to_calc('square root sixty four plus one')['operation'] == 'mixed'
+
+
+# ── skill-side rounding helper ────────────────────────────────────────────────
+# format_calc_result() is the utility skills call to apply rounding.
+# It reads global + per-operation overrides, leaves ints untouched.
+
+class TestFormatCalcResult:
+    """Tests for the skill-side rounding helper format_calc_result().
+
+    Signature:
+        format_calc_result(result_dict, decimal_places=2, overrides=None) -> int | float
+
+    Args:
+        result_dict:   the dict returned by words_to_calc
+        decimal_places: global default decimal places for float results
+        overrides:     dict of operation → decimal_places, e.g. {'root': 4}
+
+    Returns int if result is whole, otherwise float rounded to appropriate places.
+    """
+    def setup_method(self):
+        from mycroft.client.realtime.number_parser import format_calc_result
+        self.fmt = format_calc_result
+
+    def test_int_result_untouched(self):
+        r = words_to_calc('five plus three')
+        assert self.fmt(r) == 8
+        assert isinstance(self.fmt(r), int)
+
+    def test_float_rounded_to_global_default(self):
+        r = words_to_calc('ten divided by three')
+        assert self.fmt(r, decimal_places=2) == 3.33
+        assert self.fmt(r, decimal_places=4) == 3.3333
+
+    def test_root_uses_override(self):
+        r = words_to_calc('square root two')
+        # global=2 but root override=4
+        result = self.fmt(r, decimal_places=2, overrides={'root': 4})
+        assert result == round(math.sqrt(2), 4)
+
+    def test_root_falls_back_to_global_without_override(self):
+        r = words_to_calc('square root two')
+        assert self.fmt(r, decimal_places=2) == round(math.sqrt(2), 2)
+
+    def test_override_for_other_op_doesnt_affect_root(self):
+        r = words_to_calc('square root two')
+        result = self.fmt(r, decimal_places=2, overrides={'divide': 4})
+        assert result == round(math.sqrt(2), 2)
+
+    def test_division_uses_override(self):
+        r = words_to_calc('ten divided by three')
+        result = self.fmt(r, decimal_places=2, overrides={'divide': 4})
+        assert result == 3.3333
+
+    def test_mixed_expression_uses_global(self):
+        r = words_to_calc('square root sixty four plus one')
+        # sqrt(64)+1 = 9.0, which is whole → int
+        assert self.fmt(r, decimal_places=2, overrides={'root': 4}) == 9
+        assert isinstance(self.fmt(r, decimal_places=2, overrides={'root': 4}), int)
+
+    def test_zero_decimal_places(self):
+        r = words_to_calc('ten divided by three')
+        assert self.fmt(r, decimal_places=0) == 3
+
+    def test_whole_float_becomes_int(self):
+        # 10/2 = 5.0 — already returned as int by words_to_calc, stays int
+        r = words_to_calc('ten divided by two')
+        assert self.fmt(r) == 5
+        assert isinstance(self.fmt(r), int)
+
+
 class TestWordSets:
     def test_number_words_contains_ones(self):
         for w in ('one', 'two', 'three', 'nine', 'eleven', 'nineteen'):

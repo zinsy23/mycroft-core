@@ -12,12 +12,28 @@ import re
 from mycroft.util.log import LOG
 from mycroft.client.realtime.number_parser import (
     NUMBER_WORDS, SIGN_WORDS, CALC_WORDS, words_to_int, words_to_calc,
+    format_calc_result,
 )
 
 # Entity names that get greedy multi-word number capture
 _NUMBER_ENTITY_NAMES = frozenset({'number', 'signed_number'})
 # Entity names that get greedy calc expression capture
 _CALC_ENTITY_NAMES = frozenset({'number_calc'})
+
+
+def _apply_calc_rounding(calc: dict, cfg: dict) -> int | float:
+    """Apply rounding config to a words_to_calc result dict for entity dispatch.
+
+    cfg keys (all optional):
+      'decimal_places':      global default (default 2)
+      'decimal_places_root': override for root results
+    """
+    places = cfg.get('decimal_places', 2)
+    overrides = {}
+    root_places = cfg.get('decimal_places_root')
+    if root_places is not None:
+        overrides['root'] = root_places
+    return format_calc_result(calc, decimal_places=places, overrides=overrides)
 
 
 class CommandPattern:
@@ -175,7 +191,7 @@ class MatcherPath:
     strong paths survive. Winner's budget syncs to global.
     """
 
-    def __init__(self, path_id, starting_budget, all_sequences, filler_config, start_position=0):
+    def __init__(self, path_id, starting_budget, all_sequences, filler_config, start_position=0, calc_entity_configs=None):
         """Initialize a new matcher path.
 
         Args:
@@ -187,6 +203,8 @@ class MatcherPath:
                 Used to prevent replay from feeding earlier-position words into this path,
                 which would cause cross-positional matches (e.g. path started at pos 7
                 grabbing 'full' from pos 5 during replay).
+            calc_entity_configs: Per-entity config for calc slots, e.g.
+                {'number_calc': {'decimal_places': 2, 'decimal_places_root': 4}}
         """
         self.path_id = path_id
         self.matched_words = []
@@ -195,6 +213,7 @@ class MatcherPath:
         self.all_sequences = all_sequences
         self.filler_config = filler_config
         self.base_max_fillers = filler_config.get('base_max', 4)
+        self.calc_entity_configs = calc_entity_configs or {}
         self.fitness_score = 0  # Number of valid words matched
         self.start_position = start_position  # Transcript position of first word
         # Greedy number accumulation
@@ -505,7 +524,8 @@ class MatcherPath:
                         ok = False
                         break
                     slot_name = seq_item['calc_slot']
-                    entities[slot_name] = calc['result']
+                    cfg = self.calc_entity_configs.get(slot_name, {})
+                    entities[slot_name] = _apply_calc_rounding(calc, cfg)
                     entities[f'{slot_name}_expr'] = calc['expr']
                     entities[f'{slot_name}_tokens'] = calc['tokens']
                 elif 'entity' in seq_item:
@@ -577,6 +597,9 @@ class StreamingCommandMatcher:
         # Cache of all expanded sequences for faster matching
         self.all_sequences = []  # Will be populated when patterns are registered
         self.repeat_window_open = False  # Set by realtime_loop when window opens/closes
+
+        # Per-entity config for calc slots: {entity_name: {decimal_places, ...}}
+        self.calc_entity_configs = {}
 
         # Multi-path matching state
         self.active_paths = []  # List of MatcherPath objects competing
@@ -679,7 +702,7 @@ class StreamingCommandMatcher:
         # If word is valid as first word, create new path with its transcript position
         if word in valid_first_words or '<ENTITY>' in valid_first_words:
             pos = transcript_position if transcript_position is not None else 0
-            new_path = MatcherPath(self.next_path_id, self.global_budget, self.all_sequences, self.filler_config, start_position=pos)
+            new_path = MatcherPath(self.next_path_id, self.global_budget, self.all_sequences, self.filler_config, start_position=pos, calc_entity_configs=self.calc_entity_configs)
             self.next_path_id += 1
             new_path.try_add_word(word, stream_type=stream_type)
             self.active_paths.append(new_path)
