@@ -202,7 +202,8 @@ class RivaStreamingThread(threading.Thread):
 
         except Exception as e:
             if not self._stop.is_set():
-                LOG.warning(f"Riva streaming session error: {e}")
+                import traceback
+                LOG.warning(f"Riva streaming session error: {e}\n{traceback.format_exc()}")
 
     def _audio_generator(self):
         """Generator that yields audio chunks from the queue.

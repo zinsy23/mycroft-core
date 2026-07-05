@@ -205,6 +205,8 @@ class MatcherPath:
         self._calc_slot_name = None
         # True if a slot was active at any point — defers completion to FINAL only
         self._had_slot = False
+        # True once slot closed via a post-entity pattern word — INTERIM allowed from here
+        self._slot_closed_by_word = False
 
     def try_add_word(self, word, stream_type="FINAL"):
         """Try to add a word to this path.
@@ -224,38 +226,58 @@ class MatcherPath:
             if self._number_slot_name == 'signed_number' and not self._number_buf:
                 valid_for_slot = SIGN_WORDS | NUMBER_WORDS
             if word in valid_for_slot:
+                # Still inside entity — accumulate
                 self._number_buf.append(word)
                 self.consecutive_fillers = 0
                 self.fitness_score += 1
                 self.local_budget += self.filler_config.get('increment_per_word', 1)
                 return True
-            else:
-                phrase = ' '.join(self._number_buf)
-                if not phrase or words_to_int(phrase) is None:
-                    self.local_budget = 0
-                    return False
-                self.matched_words.append(f'__number__:{phrase}')
-                self._number_slot_name = None
-                self._number_buf = []
-                # fall through to match word against next position
+            # Not a slot word — check if it's a valid post-entity pattern word.
+            # Only attempt to close if buffer holds a valid complete number.
+            # Everything else is a filler — slot stays open, same as normal realtime.
+            phrase = ' '.join(self._number_buf)
+            closed = False
+            if phrase and words_to_int(phrase) is not None:
+                post_words = self._get_post_slot_words('__number__:', phrase)
+                if word in post_words:
+                    self.matched_words.append(f'__number__:{phrase}')
+                    self._number_slot_name = None
+                    self._number_buf = []
+                    self._slot_closed_by_word = True
+                    closed = True
+            if not closed:
+                self.consecutive_fillers += 1
+                if stream_type == "FINAL":
+                    self.local_budget = max(0, self.local_budget - 1)
+                return False
 
         # ── greedy calc slot ──────────────────────────────────────────────────
         if self._calc_slot_name is not None:
             if word in CALC_WORDS:
+                # Still inside entity — accumulate
                 self._calc_buf.append(word)
                 self.consecutive_fillers = 0
                 self.fitness_score += 1
                 self.local_budget += self.filler_config.get('increment_per_word', 1)
                 return True
-            else:
-                phrase = ' '.join(self._calc_buf)
-                if not phrase or words_to_calc(phrase) is None:
-                    self.local_budget = 0
-                    return False
-                self.matched_words.append(f'__calc__:{phrase}')
-                self._calc_slot_name = None
-                self._calc_buf = []
-                # fall through to match word against next position
+            # Not a slot word — check if it's a valid post-entity pattern word.
+            # Only attempt to close if buffer holds a valid complete expression.
+            # Everything else is a filler — slot stays open, same as normal realtime.
+            phrase = ' '.join(self._calc_buf)
+            closed = False
+            if phrase and words_to_calc(phrase) is not None:
+                post_words = self._get_post_slot_words('__calc__:', phrase)
+                if word in post_words:
+                    self.matched_words.append(f'__calc__:{phrase}')
+                    self._calc_slot_name = None
+                    self._calc_buf = []
+                    self._slot_closed_by_word = True
+                    closed = True
+            if not closed:
+                self.consecutive_fillers += 1
+                if stream_type == "FINAL":
+                    self.local_budget = max(0, self.local_budget - 1)
+                return False
 
         # ── normal matching ───────────────────────────────────────────────────
         matching_sequences = self._get_matching_sequences()
@@ -341,6 +363,46 @@ class MatcherPath:
                 matching.append(seq_info)
 
         return matching
+
+    def _get_post_slot_words(self, slot_prefix, phrase):
+        """Get valid next words immediately after a slot commits.
+
+        Builds the tentative matched list with the committed slot word and returns
+        what the pattern defines at the next position — same logic as _get_valid_next_words
+        but at the post-slot position rather than the current matched_words position.
+        """
+        tentative = self.matched_words + [f'{slot_prefix}{phrase}']
+        next_position = len(tentative)
+        valid_words = set()
+        for seq_info in self.all_sequences:
+            sequence = seq_info['sequence']
+            if len(sequence) <= next_position:
+                continue
+            ok = True
+            for i, mw in enumerate(tentative):
+                if i >= len(sequence):
+                    ok = False
+                    break
+                seq_item = sequence[i]
+                if 'word' in seq_item:
+                    if seq_item['word'] != mw:
+                        ok = False
+                        break
+                elif 'number_slot' in seq_item:
+                    if not mw.startswith('__number__:'):
+                        ok = False
+                        break
+                elif 'calc_slot' in seq_item:
+                    if not mw.startswith('__calc__:'):
+                        ok = False
+                        break
+            if ok:
+                next_item = sequence[next_position]
+                if 'word' in next_item:
+                    valid_words.add(next_item['word'])
+                elif 'entity' in next_item:
+                    valid_words.add('<ENTITY>')
+        return valid_words
 
     def _get_valid_next_words(self, matching_sequences):
         """Get valid next words from matching sequences."""
@@ -660,10 +722,15 @@ class StreamingCommandMatcher:
         # Skip bare repeat matches when the window is closed — leaving paths active
         # so words like "times" can still feed into calc slots on the same stream.
         repeat_window_open = getattr(self, 'repeat_window_open', True)
-        # Skip paths that have or had a slot — number/calc intents fire on FINAL only,
-        # even after the slot closes, to prevent premature INTERIM execution.
+        # Slot open → always FINAL only (still accumulating).
+        # Slot closed by a valid post-slot pattern word → INTERIM allowed (the word
+        # is defined in the locale after the entity, not a filler).
+        # Slot not yet closed by a word → FINAL only.
         for path in sorted(self.active_paths, key=lambda p: p.fitness_score, reverse=True):
-            if path._number_slot_name is not None or path._calc_slot_name is not None or path._had_slot:
+            slot_open = path._number_slot_name is not None or path._calc_slot_name is not None
+            if slot_open:
+                continue
+            if path._had_slot and not path._slot_closed_by_word:
                 continue
             match = path.check_completion()
             if match:
