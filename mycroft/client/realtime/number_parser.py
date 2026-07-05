@@ -56,6 +56,9 @@ NUMBER_WORDS = frozenset(ONES) | frozenset(TENS) | MAGNITUDE_WORDS
 SIGN_WORDS = frozenset({'negative', 'minus'})
 SIGNED_NUMBER_WORDS = SIGN_WORDS | NUMBER_WORDS
 
+# Decimal point words — only valid in calc context (words_to_int stays integer-only)
+DECIMAL_WORDS = frozenset({'point', 'dot'})
+
 
 def _parse_below_thousand(tokens: list[str]) -> tuple[int, int]:
     """Parse a value < 1000 from the front of tokens.
@@ -178,6 +181,7 @@ OPERATOR_WORDS = {
     'minus': '-', 'subtract': '-', 'subtracted': '-',
     'times': '*', 'multiplied': '*', 'multiply': '*',
     'divided': '/', 'divide': '/', 'over': '/',
+    'mod': '%', 'modulo': '%', 'remainder': '%',
 }
 
 # Postfix unary: word immediately after a number → replace number with result
@@ -193,6 +197,7 @@ _PREFIX_UNARY_PHRASES = [
     (('cube', 'root', 'of'), lambda x: x ** (1/3) if x >= 0 else -((-x) ** (1/3))),
     (('square', 'root'), lambda x: x ** 0.5),
     (('cube', 'root'), lambda x: x ** (1/3) if x >= 0 else -((-x) ** (1/3))),
+    (('absolute', 'value'), abs),
 ]
 
 # Infix power phrases: sequence of words between left operand and right operand
@@ -214,11 +219,16 @@ _POWER_WORDS = frozenset({
     'power', 'raised',
 })
 
+_PREFIX_UNARY_WORDS = frozenset({
+    'absolute', 'value',
+})
+
 # Words that are part of operator phrases but not operators themselves
 OPERATOR_HELPER_WORDS = frozenset({'by', 'and'})
 
 # All words valid anywhere inside a {number_calc} expression
-CALC_WORDS = NUMBER_WORDS | SIGN_WORDS | frozenset(OPERATOR_WORDS) | _POWER_WORDS
+CALC_WORDS = (NUMBER_WORDS | SIGN_WORDS | frozenset(OPERATOR_WORDS)
+              | _POWER_WORDS | _PREFIX_UNARY_WORDS | DECIMAL_WORDS)
 
 
 # ── tokenizer ────────────────────────────────────────────────────────────────
@@ -250,6 +260,34 @@ def _tokenize_calc(tokens: list[str]) -> list | None:
     def remaining(offset=0):
         return tokens[i + offset:]
 
+    def parse_number_at(pos) -> tuple[float | int | None, int]:
+        """Parse an integer (+ optional decimal suffix) starting at pos.
+        Returns (value, tokens_consumed) or (None, 0) on failure."""
+        num_val = None
+        consumed = 0
+        for length in range(min(n - pos, 20), 0, -1):
+            sub = ' '.join(tokens[pos:pos + length])
+            val = words_to_int(sub)
+            if val is not None:
+                num_val = val
+                consumed = length
+                break
+        if num_val is None:
+            return None, 0
+        j = pos + consumed
+        if j < n and tokens[j] in DECIMAL_WORDS:
+            k = j + 1
+            frac_digits = []
+            while k < n and tokens[k] in ONES and ONES[tokens[k]] < 10:
+                frac_digits.append(str(ONES[tokens[k]]))
+                k += 1
+            if frac_digits:
+                num_val = num_val + float('0.' + ''.join(frac_digits))
+                consumed = k - pos
+            else:
+                return None, 0  # trailing point with no digits — incomplete
+        return num_val, consumed
+
     while i < n:
         tok = tokens[i]
 
@@ -268,18 +306,11 @@ def _tokenize_calc(tokens: list[str]) -> list | None:
                     j += 1
                     if j >= n:
                         return None
-                # parse number
-                operand = None
-                consumed = 0
-                for length in range(min(n - j, 20), 0, -1):
-                    sub = ' '.join(tokens[j:j + length])
-                    val = words_to_int(sub)
-                    if val is not None:
-                        operand = sign * val
-                        consumed = length
-                        break
-                if operand is None:
+                # parse number (integer or decimal)
+                val, consumed = parse_number_at(j)
+                if val is None:
                     return None
+                operand = sign * val
                 result.append(fn(operand))
                 i = j + consumed
                 break
@@ -342,17 +373,7 @@ def _tokenize_calc(tokens: list[str]) -> list | None:
                 if i >= n:
                     return None
 
-            # Grab as many number-component tokens as form a valid integer
-            num_val = None
-            consumed = 0
-            for length in range(min(n - i, 20), 0, -1):
-                sub = ' '.join(tokens[i:i + length])
-                val = words_to_int(sub)
-                if val is not None:
-                    num_val = val
-                    consumed = length
-                    break
-
+            num_val, consumed = parse_number_at(i)
             if num_val is None:
                 return None  # unrecognised token
 
@@ -399,18 +420,23 @@ def _evaluate(tokens: list) -> float | None:
         else:
             i -= 2
 
-    # Pass 1: * and /
+    # Pass 1: * / %
     i = 1
     while i < len(toks):
-        if toks[i] in ('*', '/'):
+        if toks[i] in ('*', '/', '%'):
             left = toks[i - 1]
             op = toks[i]
             if i + 1 >= len(toks):
                 return None  # trailing operator
             right = toks[i + 1]
-            if op == '/' and right == 0:
-                return None  # division by zero
-            val = left * right if op == '*' else left / right
+            if op in ('/', '%') and right == 0:
+                return None  # division/modulo by zero
+            if op == '*':
+                val = left * right
+            elif op == '/':
+                val = left / right
+            else:
+                val = left % right
             toks[i - 1:i + 2] = [val]
         else:
             i += 2
@@ -470,7 +496,7 @@ def words_to_calc(phrase: str) -> dict | None:
     # a single-element list [n]. Any real operation produces either multiple tokens
     # (infix: [n, op, n, ...]) or consumed extra spoken words to produce the result
     # (postfix squared/cubed, prefix sqrt/cbrt) — detected by input having non-number words.
-    _op_words = frozenset(CALC_WORDS) - NUMBER_WORDS - SIGN_WORDS
+    _op_words = frozenset(CALC_WORDS) - NUMBER_WORDS - SIGN_WORDS - DECIMAL_WORDS
     has_op = len(mixed) > 1 or any(t in _op_words for t in tokens)
     if not has_op:
         return None
