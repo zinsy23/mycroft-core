@@ -51,16 +51,21 @@ process_running() {
 }
 
 end_process() {
-    if process_running "$1" ; then
-        # Find the process by name, only returning the oldest if it has children
+    if ! process_running "$1" ; then
+        return
+    fi
+
+    # Loop until no instances remain — handles multiple stacked processes
+    while process_running "$1" ; do
         pid=$( pgrep -o -f "python3 (.*)-m mycroft.*${1}" )
         printf "Stopping %s (%s)..." "$1" "${pid}"
         kill -s INT "${pid}"
 
-        # Wait up to 5 seconds (50 * 0.1) for process to stop
+        # Wait up to 5 seconds (50 * 0.1) for this instance to stop
         c=1
         while [ $c -le 50 ] ; do
-            if process_running "$1" ; then
+            # Check specifically for this pid, not just any match
+            if kill -0 "${pid}" 2>/dev/null ; then
                 sleep 0.1
                 c=$((c + 1))
             else
@@ -68,9 +73,8 @@ end_process() {
             fi
         done
 
-        if process_running "$1" ; then
+        if kill -0 "${pid}" 2>/dev/null ; then
             echo "failed to stop."
-            pid=$( pgrep -o -f "python3 (.*)-m mycroft.*${1}" )            
             printf "  Killing %s (%s)...\n" "$1" "${pid}"
             kill -9 "${pid}"
             echo "killed."
@@ -81,7 +85,7 @@ end_process() {
                 result=100
             fi
         fi
-    fi
+    done
 }
 
 
