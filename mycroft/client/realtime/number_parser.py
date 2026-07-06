@@ -175,80 +175,84 @@ def words_to_int(phrase: str) -> int | None:
 
 # ── calculator vocabulary ────────────────────────────────────────────────────
 
-# Operator words → canonical symbol
-OPERATOR_WORDS = {
-    'plus': '+', 'add': '+', 'added': '+',
-    'minus': '-', 'subtract': '-', 'subtracted': '-',
-    'times': '*', 'multiplied': '*', 'multiply': '*',
-    'divided': '/', 'divide': '/', 'over': '/',
-    'mod': '%', 'modulo': '%', 'remainder': '%',
-}
-
-# Postfix unary: word immediately after a number → replace number with result
-_POSTFIX_UNARY = {
-    'squared': lambda x: x ** 2,
-    'cubed': lambda x: x ** 3,
-}
-
-# Trig functions — support common spoken/homophone variants Riva might produce.
-# 'sine'/'sign', 'cosine'/'cosign' are homophones; accept both spellings.
 import math as _math
 
-_SIN_FN  = _math.sin
-_COS_FN  = _math.cos
-_TAN_FN  = _math.tan
+def _sin_deg(x):  return _math.sin(_math.radians(x))
+def _cos_deg(x):  return _math.cos(_math.radians(x))
+def _tan_deg(x):  return _math.tan(_math.radians(x))
 
-def _deg_to_rad(x): return _math.radians(x)
+# Alias map: canonical word → list of accepted synonyms/homophones.
+# Aliases are rewritten to their canonical form as the first step in
+# _tokenize_calc, so everything downstream (tokenizer, dedup, logging)
+# sees only canonical words.
+# Context-dependent words (minus, negative) are NOT aliased here.
+CALC_ALIASES = {
+    # infix operators — canonical is the shortest/most common spoken form
+    'plus':     ['add', 'added'],
+    'minus':    ['subtract', 'subtracted'],
+    'times':    ['multiplied', 'multiply'],
+    'divided':  ['divide', 'over'],
+    'mod':      ['modulo', 'remainder'],
+    # power
+    'power':    ['raised'],
+    # postfix unary
+    'squared':  [],
+    'cubed':    [],
+    # prefix unary — root/abs (no aliases needed currently)
+    'square':   [],
+    'cube':     [],
+    'root':     [],
+    'absolute': [],
+    'value':    [],
+    # trig — canonical + all Riva variants/homophones
+    'sine':     ['sin', 'sign'],
+    'cosine':   ['cosign'],
+    'tangent':  [],
+}
 
-def _sin_deg(x):  return _math.sin(_deg_to_rad(x))
-def _cos_deg(x):  return _math.cos(_deg_to_rad(x))
-def _tan_deg(x):  return _math.tan(_deg_to_rad(x))
+# Reverse map: alias word → canonical word (built from CALC_ALIASES)
+_ALIAS_TO_CANONICAL = {
+    alias: canonical
+    for canonical, aliases in CALC_ALIASES.items()
+    for alias in aliases
+}
 
-# Prefix unary phrases: tuple of words that precede the operand
-# Each maps to (words_tuple, function)
+# Operator canonicals → symbol (minus handled separately for sign disambiguation)
+OPERATOR_WORDS = {
+    'plus': '+',
+    'minus': '-',
+    'times': '*',
+    'divided': '/',
+    'mod': '%',
+}
+
+# Postfix unary: canonical word immediately after a number → apply fn to number
+_POSTFIX_UNARY = {
+    'squared': lambda x: x ** 2,
+    'cubed':   lambda x: x ** 3,
+}
+
+# Prefix unary: canonical phrase tuple → function applied to following operand
+# 'of' is intentionally absent — it's a filler the budget system handles.
 # Longer phrases first (greediest match wins).
 _PREFIX_UNARY_PHRASES = [
-    (('square', 'root', 'of'), lambda x: x ** 0.5),
-    (('cube', 'root', 'of'), lambda x: x ** (1/3) if x >= 0 else -((-x) ** (1/3))),
     (('square', 'root'), lambda x: x ** 0.5),
-    (('cube', 'root'), lambda x: x ** (1/3) if x >= 0 else -((-x) ** (1/3))),
+    (('cube',   'root'), lambda x: x ** (1/3) if x >= 0 else -((-x) ** (1/3))),
     (('absolute', 'value'), abs),
-    # trig — operand is treated as degrees; 'of' is a filler the budget handles
     (('sine',),    _sin_deg),
-    (('sign',),    _sin_deg),   # Riva homophone
-    (('sin',),     _sin_deg),   # abbreviated form Riva may produce
     (('cosine',),  _cos_deg),
-    (('cosign',),  _cos_deg),   # Riva homophone
     (('tangent',), _tan_deg),
 ]
 
-# Infix power phrases: sequence of words between left operand and right operand
-# No phrase list needed — 'power' alone after a number means exponent.
-# All surrounding words (to, the, of, raised) are fillers handled by the budget system.
-
-# Words valid inside a calc slot buffer — only those that _tokenize_calc can
-# consume standalone or as part of a phrase. 'the' and 'of' are only meaningful
-# inside a fully-matched phrase; loose they cause parse failures, so leave them
-# out — the matcher treats them as fillers (budget hit on FINAL, path survives).
-_POWER_WORDS = frozenset({
-    'squared', 'cubed',       # postfix unary — meaningful alone after a number
-    'square', 'cube', 'root', # prefix unary — meaningful in combination
-    'power', 'raised',        # infix — either alone between numbers = exponent
-    # 'to', 'the', 'of' — fillers; budget system handles them
-})
-
-_PREFIX_UNARY_WORDS = frozenset({
-    'absolute', 'value',
-    # trig — all Riva variants observed: 'sin'/'sine'/'sign', 'cosine'/'cosign', 'tangent'
-    'sin', 'sine', 'sign', 'cosine', 'cosign', 'tangent',
-})
-
-# Words that are part of operator phrases but not operators themselves
-OPERATOR_HELPER_WORDS = frozenset({'by', 'and'})
-
-# All words valid anywhere inside a {number_calc} expression
-CALC_WORDS = (NUMBER_WORDS | SIGN_WORDS | frozenset(OPERATOR_WORDS)
-              | _POWER_WORDS | _PREFIX_UNARY_WORDS | DECIMAL_WORDS)
+# All words valid inside a {number_calc} slot — canonical words plus all their
+# aliases. Built automatically so adding an alias here is the only change needed.
+CALC_WORDS = (
+    NUMBER_WORDS
+    | SIGN_WORDS
+    | DECIMAL_WORDS
+    | frozenset(CALC_ALIASES)           # all canonical words
+    | frozenset(_ALIAS_TO_CANONICAL)    # all alias words
+)
 
 
 # ── tokenizer ────────────────────────────────────────────────────────────────
@@ -272,6 +276,10 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
     operation: 'add' | 'subtract' | 'multiply' | 'divide' | 'modulo' |
                'power' | 'root' | 'abs' | 'trig' | 'mixed'
     """
+    # Rewrite aliases to canonical form first so all downstream logic is uniform.
+    # 'minus'/'negative' are intentionally NOT in CALC_ALIASES — context-dependent.
+    tokens = [_ALIAS_TO_CANONICAL.get(t, t) for t in tokens]
+
     result = []
     i = 0
     n = len(tokens)
@@ -279,9 +287,6 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
 
     def last_token_is_number():
         return result and isinstance(result[-1], (int, float))
-
-    def remaining(offset=0):
-        return tokens[i + offset:]
 
     def parse_number_at(pos) -> tuple[float | int | None, int]:
         """Parse an integer (+ optional decimal suffix) starting at pos.
@@ -314,32 +319,27 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
     while i < n:
         tok = tokens[i]
 
-        # ── prefix unary (square root / cube root / absolute value) ──────────
+        # ── prefix unary (square root / cube root / absolute value / trig) ───
         for phrase, fn in _PREFIX_UNARY_PHRASES:
             plen = len(phrase)
             if tuple(tokens[i:i + plen]) == phrase:
-                # parse the operand that follows
                 j = i + plen
                 if j >= n:
                     return None
-                # consume sign if present
                 sign = 1
                 if tokens[j] in ('minus', 'negative'):
                     sign = -1
                     j += 1
                     if j >= n:
                         return None
-                # parse number (integer or decimal)
                 val, consumed = parse_number_at(j)
                 if val is None:
                     return None
-                operand = sign * val
-                result.append(fn(operand))
+                result.append(fn(sign * val))
                 i = j + consumed
-                # tag operation type by which phrase matched
                 if phrase[0] in ('square', 'cube'):
                     _ops_seen.add('root')
-                elif phrase[0] in ('sine', 'sign', 'cosine', 'cosign', 'tangent'):
+                elif phrase[0] in ('sine', 'cosine', 'tangent'):
                     _ops_seen.add('trig')
                 else:
                     _ops_seen.add('abs')
@@ -353,7 +353,7 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
                     i += 1
                     continue
                 else:
-                    pass  # fall through to number parsing
+                    pass  # fall through to number parsing as sign
 
             # ── postfix unary (squared / cubed) — must follow a number ────────
             elif tok in _POSTFIX_UNARY and last_token_is_number():
@@ -362,39 +362,26 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
                 i += 1
                 continue
 
-            # ── infix power ───────────────────────────────────────────────────
-            # 'power' or 'raised' after a number means exponent.
-            # Surrounding words (to, the, of) are fillers the budget system handles.
-            # If both appear (e.g. 'raised power'), 'raised' defers to 'power'.
-            elif tok in ('power', 'raised') and last_token_is_number():
-                if tok == 'raised' and i + 1 < n and tokens[i + 1] == 'power':
-                    # 'raised power N' — skip 'raised', let 'power' handle it
-                    i += 1
-                    continue
+            # ── infix power — 'power' after a number means exponent ───────────
+            # 'raised' rewrites to 'power' via alias; skip duplicate if both
+            # were spoken ('two raised power eight' → 'two power power eight').
+            elif tok == 'power' and last_token_is_number():
                 result.append('**')
                 _ops_seen.add('power')
                 i += 1
+                # skip a consecutive 'power' (artifact of raised→power rewrite)
+                if i < n and tokens[i] == 'power':
+                    i += 1
                 continue
 
             # ── operator words ────────────────────────────────────────────────
             if tok in OPERATOR_WORDS and tok not in ('minus', 'negative'):
-                sym = OPERATOR_WORDS[tok]
-                if sym is None:
-                    i += 1
-                    continue
                 if not last_token_is_number():
                     return None  # operator without a left operand
+                sym = OPERATOR_WORDS[tok]
                 result.append(sym)
                 _ops_seen.add({'+': 'add', '-': 'subtract', '*': 'multiply',
                                '/': 'divide', '%': 'modulo'}[sym])
-                i += 1
-                # Consume optional 'by' after 'multiplied'/'divided'
-                if i < n and tokens[i] == 'by':
-                    i += 1
-                continue
-
-            # ── skip filler 'and' between number parts ────────────────────────
-            if tok == 'and' and last_token_is_number():
                 i += 1
                 continue
 

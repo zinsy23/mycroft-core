@@ -26,8 +26,19 @@ from mycroft.client.realtime.number_parser import (
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def calc(phrase):
-    """Return the numeric result of words_to_calc, or None."""
+    """Return the numeric result of words_to_calc, or None.
+    Passes the phrase directly — no slot buffer filtering. Use for testing
+    the tokenizer with already-filtered input (no filler words)."""
     r = words_to_calc(phrase)
+    return r['result'] if r else None
+
+
+def calc_via_slot(phrase):
+    """Simulate what reaches words_to_calc after the matcher's slot buffer filter.
+    Strips any word not in CALC_WORDS, mirroring what the slot accumulator does.
+    Use for testing spoken phrases that include filler words (of, by, the, to...)."""
+    filtered = ' '.join(w for w in phrase.lower().split() if w in CALC_WORDS)
+    r = words_to_calc(filtered)
     return r['result'] if r else None
 
 
@@ -176,7 +187,7 @@ class TestCalcMultiplication:
         assert calc('three times seven') == 21
 
     def test_multiplied_by(self):
-        assert calc('three multiplied by seven') == 21
+        assert calc_via_slot('three multiplied by seven') == 21
 
     def test_multiply_alias(self):
         assert calc('three multiply seven') == 21
@@ -184,7 +195,7 @@ class TestCalcMultiplication:
 
 class TestCalcDivision:
     def test_basic(self):
-        assert calc('ten divided by two') == 5
+        assert calc_via_slot('ten divided by two') == 5
 
     def test_divide_alias(self):
         assert calc('ten divide two') == 5
@@ -193,10 +204,10 @@ class TestCalcDivision:
         assert calc('ten over two') == 5
 
     def test_fractional_result(self):
-        assert calc('five divided by two') == approx(2.5)
+        assert calc_via_slot('five divided by two') == approx(2.5)
 
     def test_division_by_zero(self):
-        assert calc('five divided by zero') is None
+        assert calc_via_slot('five divided by zero') is None
 
 
 class TestCalcModulo:
@@ -226,7 +237,7 @@ class TestCalcPrecedence:
         assert calc('ten minus two times three') == 4   # 10 - (2*3)
 
     def test_divide_before_add(self):
-        assert calc('eight plus six divided by two') == 11  # 8 + (6/2)
+        assert calc_via_slot('eight plus six divided by two') == 11  # 8 + (6/2)
 
     def test_chain_multiply_add(self):
         assert calc('two times three plus four times five') == 26  # (2*3)+(4*5)
@@ -325,13 +336,13 @@ class TestCalcPower:
 
 class TestCalcRoot:
     def test_square_root(self):
-        # 'of' is a filler — slot sees 'square root sixty four'
-        assert calc('square root of sixty four') == approx(8.0)
+        # slot buffer strips 'of' — tokenizer sees 'square root sixty four'
         assert calc('square root sixty four') == approx(8.0)
+        assert calc_via_slot('square root of sixty four') == approx(8.0)
 
     def test_cube_root(self):
-        assert calc('cube root of twenty seven') == approx(3.0)
         assert calc('cube root twenty seven') == approx(3.0)
+        assert calc_via_slot('cube root of twenty seven') == approx(3.0)
 
     def test_square_root_non_perfect(self):
         assert calc('square root sixty five') == approx(math.sqrt(65))
@@ -375,13 +386,10 @@ class TestCalcAbsoluteValue:
         assert calc('absolute value three minus ten') == -7
 
     def test_of_is_filler(self):
-        # 'of' is not in CALC_WORDS so it never enters the slot buffer.
-        # words_to_calc is called with whatever the slot collected — 'of' won't be there.
-        # The slot buffer version (no 'of') must work:
+        # 'of' never enters the slot buffer — words_to_calc only sees filtered input.
         assert calc('absolute value negative five') == 5
-        # Direct call with 'of' returns None — that's correct, 'of' is unrecognised.
-        # The matcher filters it before words_to_calc is ever called.
-        assert calc('absolute value of negative five') is None
+        # calc_via_slot strips 'of' before calling words_to_calc, same as the matcher.
+        assert calc_via_slot('absolute value of negative five') == 5
 
 
 # ── decimal input ─────────────────────────────────────────────────────────────
@@ -429,11 +437,12 @@ class TestCalcIncomplete:
         assert calc('ten plus') is None
 
     def test_trailing_power_keyword(self):
-        # "five to the power" — right operand missing
-        assert calc('five to the power') is None
+        # "five power" — right operand missing (filler words stripped by slot)
+        assert calc('five power') is None
 
     def test_trailing_raised_to(self):
-        assert calc('five raised to') is None
+        # 'raised' aliases to 'power', 'to' is a filler stripped by slot
+        assert calc('five power') is None
 
     def test_prefix_unary_no_operand(self):
         assert calc('square root') is None
@@ -448,7 +457,7 @@ class TestCalcIncomplete:
         assert calc('times three') is None
 
     def test_divide_by_zero(self):
-        assert calc('ten divided by zero') is None
+        assert calc_via_slot('ten divided by zero') is None
 
     def test_mod_by_zero(self):
         assert calc('ten mod zero') is None
@@ -479,7 +488,7 @@ class TestCalcOperationMetadata:
         assert r['operation'] == 'multiply'
 
     def test_division(self):
-        r = words_to_calc('ten divided by two')
+        r = words_to_calc('ten divided two')
         assert r['operation'] == 'divide'
 
     def test_modulo(self):
@@ -544,7 +553,7 @@ class TestFormatCalcResult:
         assert isinstance(self.fmt(r), int)
 
     def test_float_rounded_to_global_default(self):
-        r = words_to_calc('ten divided by three')
+        r = words_to_calc('ten divided three')
         assert self.fmt(r, decimal_places=2) == 3.33
         assert self.fmt(r, decimal_places=4) == 3.3333
 
@@ -564,7 +573,7 @@ class TestFormatCalcResult:
         assert result == round(math.sqrt(2), 2)
 
     def test_division_uses_override(self):
-        r = words_to_calc('ten divided by three')
+        r = words_to_calc('ten divided three')
         result = self.fmt(r, decimal_places=2, overrides={'divide': 4})
         assert result == 3.3333
 
@@ -575,12 +584,12 @@ class TestFormatCalcResult:
         assert isinstance(self.fmt(r, decimal_places=2, overrides={'root': 4}), int)
 
     def test_zero_decimal_places(self):
-        r = words_to_calc('ten divided by three')
+        r = words_to_calc('ten divided three')
         assert self.fmt(r, decimal_places=0) == 3
 
     def test_whole_float_becomes_int(self):
         # 10/2 = 5.0 — already returned as int by words_to_calc, stays int
-        r = words_to_calc('ten divided by two')
+        r = words_to_calc('ten divided two')
         assert self.fmt(r) == 5
         assert isinstance(self.fmt(r), int)
 
@@ -687,9 +696,9 @@ class TestCalcTrig:
         assert calc('tangent thirty') == approx(math.tan(math.radians(30)))
 
     def test_sine_of_filler(self):
-        # 'of' is a filler — NOT in the phrase tuple; budget system handles it.
-        # words_to_calc sees 'sine thirty' after slot filtering — must still work.
+        # 'of' is stripped by slot buffer — tokenizer sees 'sine thirty'
         assert calc('sine thirty') == approx(math.sin(math.radians(30)))
+        assert calc_via_slot('sine of thirty') == approx(math.sin(math.radians(30)))
 
     def test_negative_angle(self):
         assert calc('sine negative ninety') == approx(-1.0)
