@@ -236,7 +236,8 @@ class TestCalcPrecedence:
 
     def test_power_right_associative(self):
         # 2^(3^2) = 2^9 = 512, not (2^3)^2 = 64
-        assert calc('two to the power three to the power two') == 512
+        # Slot buffer has 'two power three power two' ('to', 'the' are fillers)
+        assert calc('two power three power two') == 512
 
 
 # ── sign disambiguation ───────────────────────────────────────────────────────
@@ -261,6 +262,20 @@ class TestCalcSignDisambiguation:
     def test_signed_after_operator(self):
         assert calc('ten plus negative five') == 5
 
+    def test_minus_negative(self):
+        # "three minus negative five" = 3 - (-5) = 8
+        assert calc('three minus negative five') == 8
+        assert calc('three minus minus five') == 8
+
+    def test_negative_minus_negative(self):
+        assert calc('negative three minus negative two') == -1
+
+    def test_times_negative(self):
+        assert calc('two times negative four') == -8
+
+    def test_divide_negative(self):
+        assert calc('negative six divided negative two') == 3
+
 
 # ── power / exponent ──────────────────────────────────────────────────────────
 
@@ -271,25 +286,39 @@ class TestCalcPower:
     def test_cubed(self):
         assert calc('three cubed') == 27
 
-    def test_to_the_power(self):
-        # 'the' is a filler — slot sees 'two to power eight'
-        assert calc('two to the power eight') == 256
+    def test_power_bare(self):
+        # Slot buffer only contains CALC_WORDS — 'to', 'the', 'of' are fillers.
+        # 'power' alone between numbers is the signal.
+        assert calc('two power eight') == 256
 
-    def test_raised_to(self):
-        assert calc('two raised to eight') == 256
+    def test_raised_bare(self):
+        # 'raised' alone between numbers also means exponent
+        assert calc('two raised eight') == 256
 
-    def test_raised_to_the_power(self):
-        assert calc('two raised to the power eight') == 256
+    def test_raised_and_power_together(self):
+        # Both in buffer — 'raised' defers to 'power'
+        assert calc('two raised power eight') == 256
 
     def test_power_in_expression(self):
         assert calc('five squared plus two') == 27
         assert calc('two cubed times three') == 24
+        assert calc('five squared plus two power three') == 33
+
+    def test_power_right_assoc_raised(self):
+        # 'raised' is also right-associative: 2^(3^2) = 512
+        assert calc('two raised three raised two') == 512
 
     def test_power_of_one(self):
-        assert calc('seven to the power one') == 7
+        assert calc('two power one') == 2
 
     def test_power_of_zero(self):
-        assert calc('five to the power zero') == 1
+        assert calc('five power zero') == 1
+
+    def test_decimal_base(self):
+        assert calc('two point five power two') == approx(6.25)
+
+    def test_negative_base(self):
+        assert calc('negative two power three') == approx(-8)
 
 
 # ── square / cube root ────────────────────────────────────────────────────────
@@ -313,6 +342,14 @@ class TestCalcRoot:
     def test_root_in_expression(self):
         assert calc('square root sixty four plus one') == approx(9.0)
 
+    def test_root_of_decimal(self):
+        assert calc('square root two point two five') == approx(1.5)
+
+    def test_chained_root(self):
+        # Chained prefix unary not supported — prefix handler expects a number
+        # after the phrase, not another prefix. Returns None (incomplete).
+        assert calc('square root square root sixteen') is None
+
 
 # ── absolute value ────────────────────────────────────────────────────────────
 
@@ -331,6 +368,11 @@ class TestCalcAbsoluteValue:
 
     def test_in_expression(self):
         assert calc('absolute value negative three plus one') == 4
+
+    def test_abs_captures_one_operand(self):
+        # abs captures the immediately following number only.
+        # "absolute value three minus ten" = abs(3) - 10 = -7, NOT abs(3-10) = 7
+        assert calc('absolute value three minus ten') == -7
 
     def test_of_is_filler(self):
         # 'of' is not in CALC_WORDS so it never enters the slot buffer.
@@ -445,7 +487,7 @@ class TestCalcOperationMetadata:
         assert r['operation'] == 'modulo'
 
     def test_power(self):
-        r = words_to_calc('two to the power eight')
+        r = words_to_calc('two power eight')
         assert r['operation'] == 'power'
 
     def test_squared(self):
@@ -569,8 +611,14 @@ class TestWordSets:
             assert w in CALC_WORDS
 
     def test_calc_words_includes_power(self):
+        # 'power' and 'raised' both mean exponent when following a number
         for w in ('squared', 'cubed', 'square', 'cube', 'root', 'power', 'raised'):
             assert w in CALC_WORDS
+
+    def test_power_filler_words_not_in_calc(self):
+        # 'to', 'the', 'of' are fillers — budget system ignores them
+        for w in ('to', 'the', 'of'):
+            assert w not in CALC_WORDS, f"'{w}' should be a filler, not in CALC_WORDS"
 
     def test_calc_words_includes_absolute(self):
         assert 'absolute' in CALC_WORDS
@@ -585,6 +633,10 @@ class TestWordSets:
         # corrupt the slot buffer when heard in other contexts.
         for w in ('of', 'the', 'by'):
             assert w not in CALC_WORDS, f"'{w}' should be a filler, not in CALC_WORDS"
+
+    def test_to_not_in_calc(self):
+        # 'to' is a filler — 'power' alone handles exponent, no phrase matching needed
+        assert 'to' not in CALC_WORDS
 
     def test_filler_words_not_in_number(self):
         for w in ('of', 'the', 'by', 'and'):

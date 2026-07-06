@@ -201,22 +201,18 @@ _PREFIX_UNARY_PHRASES = [
 ]
 
 # Infix power phrases: sequence of words between left operand and right operand
-_INFIX_POWER_PHRASES = [
-    ('to', 'the', 'power', 'of'),
-    ('to', 'the', 'power'),
-    ('raised', 'to', 'the', 'power', 'of'),
-    ('raised', 'to', 'the', 'power'),
-    ('raised', 'to'),
-]
+# No phrase list needed — 'power' alone after a number means exponent.
+# All surrounding words (to, the, of, raised) are fillers handled by the budget system.
 
 # Words valid inside a calc slot buffer — only those that _tokenize_calc can
 # consume standalone or as part of a phrase. 'the' and 'of' are only meaningful
 # inside a fully-matched phrase; loose they cause parse failures, so leave them
 # out — the matcher treats them as fillers (budget hit on FINAL, path survives).
 _POWER_WORDS = frozenset({
-    'squared', 'cubed',
-    'square', 'cube', 'root',
-    'power', 'raised',
+    'squared', 'cubed',       # postfix unary — meaningful alone after a number
+    'square', 'cube', 'root', # prefix unary — meaningful in combination
+    'power', 'raised',        # infix — either alone between numbers = exponent
+    # 'to', 'the', 'of' — fillers; budget system handles them
 })
 
 _PREFIX_UNARY_WORDS = frozenset({
@@ -340,20 +336,19 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
                 i += 1
                 continue
 
-            # ── infix power phrases ───────────────────────────────────────────
-            elif last_token_is_number() and tok in ('to', 'raised'):
-                matched_phrase = None
-                for phrase in _INFIX_POWER_PHRASES:
-                    plen = len(phrase)
-                    if tuple(tokens[i:i + plen]) == phrase:
-                        matched_phrase = phrase
-                        break
-                if matched_phrase:
-                    plen = len(matched_phrase)
-                    result.append('**')
-                    _ops_seen.add('power')
-                    i += plen
+            # ── infix power ───────────────────────────────────────────────────
+            # 'power' or 'raised' after a number means exponent.
+            # Surrounding words (to, the, of) are fillers the budget system handles.
+            # If both appear (e.g. 'raised power'), 'raised' defers to 'power'.
+            elif tok in ('power', 'raised') and last_token_is_number():
+                if tok == 'raised' and i + 1 < n and tokens[i + 1] == 'power':
+                    # 'raised power N' — skip 'raised', let 'power' handle it
+                    i += 1
                     continue
+                result.append('**')
+                _ops_seen.add('power')
+                i += 1
+                continue
 
             # ── operator words ────────────────────────────────────────────────
             if tok in OPERATOR_WORDS and tok not in ('minus', 'negative'):

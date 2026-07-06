@@ -783,6 +783,21 @@ class StreamingCommandMatcher:
 
         return None, word_accepted
 
+    def close_slots_and_check(self):
+        """Close any open slots on all active paths and check for completion.
+
+        Mirrors what realtime_loop does at the FINAL stream boundary.
+        Returns the first match found, or None.
+        """
+        for path in list(self.active_paths):
+            if (path._number_slot_name is not None or path._calc_slot_name is not None
+                    or (path._had_slot and not path._slot_closed_by_word)):
+                match = path.check_completion()
+                if match:
+                    self.active_paths = []
+                    return match
+        return None
+
     def should_timeout(self):
         """Check if global budget is exhausted."""
         # Timeout only when global budget hits zero
