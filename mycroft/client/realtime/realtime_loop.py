@@ -284,6 +284,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.manually_disabled = set()   # skill_prefixes manually disabled
         self.global_mute = False         # True when "disable commands" fired
         self._repeat_exempt_prefixes = set()  # skill prefixes that never open repeat window
+        self._utterance_alias_map = {}        # word → canonical, merged across all skills
 
         # Audio batching buffer for whisper streaming (legacy path)
         self.whisper_chunk_buffer = []
@@ -557,21 +558,22 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
     # ── Command group management ──────────────────────────────────────────────
 
+    def _normalize_utterance(self, key):
+        """Rewrite any skill-declared alias words to their canonical form."""
+        if not self._utterance_alias_map:
+            return key
+        return ' '.join(self._utterance_alias_map.get(w, w) for w in key.split())
+
     def _is_duplicate(self, key, now):
         """Check executed_utterances_history for a recent exact or alias match."""
+        key = self._normalize_utterance(key)
         for entry in self.executed_utterances_history:
             if len(entry) < 3:
                 continue
-            prev_key, prev_time = entry[0], entry[1]
+            prev_key = self._normalize_utterance(entry[0])
+            prev_time = entry[1]
             elapsed = now - prev_time
             if key == prev_key and elapsed < self.dedup_window_seconds:
-                return True
-            curr_words_list = key.split()
-            prev_words_list = prev_key.split()
-            if (len(curr_words_list) > 1 and len(prev_words_list) > 1
-                    and curr_words_list[1:] == prev_words_list[1:]
-                    and curr_words_list[0] != prev_words_list[0]
-                    and elapsed < 1.5):
                 return True
         return False
 

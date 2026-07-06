@@ -353,6 +353,10 @@ def handle_intents_ready(event):
                 skill_dir_name = os.path.basename(skill_path)
                 loop._repeat_exempt_prefixes.add(skill_dir_name)
                 LOG.info(f"Repeat-exempt skill registered: {skill_dir_name}")
+            for canonical, aliases in skill_cfg.get('word_aliases', {}).items():
+                for alias in aliases:
+                    loop._utterance_alias_map[alias] = canonical
+                    LOG.info(f"Word alias registered: '{alias}' → '{canonical}'")
 
             with open(file_path, 'r') as f:
                 pattern_lines = [line.strip() for line in f.readlines() if line.strip()]
