@@ -198,6 +198,61 @@ class TestCalcFillerWords:
         assert r['entities']['number_calc'] == 5
 
 
+# ── trig functions (end-to-end through matcher) ───────────────────────────────
+
+class TestCalcTrigDispatch:
+    def test_sine_dispatches(self):
+        m = make_matcher()
+        r = feed(m, ['what', 'is', 'sine', 'ninety'])
+        assert r is not None
+        assert r['entities']['number_calc'] == pytest.approx(1.0, rel=1e-9)
+
+    def test_cosine_dispatches(self):
+        m = make_matcher()
+        r = feed(m, ['what', 'is', 'cosine', 'zero'])
+        assert r is not None
+        assert r['entities']['number_calc'] == pytest.approx(1.0, rel=1e-9)
+
+    def test_tangent_dispatches(self):
+        m = make_matcher()
+        r = feed(m, ['what', 'is', 'tangent', 'forty', 'five'])
+        assert r is not None
+        assert r['entities']['number_calc'] == pytest.approx(1.0, rel=1e-9)
+
+    def test_sine_homophone_sign(self):
+        # Riva may say 'sign' instead of 'sine'
+        m = make_matcher()
+        r = feed(m, ['what', 'is', 'sign', 'ninety'])
+        assert r is not None
+        assert r['entities']['number_calc'] == pytest.approx(1.0, rel=1e-9)
+
+    def test_cosine_homophone_cosign(self):
+        m = make_matcher()
+        r = feed(m, ['what', 'is', 'cosign', 'zero'])
+        assert r is not None
+        assert r['entities']['number_calc'] == pytest.approx(1.0, rel=1e-9)
+
+    def test_trig_with_filler_of(self):
+        # 'of' is a filler — path survives budget hit, trig still fires
+        m = make_matcher()
+        r = feed(m, ['what', 'is', 'sine', 'of', 'ninety'])
+        assert r is not None
+        assert r['entities']['number_calc'] == pytest.approx(1.0, rel=1e-9)
+
+    def test_trig_in_expression(self):
+        m = make_matcher()
+        r = feed(m, ['what', 'is', 'sine', 'ninety', 'plus', 'cosine', 'zero'])
+        assert r is not None
+        assert r['entities']['number_calc'] == pytest.approx(2.0, rel=1e-9)
+
+    def test_trig_rounding_override(self):
+        m = make_matcher(calc_cfg={'decimal_places': 2, 'decimal_places_trig': 6})
+        # decimal_places_trig isn't a built-in key — falls back to global 2
+        r = feed(m, ['what', 'is', 'sine', 'thirty'])
+        assert r is not None
+        assert r['entities']['number_calc'] == round(math.sin(math.radians(30)), 2)
+
+
 # ── incomplete expressions don't dispatch prematurely ────────────────────────
 
 class TestCalcIncompleteNoDispatch:
@@ -211,6 +266,12 @@ class TestCalcIncompleteNoDispatch:
         # "what is five" — no operation, should not dispatch
         m = make_matcher()
         r = feed(m, ['what', 'is', 'five'])
+        assert r is None
+
+    def test_bare_trig_no_dispatch(self):
+        # "what is sine" — no operand, should not dispatch
+        m = make_matcher()
+        r = feed(m, ['what', 'is', 'sine'])
         assert r is None
 
     def test_completes_on_next_final(self):

@@ -190,14 +190,36 @@ _POSTFIX_UNARY = {
     'cubed': lambda x: x ** 3,
 }
 
+# Trig functions — support common spoken/homophone variants Riva might produce.
+# 'sine'/'sign', 'cosine'/'cosign' are homophones; accept both spellings.
+import math as _math
+
+_SIN_FN  = _math.sin
+_COS_FN  = _math.cos
+_TAN_FN  = _math.tan
+
+def _deg_to_rad(x): return _math.radians(x)
+
+def _sin_deg(x):  return _math.sin(_deg_to_rad(x))
+def _cos_deg(x):  return _math.cos(_deg_to_rad(x))
+def _tan_deg(x):  return _math.tan(_deg_to_rad(x))
+
 # Prefix unary phrases: tuple of words that precede the operand
 # Each maps to (words_tuple, function)
+# Longer phrases first (greediest match wins).
 _PREFIX_UNARY_PHRASES = [
     (('square', 'root', 'of'), lambda x: x ** 0.5),
     (('cube', 'root', 'of'), lambda x: x ** (1/3) if x >= 0 else -((-x) ** (1/3))),
     (('square', 'root'), lambda x: x ** 0.5),
     (('cube', 'root'), lambda x: x ** (1/3) if x >= 0 else -((-x) ** (1/3))),
     (('absolute', 'value'), abs),
+    # trig — operand is treated as degrees; 'of' is a filler the budget handles
+    (('sine',),    _sin_deg),
+    (('sign',),    _sin_deg),   # Riva homophone
+    (('sin',),     _sin_deg),   # abbreviated form Riva may produce
+    (('cosine',),  _cos_deg),
+    (('cosign',),  _cos_deg),   # Riva homophone
+    (('tangent',), _tan_deg),
 ]
 
 # Infix power phrases: sequence of words between left operand and right operand
@@ -217,6 +239,8 @@ _POWER_WORDS = frozenset({
 
 _PREFIX_UNARY_WORDS = frozenset({
     'absolute', 'value',
+    # trig — all Riva variants observed: 'sin'/'sine'/'sign', 'cosine'/'cosign', 'tangent'
+    'sin', 'sine', 'sign', 'cosine', 'cosign', 'tangent',
 })
 
 # Words that are part of operator phrases but not operators themselves
@@ -246,7 +270,7 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
 
     Returns (mixed_tokens, operation) or None on failure.
     operation: 'add' | 'subtract' | 'multiply' | 'divide' | 'modulo' |
-               'power' | 'root' | 'abs' | 'mixed'
+               'power' | 'root' | 'abs' | 'trig' | 'mixed'
     """
     result = []
     i = 0
@@ -315,6 +339,8 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
                 # tag operation type by which phrase matched
                 if phrase[0] in ('square', 'cube'):
                     _ops_seen.add('root')
+                elif phrase[0] in ('sine', 'sign', 'cosine', 'cosign', 'tangent'):
+                    _ops_seen.add('trig')
                 else:
                     _ops_seen.add('abs')
                 break
@@ -537,7 +563,7 @@ def format_calc_result(
         decimal_places: global decimal places for float results (default 2)
         overrides:      per-operation overrides, e.g. {'root': 4, 'divide': 3}
                         valid keys: 'add', 'subtract', 'multiply', 'divide',
-                                    'modulo', 'power', 'root', 'abs', 'mixed'
+                                    'modulo', 'power', 'root', 'abs', 'trig', 'mixed'
     """
     value = result_dict['result']
     if not isinstance(value, float):

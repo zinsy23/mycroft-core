@@ -641,3 +641,81 @@ class TestWordSets:
     def test_filler_words_not_in_number(self):
         for w in ('of', 'the', 'by', 'and'):
             assert w not in NUMBER_WORDS
+
+    def test_calc_words_includes_trig(self):
+        for w in ('sin', 'sine', 'sign', 'cosine', 'cosign', 'tangent'):
+            assert w in CALC_WORDS, f"'{w}' should be in CALC_WORDS"
+
+    def test_of_not_in_calc_trig(self):
+        # 'of' is a filler even for trig — "sine of thirty" works via budget system
+        assert 'of' not in CALC_WORDS
+
+
+# ── trig functions ────────────────────────────────────────────────────────────
+
+class TestCalcTrig:
+    def test_sine_exact(self):
+        # sin(90) = 1.0
+        assert calc('sine ninety') == approx(1.0)
+
+    def test_sin_abbreviated(self):
+        # Riva may produce abbreviated 'sin'
+        assert calc('sin ninety') == approx(1.0)
+
+    def test_sine_homophone(self):
+        # Riva may transcribe 'sine' as 'sign'
+        assert calc('sign ninety') == approx(1.0)
+
+    def test_cosine_exact(self):
+        # cos(0) = 1.0
+        assert calc('cosine zero') == approx(1.0)
+
+    def test_cosine_homophone(self):
+        assert calc('cosign zero') == approx(1.0)
+
+    def test_tangent_exact(self):
+        # tan(45) = 1.0
+        assert calc('tangent forty five') == approx(1.0)
+
+    def test_sine_general(self):
+        assert calc('sine thirty') == approx(math.sin(math.radians(30)))
+
+    def test_cosine_general(self):
+        assert calc('cosine sixty') == approx(math.cos(math.radians(60)))
+
+    def test_tangent_general(self):
+        assert calc('tangent thirty') == approx(math.tan(math.radians(30)))
+
+    def test_sine_of_filler(self):
+        # 'of' is a filler — NOT in the phrase tuple; budget system handles it.
+        # words_to_calc sees 'sine thirty' after slot filtering — must still work.
+        assert calc('sine thirty') == approx(math.sin(math.radians(30)))
+
+    def test_negative_angle(self):
+        assert calc('sine negative ninety') == approx(-1.0)
+
+    def test_trig_in_expression(self):
+        # trig result participates in further arithmetic
+        r = calc('sine ninety plus cosine zero')
+        assert r == approx(2.0)
+
+    def test_trig_times_number(self):
+        r = calc('cosine sixty times two')
+        assert r == approx(math.cos(math.radians(60)) * 2)
+
+    def test_operation_metadata_trig(self):
+        r = words_to_calc('sine thirty')
+        assert r is not None
+        assert r['operation'] == 'trig'
+
+    def test_operation_metadata_mixed_trig(self):
+        r = words_to_calc('sine ninety plus one')
+        assert r is not None
+        assert r['operation'] == 'mixed'
+
+    def test_bare_trig_word_no_number_is_none(self):
+        # No operand — incomplete
+        assert calc('sine') is None
+
+    def test_trig_decimal_angle(self):
+        assert calc('sine forty five point five') == approx(math.sin(math.radians(45.5)))
