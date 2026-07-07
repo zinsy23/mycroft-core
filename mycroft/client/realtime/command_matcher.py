@@ -32,6 +32,8 @@ def _apply_calc_rounding(calc: dict, cfg: dict) -> int | float:
       'decimal_places_divide':        override for division results
       'decimal_places_multiply':      override for multiplication results
       'decimal_places_abs':           override for absolute value results
+      'decimal_places_power':         override for power/exponent results
+      'decimal_places_constant':      override for expressions involving constants
     """
     places = cfg.get('decimal_places', 2)
     overrides = {}
@@ -42,6 +44,8 @@ def _apply_calc_rounding(calc: dict, cfg: dict) -> int | float:
         'decimal_places_divide':        'divide',
         'decimal_places_multiply':      'multiply',
         'decimal_places_abs':           'abs',
+        'decimal_places_power':         'power',
+        'decimal_places_constant':      'constant',
     }
     for cfg_key, op_name in _op_cfg_keys.items():
         val = cfg.get(cfg_key)
