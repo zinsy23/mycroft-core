@@ -853,6 +853,37 @@ class TestCalcCompound:
         assert calc('two squared power three') == approx(64)
 
 
+# ── factorial ────────────────────────────────────────────────────────────────
+
+class TestCalcFactorial:
+    def test_five_factorial(self):
+        assert calc('five factorial') == 120
+
+    def test_zero_factorial(self):
+        assert calc('zero factorial') == 1
+
+    def test_ten_factorial(self):
+        assert calc('ten factorial') == 3628800
+
+    def test_factorial_in_expression(self):
+        assert calc('three factorial plus one') == approx(7)
+
+    def test_factorial_then_squared(self):
+        # (2!)² = 4
+        assert calc('two factorial squared') == approx(4)
+
+    def test_negative_factorial_returns_none(self):
+        assert calc('negative five factorial') is None
+
+    def test_non_integer_factorial_returns_none(self):
+        assert calc('five point five factorial') is None
+
+    def test_factorial_operation_tag(self):
+        r = words_to_calc('five factorial')
+        assert r is not None
+        assert r['operation'] == 'factorial'
+
+
 # ── mathematical constants ────────────────────────────────────────────────────
 
 class TestCalcConstants:

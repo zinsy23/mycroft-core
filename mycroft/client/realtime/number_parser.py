@@ -302,8 +302,9 @@ CALC_ALIASES = {
     # power
     'power':    ['raised'],
     # postfix unary
-    'squared':  [],
-    'cubed':    [],
+    'squared':   [],
+    'cubed':     [],
+    'factorial': [],
     # prefix unary — root/abs (no aliases needed currently)
     'square':   [],
     'cube':     [],
@@ -351,9 +352,11 @@ OPERATOR_WORDS = {
 }
 
 # Postfix unary: canonical word immediately after a number → apply fn to number
+# factorial returns None for non-integer or negative input — tokenizer checks this.
 _POSTFIX_UNARY = {
-    'squared': lambda x: x ** 2,
-    'cubed':   lambda x: x ** 3,
+    'squared':   lambda x: x ** 2,
+    'cubed':     lambda x: x ** 3,
+    'factorial': lambda x: _math.factorial(int(x)) if x >= 0 and x == int(x) else None,
 }
 
 # Inverse trig: maps trig canonical → inverse function (result in degrees)
@@ -436,6 +439,11 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
 
     def last_token_is_number():
         return result and isinstance(result[-1], (int, float))
+
+    def apply_postfix(val, tok):
+        """Apply a postfix op, returning None on domain error."""
+        r = _POSTFIX_UNARY[tok](val)
+        return r  # lambda returns None on domain error
 
     def parse_number_at(pos, allow_ordinal=False) -> tuple[float | int | None, int]:
         """Parse an integer (+ optional decimal suffix) starting at pos.
@@ -535,6 +543,8 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
             k = j + consumed
             while k < n and tokens[k] in _POSTFIX_UNARY:
                 arg = _POSTFIX_UNARY[tokens[k]](arg)
+                if arg is None:
+                    return None
                 k += 1
             if is_natural_log:
                 result.append(_math.log(arg))
@@ -586,6 +596,8 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
             k = j + consumed
             while k < n and tokens[k] in _POSTFIX_UNARY:
                 val = _POSTFIX_UNARY[tokens[k]](sign * val)
+                if val is None:
+                    return None
                 sign = 1
                 k += 1
             base = sign * val
@@ -620,6 +632,8 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
             k = j + consumed
             while k < n and tokens[k] in _POSTFIX_UNARY:
                 val = _POSTFIX_UNARY[tokens[k]](sign * val)
+                if val is None:
+                    return None
                 sign = 1
                 k += 1
             computed = fn(sign * val)
@@ -652,6 +666,8 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
                 # "sine two squared cubed" → fn((2²)³) = sin(64°)
                 while k < n and tokens[k] in _POSTFIX_UNARY:
                     val = _POSTFIX_UNARY[tokens[k]](sign * val)
+                    if val is None:
+                        return None
                     sign = 1
                     k += 1
                 result.append(fn(sign * val))
@@ -674,10 +690,13 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
                 else:
                     pass  # fall through to number parsing as sign
 
-            # ── postfix unary (squared / cubed) — must follow a number ────────
+            # ── postfix unary (squared / cubed / factorial) ───────────────────
             elif tok in _POSTFIX_UNARY and last_token_is_number():
-                result[-1] = _POSTFIX_UNARY[tok](result[-1])
-                _ops_seen.add('power')
+                val = _POSTFIX_UNARY[tok](result[-1])
+                if val is None:
+                    return None  # domain error (e.g. factorial of non-integer)
+                result[-1] = val
+                _ops_seen.add('factorial' if tok == 'factorial' else 'power')
                 i += 1
                 continue
 
@@ -757,6 +776,8 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
                 val = const_sign * const_val
                 while k < n and tokens[k] in _POSTFIX_UNARY:
                     val = _POSTFIX_UNARY[tokens[k]](val)
+                    if val is None:
+                        return None
                     k += 1
                 result.append(val)
                 _ops_seen.add('constant')
