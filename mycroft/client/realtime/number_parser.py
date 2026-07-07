@@ -269,6 +269,7 @@ _ORDINAL_SINGLE_TOKENS = _build_ordinal_tokens()
 # ── calculator vocabulary ────────────────────────────────────────────────────
 
 import math as _math
+import mpmath as _mpmath
 
 def _sin_deg(x):  return _math.sin(_math.radians(x))
 def _cos_deg(x):  return _math.cos(_math.radians(x))
@@ -316,9 +317,12 @@ CALC_ALIASES = {
     # inverse trig modifier + Riva mishear variants for "arc"
     'inverse':  ['arc', 'arxie', 'ark'],
     # mathematical constants
-    'pi':       [],
-    'tau':      ['tao', 'taw'],
-    'euler':    ['e', 'oiler'],
+    'pi':           [],
+    'tau':          ['tao', 'taw'],
+    'euler':        ['e', 'oiler'],
+    'apery':        ['apory', 'apri'],
+    'catalan':      ['catalon'],
+    'mascheroni':   ['mascueroni', 'mascarone'],
     # 'golden' + 'ratio' are only valid as a two-token pair — both in CALC_WORDS
     # so the slot buffer passes them through; tokenizer handles the pair.
     'golden':   [],
@@ -364,6 +368,9 @@ _CONSTANTS = {
     'tau':               _math.tau,      # ≈ 6.28318  (2π)
     'euler':             _math.e,        # ≈ 2.71828  (aliases: e, oiler)
     ('golden', 'ratio'): _GOLDEN_RATIO,  # ≈ 1.61803
+    'apery':             float(_mpmath.zeta(3)),      # Apéry's constant ζ(3)
+    'catalan':           float(_mpmath.catalan),      # Catalan's constant G
+    'mascheroni':        float(_mpmath.euler),        # Euler-Mascheroni constant γ
 }
 
 # Prefix unary: canonical phrase tuple → function applied to following operand

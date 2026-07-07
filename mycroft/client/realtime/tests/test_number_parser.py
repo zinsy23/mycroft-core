@@ -932,6 +932,32 @@ class TestCalcConstants:
         # Riva produces "euler" without apostrophe; "number" is a filler
         assert calc_via_slot('euler number') == approx(math.e)
 
+    def test_apery(self):
+        assert calc('apery') == approx(1.2020569031595942)
+
+    def test_apery_aliases(self):
+        assert calc('apory') == approx(1.2020569031595942)
+        assert calc('apri') == approx(1.2020569031595942)
+
+    def test_catalan(self):
+        assert calc('catalan') == approx(0.9159655941772190)
+
+    def test_catalan_alias(self):
+        assert calc('catalon') == approx(0.9159655941772190)
+
+    def test_mascheroni(self):
+        assert calc('mascheroni') == approx(0.5772156649015329)
+
+    def test_mascheroni_aliases(self):
+        assert calc('mascueroni') == approx(0.5772156649015329)
+        assert calc('mascarone') == approx(0.5772156649015329)
+
+    def test_apery_in_expression(self):
+        assert calc('apery plus one') == approx(1.2020569031595942 + 1)
+
+    def test_mascheroni_plus_catalan(self):
+        assert calc('mascheroni plus catalan') == approx(0.5772156649015329 + 0.9159655941772190)
+
     def test_constants_are_operations(self):
         r = words_to_calc('pi times two')
         assert r is not None
