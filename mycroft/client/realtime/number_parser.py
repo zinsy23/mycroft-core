@@ -323,6 +323,11 @@ CALC_ALIASES = {
     'apery':        ['apory', 'apri'],
     'catalan':      ['catalon'],
     'mascheroni':   ['mascueroni', 'mascarone'],
+    # logarithms
+    'log':          [],
+    'natural':      [],   # 'natural log' two-token → ln
+    'ln':           [],   # single-token natural log (low-confidence Riva alias)
+    'base':         [],   # modifier word for log base N
     # 'golden' + 'ratio' are only valid as a two-token pair — both in CALC_WORDS
     # so the slot buffer passes them through; tokenizer handles the pair.
     'golden':   [],
@@ -483,6 +488,62 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
 
     while i < n:
         tok = tokens[i]
+
+        # ── logarithms ────────────────────────────────────────────────────────
+        # Forms (after alias rewrite, 'of' stripped as filler):
+        #   "log <number>"              → log base 10
+        #   "log base <number> <number>"→ log arbitrary base
+        #   "natural log <number>"      → natural log (base e)
+        #   "ln <number>"               → natural log (base e)
+        is_natural_log = (
+            tok == 'ln' or
+            (tok == 'natural' and i + 1 < n and tokens[i + 1] == 'log')
+        )
+        is_log = tok == 'log'
+
+        if is_natural_log or is_log:
+            j = i + (2 if tok == 'natural' else 1)  # skip 'natural log' or 'log'/'ln'
+            if j >= n:
+                return None
+
+            log_base = None
+            if is_log and j < n and tokens[j] == 'base':
+                # "log base <N> <X>" — parse base then argument
+                j += 1
+                if j >= n:
+                    return None
+                base_val, base_consumed = parse_number_at(j)
+                if base_val is None or base_val <= 0 or base_val == 1:
+                    return None
+                log_base = base_val
+                j += base_consumed
+
+            if j >= n:
+                return None
+            sign = 1
+            if tokens[j] in ('minus', 'negative'):
+                sign = -1
+                j += 1
+                if j >= n:
+                    return None
+            val, consumed = parse_number_at(j)
+            if val is None:
+                return None
+            arg = sign * val
+            if arg <= 0:
+                return None  # log of non-positive undefined
+            k = j + consumed
+            while k < n and tokens[k] in _POSTFIX_UNARY:
+                arg = _POSTFIX_UNARY[tokens[k]](arg)
+                k += 1
+            if is_natural_log:
+                result.append(_math.log(arg))
+            else:
+                result.append(_math.log10(arg) if log_base is None
+                              else _math.log(arg, log_base))
+            _ops_seen.add('log')
+            i = k
+            continue
 
         # ── nth root: "<ordinal> root <number>" ──────────────────────────────
         # "fourth root of sixteen" → slot buffer: "fourth root sixteen" → 2.0

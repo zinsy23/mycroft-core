@@ -46,6 +46,7 @@ def _apply_calc_rounding(calc: dict, cfg: dict) -> int | float:
         'decimal_places_abs':           'abs',
         'decimal_places_power':         'power',
         'decimal_places_constant':      'constant',
+        'decimal_places_log':           'log',
     }
     for cfg_key, op_name in _op_cfg_keys.items():
         val = cfg.get(cfg_key)

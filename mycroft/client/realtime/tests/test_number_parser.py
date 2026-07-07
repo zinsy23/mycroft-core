@@ -964,6 +964,67 @@ class TestCalcConstants:
         assert r['operation'] in ('multiply', 'mixed')
 
 
+# ── logarithms ───────────────────────────────────────────────────────────────
+
+class TestCalcLog:
+    def test_log_base10(self):
+        assert calc('log one thousand') == approx(3.0)
+
+    def test_log_base10_hundred(self):
+        assert calc('log one hundred') == approx(2.0)
+
+    def test_log_with_filler_of(self):
+        assert calc_via_slot('log of one thousand') == approx(3.0)
+
+    def test_natural_log_e(self):
+        assert calc('natural log euler') == approx(1.0)
+
+    def test_natural_log_one(self):
+        assert calc('natural log one') == approx(0.0)
+
+    def test_ln_alias(self):
+        assert calc('ln euler') == approx(1.0)
+
+    def test_ln_equals_natural_log(self):
+        assert calc('ln one thousand') == approx(calc('natural log one thousand'))
+
+    def test_log_base_two(self):
+        assert calc('log base two eight') == approx(3.0)
+
+    def test_log_base_ten_explicit(self):
+        assert calc('log base ten one thousand') == approx(3.0, rel=1e-9)
+
+    def test_log_base_multiword(self):
+        # Both base and argument are multi-word numbers
+        assert calc('log base sixty four sixty nine') == approx(math.log(69, 64))
+
+    def test_log_constant_argument(self):
+        assert calc('log pi') == approx(math.log10(math.pi))
+
+    def test_natural_log_constant(self):
+        assert calc('natural log pi') == approx(math.log(math.pi))
+
+    def test_log_in_expression(self):
+        # log(1000) + 1 = 4
+        assert calc('log one thousand plus one') == approx(4.0)
+
+    def test_log_zero_returns_none(self):
+        assert calc('log zero') is None
+
+    def test_log_base_one_returns_none(self):
+        assert calc('log base one five') is None
+
+    def test_log_operation_tag(self):
+        r = words_to_calc('log one thousand')
+        assert r is not None
+        assert r['operation'] == 'log'
+
+    def test_natural_log_operation_tag(self):
+        r = words_to_calc('natural log euler')
+        assert r is not None
+        assert r['operation'] == 'log'
+
+
 # ── ordinal_to_int ────────────────────────────────────────────────────────────
 
 class TestOrdinalToInt:
