@@ -722,9 +722,235 @@ class TestCalcTrig:
         assert r is not None
         assert r['operation'] == 'mixed'
 
+    def test_trig_of_squared_operand(self):
+        # "sine three squared" = sin(3²) = sin(9°), not sin(3°)²
+        assert calc('sine three squared') == approx(math.sin(math.radians(9)))
+
+    def test_trig_of_cubed_operand(self):
+        # "tangent two cubed" = tan(2³) = tan(8°)
+        assert calc('tangent two cubed') == approx(math.tan(math.radians(8)))
+
+    def test_trig_of_squared_via_slot(self):
+        assert calc_via_slot('sine three squared') == approx(math.sin(math.radians(9)))
+
     def test_bare_trig_word_no_number_is_none(self):
         # No operand — incomplete
         assert calc('sine') is None
 
     def test_trig_decimal_angle(self):
         assert calc('sine forty five point five') == approx(math.sin(math.radians(45.5)))
+
+
+# ── compound operations ───────────────────────────────────────────────────────
+
+class TestCalcCompound:
+    """Combinations of prefix unary, postfix unary, and infix operators."""
+
+    # prefix + postfix on operand (applies postfix to arg before prefix fn)
+    def test_root_of_squared(self):
+        # sqrt(4²) = sqrt(16) = 4
+        assert calc('square root four squared') == approx(4.0)
+
+    def test_cube_root_of_cubed(self):
+        # cbrt(2³) = cbrt(8) = 2
+        assert calc('cube root two cubed') == approx(2.0)
+
+    def test_abs_of_cubed(self):
+        # abs((-3)³) = abs(-27) = 27
+        assert calc('absolute value negative three cubed') == approx(27)
+
+    def test_abs_of_squared(self):
+        # abs((-4)²) = abs(16) = 16
+        assert calc('absolute value negative four squared') == approx(16)
+
+    # prefix result on left of infix
+    def test_root_plus_number(self):
+        assert calc('square root nine plus one') == approx(4.0)
+
+    def test_abs_plus_number(self):
+        assert calc('absolute value negative five plus three') == approx(8)
+
+    def test_cosine_times_number(self):
+        assert calc('cosine zero times two') == approx(2.0)
+
+    def test_tangent_plus_number(self):
+        assert calc('tangent forty five plus one') == approx(2.0)
+
+    # prefix result on right of infix
+    def test_number_plus_root(self):
+        assert calc('two plus square root nine') == approx(5.0)
+
+    def test_number_times_root(self):
+        assert calc('three times square root four') == approx(6.0)
+
+    def test_number_plus_trig(self):
+        assert calc('one plus sine ninety') == approx(2.0)
+
+    def test_number_minus_cosine(self):
+        assert calc('ten minus cosine zero') == approx(9.0)
+
+    # prefix on both sides of infix
+    def test_root_plus_root(self):
+        assert calc('square root nine plus square root sixteen') == approx(7.0)
+
+    def test_trig_plus_trig(self):
+        assert calc('sine ninety plus cosine zero') == approx(2.0)
+
+    def test_root_times_trig(self):
+        assert calc('square root four times sine ninety') == approx(2.0)
+
+    # postfix chaining
+    def test_squared_then_cubed(self):
+        # 3² = 9, 9³ = 729
+        assert calc('three squared cubed') == approx(729)
+
+    def test_cubed_then_squared(self):
+        # 2³ = 8, 8² = 64
+        assert calc('two cubed squared') == approx(64)
+
+    # chained postfix on prefix operand
+    def test_trig_of_squared_cubed(self):
+        # sine two squared cubed = sin((2²)³) = sin(64°)
+        assert calc('sine two squared cubed') == approx(math.sin(math.radians(64)))
+
+    def test_root_of_squared_cubed(self):
+        # sqrt((2²)³) = sqrt(64) = 8
+        assert calc('square root two squared cubed') == approx(math.sqrt(64))
+
+    def test_cosine_of_cubed_squared(self):
+        # cos((2³)²) = cos(64°)
+        assert calc('cosine two cubed squared') == approx(math.cos(math.radians(64)))
+
+    # postfix operand in infix
+    def test_squared_plus_number(self):
+        assert calc('three squared plus one') == approx(10)
+
+    def test_number_plus_squared(self):
+        assert calc('two plus three squared') == approx(11)
+
+    def test_squared_times_cubed(self):
+        # 2² * 3³ = 4 * 27 = 108
+        assert calc('two squared times three cubed') == approx(108)
+
+    # infix power with prefix/postfix on operands
+    def test_power_result_in_infix(self):
+        assert calc('two power three plus one') == approx(9)
+
+    def test_number_plus_power(self):
+        assert calc('one plus two power three') == approx(9)
+
+    def test_power_then_multiply(self):
+        assert calc('two power three times two') == approx(16)
+
+    # prefix result raised to a power
+    def test_root_result_to_power(self):
+        # sqrt(4)³ = 2³ = 8
+        assert calc('square root four power three') == approx(8)
+
+    # postfix result raised to a power
+    def test_postfix_result_to_power(self):
+        # (2²)³ = 4³ = 64
+        assert calc('two squared power three') == approx(64)
+
+
+# ── inverse trig ──────────────────────────────────────────────────────────────
+
+class TestCalcInverseTrig:
+    # basic inverse trig — result in degrees
+    def test_inverse_sine(self):
+        # asin(1) = 90°
+        assert calc('inverse sine one') == approx(90.0)
+
+    def test_inverse_cosine(self):
+        # acos(1) = 0°
+        assert calc('inverse cosine one') == approx(0.0)
+
+    def test_inverse_tangent(self):
+        # atan(1) = 45°
+        assert calc('inverse tangent one') == approx(45.0)
+
+    def test_inverse_sine_half(self):
+        # asin(0.5) = 30°
+        assert calc('inverse sine zero point five') == approx(30.0)
+
+    def test_inverse_cosine_half(self):
+        # acos(0.5) = 60°
+        assert calc('inverse cosine zero point five') == approx(60.0)
+
+    def test_inverse_tangent_zero(self):
+        # atan(0) = 0°
+        assert calc('inverse tangent zero') == approx(0.0)
+
+    # trig aliases work as modifier target — alias rewrite happens before inverse check
+    def test_inverse_sign_alias(self):
+        # "sign" → "sine" via alias → asin(1) = 90°
+        assert calc('inverse sign one') == approx(90.0)
+
+    def test_inverse_cosign_alias(self):
+        # "cosign" → "cosine" via alias → acos(0) = 90°
+        assert calc('inverse cosign zero') == approx(90.0)
+
+    def test_inverse_sin_alias(self):
+        # "sin" → "sine" via alias → asin(1) = 90°
+        assert calc('inverse sin one') == approx(90.0)
+
+    # arc aliases for "inverse"
+    def test_arc_sine(self):
+        # "arc" → "inverse" via alias → asin(1) = 90°
+        assert calc('arc sine one') == approx(90.0)
+
+    def test_arc_cosine(self):
+        assert calc('arc cosine one') == approx(0.0)
+
+    def test_arc_tangent(self):
+        assert calc('arc tangent one') == approx(45.0)
+
+    def test_arxie_sine(self):
+        # Riva mishear of "arc" → still works
+        assert calc('arxie sine one') == approx(90.0)
+
+    def test_ark_sign(self):
+        # Combined mishear: "ark" for "arc", "sign" for "sine"
+        assert calc('ark sign one') == approx(90.0)
+
+    # domain error — asin/acos require input in [-1, 1]
+    def test_inverse_sine_out_of_domain(self):
+        assert calc('inverse sine two') is None
+
+    def test_inverse_cosine_out_of_domain(self):
+        assert calc('inverse cosine negative two') is None
+
+    def test_inverse_tangent_large_value(self):
+        # atan has no domain restriction — large values are fine
+        assert calc('inverse tangent one thousand') is not None
+
+    # negative operand
+    def test_inverse_sine_negative(self):
+        # asin(-1) = -90°
+        assert calc('inverse sine negative one') == approx(-90.0)
+
+    def test_inverse_tangent_negative(self):
+        # atan(-1) = -45°
+        assert calc('inverse tangent negative one') == approx(-45.0)
+
+    # inverse trig in an expression
+    def test_inverse_sine_plus_number(self):
+        # asin(1) + 45 = 90 + 45 = 135
+        assert calc('inverse sine one plus forty five') == approx(135.0)
+
+    def test_number_plus_inverse_cosine(self):
+        # 30 + acos(0.5) = 30 + 60 = 90
+        assert calc('thirty plus inverse cosine zero point five') == approx(90.0)
+
+    def test_via_slot_arc_sine(self):
+        # "of" is a filler — stripped by slot buffer
+        assert calc_via_slot('arc sine of one') == approx(90.0)
+
+    def test_operation_tag(self):
+        r = words_to_calc('inverse sine one')
+        assert r is not None
+        assert r['operation'] == 'inverse_trig'
+
+    def test_mixed_trig_and_inverse_trig(self):
+        # sine(90) + asin(1) = 1 + 90 = 91
+        assert calc('sine ninety plus inverse sine one') == approx(91.0)

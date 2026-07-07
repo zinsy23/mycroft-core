@@ -181,6 +181,18 @@ def _sin_deg(x):  return _math.sin(_math.radians(x))
 def _cos_deg(x):  return _math.cos(_math.radians(x))
 def _tan_deg(x):  return _math.tan(_math.radians(x))
 
+def _asin_deg(x):
+    if x < -1 or x > 1:
+        return None
+    return _math.degrees(_math.asin(x))
+
+def _acos_deg(x):
+    if x < -1 or x > 1:
+        return None
+    return _math.degrees(_math.acos(x))
+
+def _atan_deg(x):  return _math.degrees(_math.atan(x))
+
 # Alias map: canonical word → list of accepted synonyms/homophones.
 # Aliases are rewritten to their canonical form as the first step in
 # _tokenize_calc, so everything downstream (tokenizer, dedup, logging)
@@ -208,6 +220,8 @@ CALC_ALIASES = {
     'sine':     ['sin', 'sign'],
     'cosine':   ['cosign'],
     'tangent':  [],
+    # inverse trig modifier + Riva mishear variants for "arc"
+    'inverse':  ['arc', 'arxie', 'ark'],
 }
 
 # Reverse map: alias word → canonical word (built from CALC_ALIASES)
@@ -232,9 +246,18 @@ _POSTFIX_UNARY = {
     'cubed':   lambda x: x ** 3,
 }
 
+# Inverse trig: maps trig canonical → inverse function (result in degrees)
+_INVERSE_TRIG = {
+    'sine':    _asin_deg,
+    'cosine':  _acos_deg,
+    'tangent': _atan_deg,
+}
+
 # Prefix unary: canonical phrase tuple → function applied to following operand
 # 'of' is intentionally absent — it's a filler the budget system handles.
 # Longer phrases first (greediest match wins).
+# Note: inverse trig is handled separately in _tokenize_calc via _INVERSE_TRIG
+# so that "inverse" composes with the already-aliased trig words automatically.
 _PREFIX_UNARY_PHRASES = [
     (('square', 'root'), lambda x: x ** 0.5),
     (('cube',   'root'), lambda x: x ** (1/3) if x >= 0 else -((-x) ** (1/3))),
@@ -319,6 +342,37 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
     while i < n:
         tok = tokens[i]
 
+        # ── inverse trig: "inverse sine/cosine/tangent <number>" ─────────────
+        # Handled before _PREFIX_UNARY_PHRASES so "inverse" composes with the
+        # already-aliased trig canonicals — "inverse sign" works because the
+        # alias rewrite above already turned "sign" → "sine".
+        if tok == 'inverse' and i + 1 < n and tokens[i + 1] in _INVERSE_TRIG:
+            fn = _INVERSE_TRIG[tokens[i + 1]]
+            j = i + 2
+            if j >= n:
+                return None
+            sign = 1
+            if tokens[j] in ('minus', 'negative'):
+                sign = -1
+                j += 1
+                if j >= n:
+                    return None
+            val, consumed = parse_number_at(j)
+            if val is None:
+                return None
+            k = j + consumed
+            while k < n and tokens[k] in _POSTFIX_UNARY:
+                val = _POSTFIX_UNARY[tokens[k]](sign * val)
+                sign = 1
+                k += 1
+            computed = fn(sign * val)
+            if computed is None:
+                return None  # domain error (asin/acos out of [-1, 1])
+            result.append(computed)
+            _ops_seen.add('inverse_trig')
+            i = k
+            continue
+
         # ── prefix unary (square root / cube root / absolute value / trig) ───
         for phrase, fn in _PREFIX_UNARY_PHRASES:
             plen = len(phrase)
@@ -335,8 +389,16 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
                 val, consumed = parse_number_at(j)
                 if val is None:
                     return None
+                k = j + consumed
+                # Apply all immediately following postfix unary ops to the operand
+                # before passing to the prefix function — handles chaining like
+                # "sine two squared cubed" → fn((2²)³) = sin(64°)
+                while k < n and tokens[k] in _POSTFIX_UNARY:
+                    val = _POSTFIX_UNARY[tokens[k]](sign * val)
+                    sign = 1
+                    k += 1
                 result.append(fn(sign * val))
-                i = j + consumed
+                i = k
                 if phrase[0] in ('square', 'cube'):
                     _ops_seen.add('root')
                 elif phrase[0] in ('sine', 'cosine', 'tangent'):
@@ -550,7 +612,8 @@ def format_calc_result(
         decimal_places: global decimal places for float results (default 2)
         overrides:      per-operation overrides, e.g. {'root': 4, 'divide': 3}
                         valid keys: 'add', 'subtract', 'multiply', 'divide',
-                                    'modulo', 'power', 'root', 'abs', 'trig', 'mixed'
+                                    'modulo', 'power', 'root', 'abs', 'trig',
+                                    'inverse_trig', 'mixed'
     """
     value = result_dict['result']
     if not isinstance(value, float):

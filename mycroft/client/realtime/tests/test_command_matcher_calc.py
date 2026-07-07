@@ -245,9 +245,71 @@ class TestCalcTrigDispatch:
         assert r is not None
         assert r['entities']['number_calc'] == pytest.approx(2.0, rel=1e-9)
 
+    def test_trig_of_squared_operand(self):
+        # "sine three squared" = sin(9°), not sin(3°)²
+        m = make_matcher()
+        r = feed(m, ['what', 'is', 'sine', 'three', 'squared'])
+        assert r is not None
+        assert r['entities']['number_calc'] == round(math.sin(math.radians(9)), 2)
+
+    def test_trig_rounding_uses_global_default(self):
+        # No trig override — falls back to global decimal_places
+        m = make_matcher(calc_cfg={'decimal_places': 3})
+        r = feed(m, ['what', 'is', 'sine', 'thirty'])
+        assert r is not None
+        assert r['entities']['number_calc'] == round(math.sin(math.radians(30)), 3)
+
     def test_trig_rounding_override(self):
+        # decimal_places_trig overrides global for trig results
         m = make_matcher(calc_cfg={'decimal_places': 2, 'decimal_places_trig': 6})
-        # decimal_places_trig isn't a built-in key — falls back to global 2
+        r = feed(m, ['what', 'is', 'sine', 'thirty'])
+        assert r is not None
+        assert r['entities']['number_calc'] == round(math.sin(math.radians(30)), 6)
+
+    def test_trig_override_doesnt_affect_other_ops(self):
+        # decimal_places_trig should not bleed into division
+        m = make_matcher(calc_cfg={'decimal_places': 2, 'decimal_places_trig': 6})
+        r = feed(m, ['what', 'is', 'ten', 'divided', 'by', 'three'])
+        assert r is not None
+        assert r['entities']['number_calc'] == round(10/3, 2)
+
+
+# ── inverse trig (end-to-end through matcher) ────────────────────────────────
+
+class TestCalcInverseTrigDispatch:
+    def test_inverse_sine_dispatches(self):
+        m = make_matcher()
+        r = feed(m, ['what', 'is', 'inverse', 'sine', 'one'])
+        assert r is not None
+        assert r['entities']['number_calc'] == round(90.0, 2)
+
+    def test_arc_cosine_dispatches(self):
+        m = make_matcher()
+        r = feed(m, ['what', 'is', 'arc', 'cosine', 'one'])
+        assert r is not None
+        assert r['entities']['number_calc'] == round(0.0, 2)
+
+    def test_arxie_sign_dispatches(self):
+        # Both misheard: "arxie"→"inverse", "sign"→"sine" → asin(1) = 90°
+        m = make_matcher()
+        r = feed(m, ['what', 'is', 'arxie', 'sign', 'one'])
+        assert r is not None
+        assert r['entities']['number_calc'] == round(90.0, 2)
+
+    def test_inverse_trig_domain_error_no_dispatch(self):
+        # asin(2) is undefined — should not dispatch
+        m = make_matcher()
+        r = feed(m, ['what', 'is', 'inverse', 'sine', 'two'])
+        assert r is None
+
+    def test_inverse_trig_rounding_override(self):
+        m = make_matcher(calc_cfg={'decimal_places': 2, 'decimal_places_inverse_trig': 6})
+        r = feed(m, ['what', 'is', 'inverse', 'sine', 'zero', 'point', 'five'])
+        assert r is not None
+        assert r['entities']['number_calc'] == round(30.0, 6)
+
+    def test_inverse_trig_override_doesnt_affect_trig(self):
+        m = make_matcher(calc_cfg={'decimal_places': 2, 'decimal_places_inverse_trig': 6})
         r = feed(m, ['what', 'is', 'sine', 'thirty'])
         assert r is not None
         assert r['entities']['number_calc'] == round(math.sin(math.radians(30)), 2)

@@ -25,14 +25,28 @@ def _apply_calc_rounding(calc: dict, cfg: dict) -> int | float:
     """Apply rounding config to a words_to_calc result dict for entity dispatch.
 
     cfg keys (all optional):
-      'decimal_places':      global default (default 2)
-      'decimal_places_root': override for root results
+      'decimal_places':               global default (default 2)
+      'decimal_places_root':          override for root results
+      'decimal_places_trig':          override for trig results
+      'decimal_places_inverse_trig':  override for inverse trig results
+      'decimal_places_divide':        override for division results
+      'decimal_places_multiply':      override for multiplication results
+      'decimal_places_abs':           override for absolute value results
     """
     places = cfg.get('decimal_places', 2)
     overrides = {}
-    root_places = cfg.get('decimal_places_root')
-    if root_places is not None:
-        overrides['root'] = root_places
+    _op_cfg_keys = {
+        'decimal_places_root':          'root',
+        'decimal_places_trig':          'trig',
+        'decimal_places_inverse_trig':  'inverse_trig',
+        'decimal_places_divide':        'divide',
+        'decimal_places_multiply':      'multiply',
+        'decimal_places_abs':           'abs',
+    }
+    for cfg_key, op_name in _op_cfg_keys.items():
+        val = cfg.get(cfg_key)
+        if val is not None:
+            overrides[op_name] = val
     return format_calc_result(calc, decimal_places=places, overrides=overrides)
 
 
