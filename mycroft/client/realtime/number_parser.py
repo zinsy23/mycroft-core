@@ -173,6 +173,99 @@ def words_to_int(phrase: str) -> int | None:
     return -result if negative else result
 
 
+# ── ordinal support ──────────────────────────────────────────────────────────
+
+# Irregular ordinals that can't be derived by suffix stripping
+_ORDINAL_IRREGULARS = {
+    'first':  'one',
+    'second': 'two',
+    'third':  'three',
+}
+
+# Explicit suffix map for the irregular teens/special cases that don't
+# follow a simple chop-the-suffix rule.
+_ORDINAL_SUFFIX_MAP = {
+    'twelfth':    'twelve',
+    'eighth':     'eight',
+    'ninth':      'nine',
+    'fifth':      'five',
+}
+
+def ordinal_to_int(word: str) -> int | None:
+    """Convert a spoken ordinal word to its integer value.
+
+    Handles irregular forms (first/second/third) and the full regular pattern:
+      'fourth' → 4, 'twelfth' → 12, 'twentieth' → 20,
+      'twenty first' → 21, 'one hundred twenty eighth' → 128, etc.
+
+    Multi-word ordinals (e.g. 'twenty first') must be passed as a single
+    space-joined string. Returns None if not a valid ordinal.
+    """
+    word = word.strip().lower()
+    if not word:
+        return None
+
+    tokens = word.split()
+    last = tokens[-1]
+
+    # Explicit irregular forms (take priority over suffix rules)
+    if last in _ORDINAL_IRREGULARS:
+        cardinal_last = _ORDINAL_IRREGULARS[last]
+    elif last in _ORDINAL_SUFFIX_MAP:
+        cardinal_last = _ORDINAL_SUFFIX_MAP[last]
+    # -ieth suffix: twentieth → twenty, thirtieth → thirty, hundredth→hundred
+    elif last.endswith('ieth'):
+        cardinal_last = last[:-4] + 'y'
+    # -th suffix on regular words: fourth→four, sixth→six, tenth→ten, etc.
+    # Rejected if the stripped base corresponds to a number whose canonical
+    # ordinal is irregular (five→fifth, eight→eighth, etc. — those are in
+    # _ORDINAL_SUFFIX_MAP and are already handled above).
+    elif last.endswith('th') and len(last) > 4:
+        candidate = last[:-2]
+        # The canonical ordinals for these cardinals use irregular forms,
+        # not plain -th — reject any -th attempt for them.
+        _irregular_cardinals = frozenset(
+            v for v in {**_ORDINAL_IRREGULARS, **_ORDINAL_SUFFIX_MAP}.values()
+        )
+        if candidate in _irregular_cardinals or words_to_int(candidate) is None:
+            return None
+        cardinal_last = candidate
+    # -st: only valid for 'first' (handled above via irregulars)
+    # -nd: only valid for 'second' (handled above via irregulars)
+    # -rd: only valid for 'third' (handled above via irregulars)
+    else:
+        return None
+
+    cardinal = ' '.join(tokens[:-1] + [cardinal_last])
+    val = words_to_int(cardinal)
+    # Sanity: reject if cardinal didn't parse or value is <= 0
+    if val is None or val <= 0:
+        return None
+    return val
+
+
+# Dynamically build the set of single-token ordinal words valid in calc slots.
+# Multi-word ordinals (e.g. 'twenty first') are handled by lookahead in the
+# tokenizer; only single-token forms need to be in CALC_WORDS for slot filtering.
+def _build_ordinal_tokens() -> frozenset:
+    candidates = list(_ORDINAL_IRREGULARS) + list(_ORDINAL_SUFFIX_MAP)
+    # -ieth forms from tens bases
+    for tens_word in ('twenty', 'thirty', 'forty', 'fifty',
+                      'sixty', 'seventy', 'eighty', 'ninety'):
+        candidates.append(tens_word[:-1] + 'ieth')
+    # -th forms from ones/teens/magnitudes
+    for w in ('four', 'six', 'seven', 'ten', 'eleven',
+              'thirteen', 'fourteen', 'fifteen', 'sixteen',
+              'seventeen', 'eighteen', 'nineteen',
+              'hundred', 'thousand', 'million', 'billion', 'trillion'):
+        candidates.append(w + 'th')
+    # magnitude -th forms that end in a vowel need special handling
+    # 'hundredth' — already in list above as 'hundredth'
+    return frozenset(w for w in candidates if ordinal_to_int(w) is not None)
+
+_ORDINAL_SINGLE_TOKENS = _build_ordinal_tokens()
+
+
 # ── calculator vocabulary ────────────────────────────────────────────────────
 
 import math as _math
@@ -275,6 +368,7 @@ CALC_WORDS = (
     | DECIMAL_WORDS
     | frozenset(CALC_ALIASES)           # all canonical words
     | frozenset(_ALIAS_TO_CANONICAL)    # all alias words
+    | _ORDINAL_SINGLE_TOKENS            # ordinal exponent/root words
 )
 
 
@@ -311,9 +405,13 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
     def last_token_is_number():
         return result and isinstance(result[-1], (int, float))
 
-    def parse_number_at(pos) -> tuple[float | int | None, int]:
+    def parse_number_at(pos, allow_ordinal=False) -> tuple[float | int | None, int]:
         """Parse an integer (+ optional decimal suffix) starting at pos.
-        Returns (value, tokens_consumed) or (None, 0) on failure."""
+        Returns (value, tokens_consumed) or (None, 0) on failure.
+
+        allow_ordinal: also accept ordinal words as a number value
+        (used after '**' so 'fifth' in 'three to the fifth power' works).
+        """
         num_val = None
         consumed = 0
         for length in range(min(n - pos, 20), 0, -1):
@@ -323,6 +421,15 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
                 num_val = val
                 consumed = length
                 break
+        if num_val is None and allow_ordinal:
+            # Try ordinal — greedy, longest match first
+            for length in range(min(n - pos, 20), 0, -1):
+                sub = ' '.join(tokens[pos:pos + length])
+                val = ordinal_to_int(sub)
+                if val is not None:
+                    num_val = val
+                    consumed = length
+                    break
         if num_val is None:
             return None, 0
         j = pos + consumed
@@ -341,6 +448,60 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
 
     while i < n:
         tok = tokens[i]
+
+        # ── nth root: "<ordinal> root <number>" ──────────────────────────────
+        # "fourth root of sixteen" → slot buffer: "fourth root sixteen" → 2.0
+        # Ordinal gives n; result = operand ** (1/n).
+        # Negative cube-root-style: preserve sign for odd n, undefined for even n.
+        #
+        # Multi-word ordinal lookahead: try the longest span ending just before
+        # 'root' — e.g. "sixty fourth root two" → ordinal span "sixty fourth"
+        # = 64, not greedy-cardinal "sixty" = 60 followed by "fourth root".
+        ord_val = None
+        ord_span = 0
+        for length in range(min(n - i, 20), 0, -1):
+            if i + length < n and tokens[i + length] == 'root':
+                sub = ' '.join(tokens[i:i + length])
+                v = ordinal_to_int(sub)
+                if v is not None:
+                    ord_val, ord_span = v, length
+                    break
+        if ord_val is None:
+            # Fall back to single-token check (already covered by loop above,
+            # but kept explicit for clarity when no 'root' follows at all)
+            ord_val = ordinal_to_int(tok)
+            ord_span = 1
+        if ord_val is not None and i + ord_span < n and tokens[i + ord_span] == 'root':
+            n_root = ord_val
+            if n_root < 1:
+                return None
+            j = i + ord_span + 1  # skip ordinal span + 'root'
+            if j >= n:
+                return None
+            sign = 1
+            if tokens[j] in ('minus', 'negative'):
+                sign = -1
+                j += 1
+                if j >= n:
+                    return None
+            val, consumed = parse_number_at(j)
+            if val is None:
+                return None
+            k = j + consumed
+            while k < n and tokens[k] in _POSTFIX_UNARY:
+                val = _POSTFIX_UNARY[tokens[k]](sign * val)
+                sign = 1
+                k += 1
+            base = sign * val
+            if base < 0 and n_root % 2 == 0:
+                return None  # even root of negative — undefined in reals
+            if base < 0:
+                result.append(-((-base) ** (1 / n_root)))
+            else:
+                result.append(base ** (1 / n_root))
+            _ops_seen.add('root')
+            i = k
+            continue
 
         # ── inverse trig: "inverse sine/cosine/tangent <number>" ─────────────
         # Handled before _PREFIX_UNARY_PHRASES so "inverse" composes with the
@@ -446,6 +607,30 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
                                '/': 'divide', '%': 'modulo'}[sym])
                 i += 1
                 continue
+
+            # ── ordinal + power: "<number> <ordinal> power" ──────────────────
+            # e.g. slot buffer "three fifth power" → 3 ** 5.
+            # Consume the ordinal span + 'power' together so the result list
+            # stays in [number, op, number] order.
+            if last_token_is_number():
+                ord_exp = None
+                ord_consumed = 0
+                for length in range(min(n - i, 20), 0, -1):
+                    if i + length < n and tokens[i + length] == 'power':
+                        sub = ' '.join(tokens[i:i + length])
+                        v = ordinal_to_int(sub)
+                        if v is not None:
+                            ord_exp, ord_consumed = v, length
+                            break
+                if ord_exp is not None:
+                    result.append('**')
+                    result.append(ord_exp)
+                    _ops_seen.add('power')
+                    i += ord_consumed + 1  # skip ordinal tokens + 'power'
+                    # skip duplicate 'power' from raised→power alias artifact
+                    if i < n and tokens[i] == 'power':
+                        i += 1
+                    continue
 
             # ── number (possibly signed) ──────────────────────────────────────
             sign = 1

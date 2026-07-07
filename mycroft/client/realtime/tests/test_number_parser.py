@@ -853,6 +853,156 @@ class TestCalcCompound:
         assert calc('two squared power three') == approx(64)
 
 
+# ── ordinal_to_int ────────────────────────────────────────────────────────────
+
+class TestOrdinalToInt:
+    """Tests for ordinal_to_int() — spoken ordinal → integer value."""
+
+    def test_irregulars(self):
+        from mycroft.client.realtime.number_parser import ordinal_to_int
+        assert ordinal_to_int('first') == 1
+        assert ordinal_to_int('second') == 2
+        assert ordinal_to_int('third') == 3
+
+    def test_suffix_map(self):
+        from mycroft.client.realtime.number_parser import ordinal_to_int
+        assert ordinal_to_int('fifth') == 5
+        assert ordinal_to_int('eighth') == 8
+        assert ordinal_to_int('ninth') == 9
+        assert ordinal_to_int('twelfth') == 12
+
+    def test_regular_th(self):
+        from mycroft.client.realtime.number_parser import ordinal_to_int
+        assert ordinal_to_int('fourth') == 4
+        assert ordinal_to_int('sixth') == 6
+        assert ordinal_to_int('seventh') == 7
+        assert ordinal_to_int('tenth') == 10
+        assert ordinal_to_int('eleventh') == 11
+        assert ordinal_to_int('thirteenth') == 13
+        assert ordinal_to_int('hundredth') == 100
+        assert ordinal_to_int('thousandth') == 1000
+
+    def test_ieth_tens(self):
+        from mycroft.client.realtime.number_parser import ordinal_to_int
+        assert ordinal_to_int('twentieth') == 20
+        assert ordinal_to_int('thirtieth') == 30
+        assert ordinal_to_int('fortieth') == 40
+        assert ordinal_to_int('fiftieth') == 50
+        assert ordinal_to_int('sixtieth') == 60
+        assert ordinal_to_int('seventieth') == 70
+        assert ordinal_to_int('eightieth') == 80
+        assert ordinal_to_int('ninetieth') == 90
+
+    def test_multiword_composite(self):
+        from mycroft.client.realtime.number_parser import ordinal_to_int
+        assert ordinal_to_int('twenty first') == 21
+        assert ordinal_to_int('sixty fourth') == 64
+        assert ordinal_to_int('one hundred twenty eighth') == 128
+        assert ordinal_to_int('thirty second') == 32
+
+    def test_invalid_forms(self):
+        from mycroft.client.realtime.number_parser import ordinal_to_int
+        assert ordinal_to_int('fiveth') is None   # canonical is 'fifth'
+        assert ordinal_to_int('zeroth') is None   # zero not a valid ordinal
+        assert ordinal_to_int('twond') is None
+        assert ordinal_to_int('power') is None
+        assert ordinal_to_int('') is None
+
+
+# ── ordinal exponent power ────────────────────────────────────────────────────
+
+class TestCalcOrdinalPower:
+    """'<number> <ordinal> power' — ordinal used as exponent."""
+
+    def test_fifth_power(self):
+        # "three to the fifth power" → slot: "three fifth power"
+        assert calc('three fifth power') == approx(3**5)
+
+    def test_second_power(self):
+        assert calc('two second power') == approx(4)
+
+    def test_third_power(self):
+        assert calc('two third power') == approx(8)
+
+    def test_tenth_power(self):
+        assert calc('two tenth power') == approx(1024)
+
+    def test_twenty_first_power(self):
+        assert calc('two twenty first power') == approx(2**21)
+
+    def test_sixty_fourth_power(self):
+        assert calc('two sixty fourth power') == approx(2**64)
+
+    def test_one_hundred_twenty_eighth_power(self):
+        assert calc('two one hundred twenty eighth power') == approx(2**128)
+
+    def test_ordinal_power_operation_tag(self):
+        r = words_to_calc('two fifth power')
+        assert r is not None
+        assert r['operation'] == 'power'
+
+    def test_ordinal_via_slot(self):
+        # 'to the' are fillers stripped by slot buffer
+        assert calc_via_slot('two to the fifth power') == approx(2**5)
+
+    def test_ordinal_power_in_expression(self):
+        # 2^5 + 3 = 35
+        assert calc('two fifth power plus three') == approx(35)
+
+    def test_regular_cardinal_power_still_works(self):
+        # Existing numeric exponent form must not regress
+        assert calc('two power eight') == approx(256)
+        assert calc('three power three') == approx(27)
+
+
+# ── nth root ──────────────────────────────────────────────────────────────────
+
+class TestCalcNthRoot:
+    """'<ordinal> root <number>' — nth root."""
+
+    def test_fourth_root(self):
+        assert calc('fourth root sixteen') == approx(2.0)
+
+    def test_third_root(self):
+        # cube root of 27 = 3
+        assert calc('third root twenty seven') == approx(3.0)
+
+    def test_second_root(self):
+        # second root = square root
+        assert calc('second root nine') == approx(3.0)
+
+    def test_tenth_root(self):
+        assert calc('tenth root one thousand') == approx(1000**(1/10))
+
+    def test_twelfth_root(self):
+        assert calc('twelfth root four thousand ninety six') == approx(4096**(1/12))
+
+    def test_sixty_fourth_root(self):
+        # Multi-word ordinal before root — "sixty fourth" must parse as 64, not 60
+        assert calc('sixty fourth root two') == approx(2**(1/64))
+
+    def test_one_hundred_twenty_eighth_root(self):
+        assert calc('one hundred twenty eighth root two') == approx(2**(1/128))
+
+    def test_nth_root_operation_tag(self):
+        r = words_to_calc('fourth root sixteen')
+        assert r is not None
+        assert r['operation'] == 'root'
+
+    def test_nth_root_via_slot(self):
+        # 'of' is a filler
+        assert calc_via_slot('fourth root of sixteen') == approx(2.0)
+
+    def test_nth_root_in_expression(self):
+        # fourth root of 16 + 3 = 2 + 3 = 5
+        assert calc('fourth root sixteen plus three') == approx(5.0)
+
+    def test_square_and_cube_root_still_work(self):
+        # Existing prefix root forms must not regress
+        assert calc('square root nine') == approx(3.0)
+        assert calc('cube root twenty seven') == approx(3.0)
+
+
 # ── inverse trig ──────────────────────────────────────────────────────────────
 
 class TestCalcInverseTrig:
