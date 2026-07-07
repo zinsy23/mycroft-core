@@ -315,6 +315,14 @@ CALC_ALIASES = {
     'tangent':  [],
     # inverse trig modifier + Riva mishear variants for "arc"
     'inverse':  ['arc', 'arxie', 'ark'],
+    # mathematical constants
+    'pi':       [],
+    'tau':      ['tao', 'taw'],
+    'euler':    ['e', 'oiler'],
+    # 'golden' + 'ratio' are only valid as a two-token pair — both in CALC_WORDS
+    # so the slot buffer passes them through; tokenizer handles the pair.
+    'golden':   [],
+    'ratio':    [],
 }
 
 # Reverse map: alias word → canonical word (built from CALC_ALIASES)
@@ -344,6 +352,18 @@ _INVERSE_TRIG = {
     'sine':    _asin_deg,
     'cosine':  _acos_deg,
     'tangent': _atan_deg,
+}
+
+# Mathematical constants: canonical token(s) → float value.
+# Single-token constants use a plain string key; two-token use a tuple.
+# All alias rewriting has already happened before these are checked.
+_GOLDEN_RATIO = (1 + _math.sqrt(5)) / 2  # ≈ 1.618
+
+_CONSTANTS = {
+    'pi':                _math.pi,       # ≈ 3.14159
+    'tau':               _math.tau,      # ≈ 6.28318  (2π)
+    'euler':             _math.e,        # ≈ 2.71828  (aliases: e, oiler)
+    ('golden', 'ratio'): _GOLDEN_RATIO,  # ≈ 1.61803
 }
 
 # Prefix unary: canonical phrase tuple → function applied to following operand
@@ -430,6 +450,14 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
                     num_val = val
                     consumed = length
                     break
+        if num_val is None:
+            # Try two-token constant first, then single-token
+            if pos + 1 < n and (tokens[pos], tokens[pos + 1]) in _CONSTANTS:
+                num_val = _CONSTANTS[(tokens[pos], tokens[pos + 1])]
+                consumed = 2
+            elif tokens[pos] in _CONSTANTS:
+                num_val = _CONSTANTS[tokens[pos]]
+                consumed = 1
         if num_val is None:
             return None, 0
         j = pos + consumed
@@ -631,6 +659,41 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
                     if i < n and tokens[i] == 'power':
                         i += 1
                     continue
+
+            # ── mathematical constants ────────────────────────────────────────
+            # Two-token first (greedy), then single-token.
+            # Sign before a constant: "negative pi" → -π.
+            const_sign = 1
+            const_start = i
+            if tok in ('minus', 'negative') and not last_token_is_number():
+                const_sign = -1
+                const_start = i + 1
+
+            const_val = None
+            const_consumed = 0
+            if const_start < n:
+                # try two-token constant first
+                if const_start + 1 < n:
+                    two = (tokens[const_start], tokens[const_start + 1])
+                    if two in _CONSTANTS:
+                        const_val = _CONSTANTS[two]
+                        const_consumed = (const_start + 2) - i
+                # then single-token
+                if const_val is None and tokens[const_start] in _CONSTANTS:
+                    const_val = _CONSTANTS[tokens[const_start]]
+                    const_consumed = (const_start + 1) - i
+
+            if const_val is not None:
+                # allow postfix ops on constants: "pi squared", "tau cubed"
+                k = i + const_consumed
+                val = const_sign * const_val
+                while k < n and tokens[k] in _POSTFIX_UNARY:
+                    val = _POSTFIX_UNARY[tokens[k]](val)
+                    k += 1
+                result.append(val)
+                _ops_seen.add('constant')
+                i = k
+                continue
 
             # ── number (possibly signed) ──────────────────────────────────────
             sign = 1

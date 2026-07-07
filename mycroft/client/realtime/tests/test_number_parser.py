@@ -853,6 +853,91 @@ class TestCalcCompound:
         assert calc('two squared power three') == approx(64)
 
 
+# ── mathematical constants ────────────────────────────────────────────────────
+
+class TestCalcConstants:
+    def test_pi(self):
+        assert calc('pi') == approx(math.pi)
+
+    def test_tau(self):
+        assert calc('tau') == approx(math.tau)
+
+    def test_tao_alias(self):
+        assert calc('tao') == approx(math.tau)
+
+    def test_taw_alias(self):
+        assert calc('taw') == approx(math.tau)
+
+    def test_euler(self):
+        assert calc('euler') == approx(math.e)
+
+    def test_e_alias(self):
+        # 'e' aliases to 'euler'
+        assert calc('e') == approx(math.e)
+
+    def test_oiler_alias(self):
+        # Riva mishear of 'euler'
+        assert calc('oiler') == approx(math.e)
+
+    def test_e_in_expression(self):
+        assert calc('e squared') == approx(math.e ** 2)
+
+    def test_e_and_euler_equivalent(self):
+        assert calc('e') == calc('euler')
+
+    def test_golden_ratio(self):
+        assert calc('golden ratio') == approx((1 + math.sqrt(5)) / 2)
+
+    def test_pi_in_expression(self):
+        assert calc('pi times two') == approx(math.pi * 2)
+
+    def test_tau_divided_two(self):
+        # tau / 2 = pi
+        assert calc('tau divided two') == approx(math.pi)
+
+    def test_euler_squared(self):
+        assert calc('euler squared') == approx(math.e ** 2)
+
+    def test_pi_plus_euler(self):
+        assert calc('pi plus euler') == approx(math.pi + math.e)
+
+    def test_euler_power_pi(self):
+        assert calc('euler power pi') == approx(math.e ** math.pi)
+
+    def test_negative_pi(self):
+        assert calc('negative pi') == approx(-math.pi)
+
+    def test_pi_squared(self):
+        assert calc('pi squared') == approx(math.pi ** 2)
+
+    def test_golden_ratio_in_expression(self):
+        assert calc('golden ratio plus one') == approx((1 + math.sqrt(5)) / 2 + 1)
+
+    def test_sine_pi(self):
+        # sin(180°) = 0 (approximately)
+        assert calc('sine pi') == approx(math.sin(math.radians(math.pi)), rel=1e-6)
+
+    def test_cosine_pi(self):
+        # cos(180°) = -1
+        assert calc('cosine pi') == approx(math.cos(math.radians(math.pi)))
+
+    def test_square_root_golden_ratio(self):
+        assert calc('square root golden ratio') == approx(math.sqrt((1 + math.sqrt(5)) / 2))
+
+    def test_inverse_sine_plus_pi(self):
+        # asin(1) + pi = 90 + π
+        assert calc('inverse sine one plus pi') == approx(math.degrees(math.asin(1)) + math.pi)
+
+    def test_via_slot_euler(self):
+        # Riva produces "euler" without apostrophe; "number" is a filler
+        assert calc_via_slot('euler number') == approx(math.e)
+
+    def test_constants_are_operations(self):
+        r = words_to_calc('pi times two')
+        assert r is not None
+        assert r['operation'] in ('multiply', 'mixed')
+
+
 # ── ordinal_to_int ────────────────────────────────────────────────────────────
 
 class TestOrdinalToInt:
