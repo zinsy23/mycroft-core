@@ -18,7 +18,6 @@ import threading
 from collections import deque
 
 import numpy as np
-import requests
 
 from mycroft.client.realtime.listener import RecognizerLoop
 from mycroft.client.realtime.mic import ResponsiveRecognizer
@@ -39,48 +38,27 @@ _DEFAULT_NON_TERMINAL_WORDS = {
     'with', 'from', 'into', 'by', 'about', 'like'
 }
 
+# Words that cannot end a QA phrase — if the last transcribed word is one of these
+# when the silence deadline fires, the commit is deferred and the deadline is extended.
+# Kept intentionally narrow: only articles and conjunctions that essentially never
+# end a natural sentence. Prepositions, possessives, intensifiers etc. are excluded
+# because questions like "what is it about" / "is there more" end with them legitimately.
+_QA_NON_COMMIT_TAIL_WORDS = {
+    # articles
+    'a', 'an', 'the',
+    # coordinating conjunctions
+    'and', 'or', 'but', 'nor', 'yet', 'so',
+    # subordinating conjunctions
+    'when', 'because', 'if', 'since', 'while', 'although', 'unless', 'where',
+    'which', 'whether', 'though', 'whereas', 'until', 'whenever', 'wherever',
+    'than', 'as',
+}
+
 # Operating modes
 MODE_DETERMINISTIC = 'deterministic'
 MODE_FREE_TEXT = 'free_text'
 MODE_REPEAT = 'repeat'
 MODE_QA = 'qa'
-
-_QA_CLASSIFIER_SYSTEM_PROMPT = (
-    "You are deciding if a voice transcript is ready to send to an AI assistant. "
-    "The transcript may contain stray single letters or garbled fragments from background noise — ignore these when making your decision. "
-    "Assume YES unless the transcript is clearly cut off mid-sentence with no resolution. "
-    "A transcript ending with a subordinating conjunction (when, because, if, since, while, but, although, unless, where, which, whether) is NOT complete — reply NO. "
-    "Reply with one word: YES or NO."
-)
-_QA_MIN_WORDS_TO_CHECK = 3
-
-
-def _qa_is_phrase_complete(text, ollama_url, model):
-    """Ask the LLM classifier if the transcript is a complete thought. Returns bool."""
-    try:
-        response = requests.post(
-            f"{ollama_url}/v1/chat/completions",
-            headers={"Content-Type": "application/json"},
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": _QA_CLASSIFIER_SYSTEM_PROMPT},
-                    {"role": "user", "content": text.strip()},
-                ],
-                "temperature": 0,
-                "max_tokens": 8,
-                "chat_template_kwargs": {"enable_thinking": False},
-            },
-            timeout=5,
-        )
-        data = response.json()
-        msg = data["choices"][0]["message"]
-        reply = (msg.get("content") or msg.get("reasoning_content") or "").strip().lower()
-        LOG.info(f"QA classifier: '{text}' → {repr(reply)}")
-        return "yes" in reply
-    except Exception as e:
-        LOG.warning(f"QA classifier error: {e} — failing open")
-        return True
 
 
 class RealtimeResponsiveRecognizer(ResponsiveRecognizer):
@@ -315,14 +293,13 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self._qa_abort = False                  # set by Riva callback when exit/interrupt word detected
         self._qa_abort_reason = None            # 'exit' or 'interrupt'
         self._qa_tts_playing = False            # True while TTS is active — sentinel suppressed during this
-        # Riva FINAL accumulator for classifier-based phrase detection
+        # Riva FINAL accumulator for silence-based phrase commit
         self._qa_phrase = ""                    # growing transcript for current question
         self._qa_last_final = ""               # last FINAL seen, for diffing
-        self._qa_words_at_last_check = 0       # word count when classifier was last called
-        self._qa_committed_event = threading.Event()  # set when classifier commits a phrase
+        self._qa_committed_event = threading.Event()  # set when phrase is committed
         self._qa_committed_text = None         # the committed phrase text
         self._qa_trigger_words = []            # entry phrase words to strip from first FINAL
-        self._qa_listen_deadline = 0.0         # reset on each FINAL so silence gap triggers timeout
+        self._qa_listen_deadline = 0.0         # reset on each FINAL so silence gap triggers commit
         self._qa_tts_grace_until = 0.0         # epoch time until which sentinel+accumulation are suppressed
 
         # Repeat mode state
@@ -435,7 +412,6 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self._qa_tts_playing = False
         self._qa_phrase = ""
         self._qa_last_final = ""
-        self._qa_words_at_last_check = 0
         self._qa_committed_event.clear()
         self._qa_committed_text = None
 
@@ -972,8 +948,9 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         """Called from Riva callback on each FINAL during QA listening phase.
 
         Diffs against last FINAL to find new words, appends to _qa_phrase,
-        then runs the classifier when enough new words have arrived.
-        Sets _qa_committed_event when the classifier says YES.
+        and resets the silence deadline so the commit only fires after the user
+        has actually stopped speaking. Commit decision is made in _do_qa_session
+        when the deadline expires with a complete-looking tail word.
         """
         new_words = transcript.split()
 
@@ -996,7 +973,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 LOG.info(f"QA accumulator: trigger not found yet, discarding: {new_words}")
                 return
 
-        # Each FINAL means the user is still talking — reset the silence timeout
+        # Each FINAL means the user is still talking — reset the silence deadline
         if self._qa_listen_deadline:
             self._qa_listen_deadline = time.time() + self.qa_config.get('follow_up_timeout_seconds', 15)
 
@@ -1012,12 +989,12 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             return
 
         self._qa_phrase = (self._qa_phrase + " " + added).strip()
-        word_count = len(self._qa_phrase.split())
-        LOG.info(f"QA accumulator: phrase='{self._qa_phrase}' ({word_count} words)")
+        LOG.info(f"QA accumulator: phrase='{self._qa_phrase}' ({len(self._qa_phrase.split())} words)")
+
+        cfg = self.qa_config
 
         # Check for override commit phrases — user explicitly signals they're done.
         # Strip the commit phrase from the end before dispatching.
-        cfg = self.qa_config
         commit_phrases = [p.lower() for p in cfg.get('commit_phrases', [])]
         phrase_lower = self._qa_phrase.lower()
         for cp in commit_phrases:
@@ -1029,35 +1006,30 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     self._qa_committed_text = cleaned
                     self._qa_phrase = ""
                     self._qa_last_final = ""
-                    self._qa_words_at_last_check = 0
                     self._qa_committed_event.set()
                 return
 
-        if word_count < _QA_MIN_WORDS_TO_CHECK:
-            return
-        if word_count <= self._qa_words_at_last_check:
-            return
-
-        self._qa_words_at_last_check = word_count
-        ollama_url = cfg.get('ollama_url', 'http://127.0.0.1:11434')
-        model = cfg.get('classifier_model', 'Qwen3-8B-Q4_K_M.gguf')
-
-        if _qa_is_phrase_complete(self._qa_phrase, ollama_url, model):
-            LOG.info(f"QA classifier: committed '{self._qa_phrase}'")
-            self.emit('mycroft.realtime.qa_debug', {'msg': f"committed: '{self._qa_phrase}'"})
+        # Commit on FINAL if the last word is not a non-commit tail word.
+        # The silence deadline in _do_qa_session is a fallback only — the primary
+        # commit signal is each FINAL arriving with a complete-looking tail word.
+        last_word = self._qa_phrase.split()[-1].lower().rstrip('.,!?')
+        non_commit_extra = cfg.get('non_commit_tail_words', [])
+        non_commit_set = _QA_NON_COMMIT_TAIL_WORDS | set(non_commit_extra)
+        if last_word not in non_commit_set:
+            LOG.info(f"QA accumulator: FINAL commit on '{last_word}' — '{self._qa_phrase}'")
+            self.emit('mycroft.realtime.qa_debug', {'msg': f"final commit: '{self._qa_phrase}'"})
             self._qa_committed_text = self._qa_phrase
             self._qa_phrase = ""
             self._qa_last_final = ""
-            self._qa_words_at_last_check = 0
             self._qa_committed_event.set()
         else:
-            LOG.info(f"QA classifier: not done yet — building")
+            LOG.info(f"QA accumulator: tail '{last_word}' is non-commit — waiting for more")
 
     def _do_qa_session(self, intent_name, qa_config, source, sec_per_buffer, trigger_utterance=""):
         """Run the QA follow-up loop on the loop thread.
 
         Flow per question:
-          1. Wait for Riva FINAL accumulation + classifier to commit a phrase
+          1. Accumulate Riva FINALs; commit when silence deadline fires with a complete tail word
           2. Dispatch committed phrase to skill
           3. Skill speaks via blocking subprocess, then emits question-answerer-skill:tts_done
           4. Wait for tts_done — that's the hard signal audio is finished
@@ -1073,7 +1045,6 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # Reset accumulator state for this session
         self._qa_phrase = ""
         self._qa_last_final = ""
-        self._qa_words_at_last_check = 0
         self._qa_committed_event.clear()
         self._qa_committed_text = None
         self._qa_tts_event.clear()
@@ -1083,7 +1054,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             self.riva_interim_word_count = 0
             self.riva_final_word_count = 0
 
-        LOG.info(f"QA: session started — listening via Riva FINAL + classifier (trigger: '{trigger_utterance}')")
+        LOG.info(f"QA: session started — listening via Riva FINAL silence (trigger: '{trigger_utterance}')")
         snd = resolve_resource_file('snd/start_listening.wav')
         if snd:
             subprocess.Popen(['paplay', snd])
@@ -1096,16 +1067,37 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             self._qa_committed_text = None
             self._qa_phrase = ""
             self._qa_last_final = ""
-            self._qa_words_at_last_check = 0
 
             LOG.info(f"QA: waiting for phrase (timeout={follow_up_timeout}s)")
 
-            # Feed audio to Riva while waiting for the classifier to commit a phrase.
+            # Feed audio to Riva while waiting for the user to finish speaking.
             # _qa_listen_deadline resets on each FINAL so the timeout only fires
             # after follow_up_timeout seconds of silence (no new FINALs arriving).
             self._qa_listen_deadline = time.time() + follow_up_timeout
             while not self._qa_committed_event.is_set() and not self._qa_abort:
                 if time.time() > self._qa_listen_deadline:
+                    # Silence deadline fired — decide whether to commit or defer.
+                    phrase = self._qa_phrase.strip()
+                    if not phrase:
+                        # No speech at all — exit QA
+                        break
+                    last_word = phrase.split()[-1].lower().rstrip('.,!?')
+                    non_commit_extra = self.qa_config.get('non_commit_tail_words', [])
+                    non_commit_set = _QA_NON_COMMIT_TAIL_WORDS | set(non_commit_extra)
+                    if last_word in non_commit_set:
+                        # Phrase ends with an incomplete-sentence word — extend deadline
+                        # and wait for more speech rather than committing a fragment.
+                        LOG.info(f"QA: silence deadline fired but tail word '{last_word}' is non-commit — extending")
+                        self.emit('mycroft.realtime.qa_debug', {'msg': f"tail '{last_word}' non-commit, extending"})
+                        self._qa_listen_deadline = time.time() + follow_up_timeout
+                        continue
+                    # Good tail word — commit on silence
+                    LOG.info(f"QA: silence deadline — committing '{phrase}'")
+                    self.emit('mycroft.realtime.qa_debug', {'msg': f"silence commit: '{phrase}'"})
+                    self._qa_committed_text = phrase
+                    self._qa_phrase = ""
+                    self._qa_last_final = ""
+                    self._qa_committed_event.set()
                     break
                 chunk = self.responsive_recognizer.record_sound_chunk(source)
                 if self.stt_backend == 'riva' and self.riva_stream_thread:
@@ -1352,11 +1344,17 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             return
 
         # During QA mode: check exit/interrupt words AND accumulate FINALs for
-        # the phrase-completion classifier.
+        # phrase accumulation and silence-based commit.
         if self.mode == MODE_QA:
             self._handle_qa_riva_words(words, is_final)
-            if is_final and not self._qa_abort and not self._qa_tts_playing and not (self._qa_tts_grace_until and time.time() < self._qa_tts_grace_until):
-                self._qa_accumulate_final(" ".join(words))
+            grace_active = self._qa_tts_grace_until and time.time() < self._qa_tts_grace_until
+            if not self._qa_abort and not self._qa_tts_playing and not grace_active:
+                # INTERIM: keep the silence deadline alive while the user is speaking
+                if not is_final and self._qa_listen_deadline and words:
+                    self._qa_listen_deadline = time.time() + self.qa_config.get('follow_up_timeout_seconds', 15)
+                # FINAL: accumulate and potentially commit
+                if is_final:
+                    self._qa_accumulate_final(" ".join(words))
             return
 
         # ── DETERMINISTIC / REPEAT mode: full dual-matcher logic ─────────────
