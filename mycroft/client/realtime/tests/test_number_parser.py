@@ -149,8 +149,76 @@ class TestWordsToIntInvalid:
         assert words_to_int('five plus three') is None
 
     def test_magnitude_only_no_valid_parse(self):
-        # 'hundred hundred' is not a valid number
-        assert words_to_int('hundred hundred') is None
+        # standard fails, concat handles: "hundred hundred" → 100100
+        assert words_to_int('hundred hundred') == 100100
+        assert words_to_int('hundred one hundred') == 101100
+
+
+# ── positional concatenation ─────────────────────────────────────────────────
+
+class TestWordsToIntConcat:
+    """Positional (string) concatenation of spoken number groups.
+
+    Groups that ascend in place value start a new concat chunk.
+    Standard magnitude words (hundred/thousand/etc.) → standard parse first,
+    concat as fallback. No magnitude words → concat first.
+    """
+
+    # year-style two-group concat
+    def test_nineteen_forty_one(self):
+        assert words_to_int('nineteen forty one') == 1941
+
+    def test_eighteen_sixty_five(self):
+        assert words_to_int('eighteen sixty five') == 1865
+
+    def test_twenty_nineteen(self):
+        # teens after tens → ascending place value → two groups
+        assert words_to_int('twenty nineteen') == 2019
+
+    def test_nineteen_ninety_nine(self):
+        assert words_to_int('nineteen ninety nine') == 1999
+
+    def test_nine_eleven(self):
+        assert words_to_int('nine eleven') == 911
+
+    # three-group concat
+    def test_thirteen_six_fifty(self):
+        assert words_to_int('thirteen six fifty') == 13650
+
+    # standard two-word numbers still work (place descends → one group)
+    def test_forty_two_stays_standard(self):
+        assert words_to_int('forty two') == 42
+
+    def test_twenty_nine_stays_standard(self):
+        assert words_to_int('twenty nine') == 29
+
+    def test_ninety_nine_stays_standard(self):
+        assert words_to_int('ninety nine') == 99
+
+    # colloquial hundred-based forms (standard wins, already works)
+    def test_fourteen_hundred(self):
+        assert words_to_int('fourteen hundred') == 1400
+
+    def test_thirteen_hundred(self):
+        assert words_to_int('thirteen hundred') == 1300
+
+    def test_thirteen_hundred_fifty(self):
+        assert words_to_int('thirteen hundred fifty') == 1350
+
+    # signed concat
+    def test_negative_concat(self):
+        assert words_to_int('negative nineteen forty one') == -1941
+
+    def test_minus_concat(self):
+        assert words_to_int('minus twenty nineteen') == -2019
+
+    # magnitude-word concat fallback
+    def test_hundred_hundred(self):
+        # standard fails → concat → 100100
+        assert words_to_int('hundred hundred') == 100100
+
+    def test_hundred_one_hundred(self):
+        assert words_to_int('hundred one hundred') == 101100
 
 
 # ── words_to_calc — basic arithmetic ─────────────────────────────────────────
@@ -1307,3 +1375,31 @@ class TestCalcInverseTrig:
     def test_mixed_trig_and_inverse_trig(self):
         # sine(90) + asin(1) = 1 + 90 = 91
         assert calc('sine ninety plus inverse sine one') == approx(91.0)
+
+
+# ── calc with concatenated number operands ────────────────────────────────────
+
+class TestCalcConcat:
+    """Arithmetic expressions where operands use positional concat notation."""
+
+    # words_to_int directly
+    def test_words_to_int_year_style(self):
+        assert words_to_int('nineteen forty one') == 1941
+        assert words_to_int('eighteen sixty five') == 1865
+
+    def test_words_to_int_three_group(self):
+        assert words_to_int('thirteen six fifty') == 13650
+
+    # calc expressions with concat operands
+    def test_year_minus_year(self):
+        # 1941 - 1865 = 76
+        assert calc('nineteen forty one minus eighteen sixty five') == 76
+
+    def test_year_plus_one(self):
+        assert calc('twenty nineteen plus one') == 2020
+
+    def test_concat_times_two(self):
+        assert calc('nine eleven times two') == 1822
+
+    def test_three_group_plus(self):
+        assert calc('thirteen six fifty plus three fifty') == 14000

@@ -100,24 +100,11 @@ def _parse_below_thousand(tokens: list[str]) -> tuple[int, int]:
     return value, i
 
 
-def words_to_int(phrase: str) -> int | None:
-    """Convert a spoken number phrase to an integer.
+def _words_to_int_standard(tokens: list[str]) -> int | None:
+    """Standard magnitude-hierarchy parse of a token list. Returns int or None.
 
-    Returns None if the phrase is not a valid number expression.
-
-    Accepts optional leading 'negative'/'minus' for {signed_number} use.
+    Does not handle sign words — caller strips those before calling.
     """
-    if not phrase:
-        return None
-
-    tokens = phrase.lower().split()
-    if not tokens:
-        return None
-
-    negative = False
-    if tokens[0] in SIGN_WORDS:
-        negative = True
-        tokens = tokens[1:]
     if not tokens:
         return None
 
@@ -134,18 +121,12 @@ def words_to_int(phrase: str) -> int | None:
     i = 0
     n = len(tokens)
 
-    # Process magnitude tiers largest → smallest.
-    # For each tier: parse a sub-thousand coefficient, then consume the
-    # magnitude word if present. A bare magnitude with no preceding chunk
-    # implies coefficient 1 (e.g. "thousand five hundred" → 1500).
     for mag_name, mag_value in MAGNITUDES:
         if mag_name == 'hundred':
-            continue  # handled inside _parse_below_thousand
+            continue
         if i >= n:
             break
-
         chunk, consumed = _parse_below_thousand(tokens[i:])
-        # Bare magnitude with no preceding number — implied coefficient 1
         if consumed == 0 and i < n and tokens[i] == mag_name:
             result += mag_value
             i += 1
@@ -156,18 +137,177 @@ def words_to_int(phrase: str) -> int | None:
             result += chunk * mag_value
             i += consumed + 1
 
-    # Sub-thousand tail
     if i < n:
         tail, consumed = _parse_below_thousand(tokens[i:])
         if consumed == 0:
-            return None  # unrecognised token
+            return None
         result += tail
         i += consumed
 
     if i < n:
-        return None  # leftover tokens
+        return None
 
     if result == 0 and tokens != ['zero']:
+        return None
+
+    return result
+
+
+def _place_value(n: int) -> int:
+    """Return the order of magnitude (number of digits - 1) of a positive int."""
+    if n <= 0:
+        return 0
+    mag = 0
+    while n >= 10:
+        n //= 10
+        mag += 1
+    return mag
+
+
+def _parse_spoken_group(tokens: list[str]) -> tuple[int, int]:
+    """Parse one sub-hundred spoken group. Returns (value, tokens_consumed).
+
+    Handles: tens+ones(1-9), tens alone, ones/teens alone.
+    Hundreds block handled by caller (_words_to_int_concat) so that
+    "fourteen hundred" forms one concat group of 1400.
+    """
+    i = 0
+    n = len(tokens)
+
+    if i < n and tokens[i] in TENS:
+        value = TENS[tokens[i]]
+        i += 1
+        if (i < n and tokens[i] in ONES and 1 <= ONES[tokens[i]] <= 9):
+            value += ONES[tokens[i]]
+            i += 1
+        return value, i
+    elif i < n and tokens[i] in ONES:
+        return ONES[tokens[i]], 1
+
+    return 0, 0
+
+
+def _words_to_int_concat(tokens: list[str]) -> int | None:
+    """Positional concatenation using ascending-place-value as the split rule.
+
+    Tokens are consumed into spoken groups. A new concat chunk starts whenever
+    the next group's place value is >= the previous group's place value —
+    mirroring how place values always descend within a single spoken number.
+
+    Each chunk is string-concatenated to form the final number.
+
+    "forty two"           → [42] one chunk (4 descends to 1) → standard wins
+    "nineteen forty one"  → [19][41] (1 >= 1 → new chunk) → "19"+"41" → 1941
+    "twenty nineteen"     → [20][19] (1 >= 1 → new chunk) → "20"+"19" → 2019
+    "thirteen six fifty"  → [13][6][50] (0 < 1, 1 >= 0 → split) → 13650
+    "fourteen hundred"    → standard parse succeeds → 1400 (no concat needed)
+
+    Returns None if tokens can't be fully consumed, or only one chunk found.
+    """
+    import math as _m
+
+    i = 0
+    n = len(tokens)
+    chunks = []     # list of string digit groups
+    chunk_parts = []
+    prev_place = None
+
+    def flush():
+        if chunk_parts:
+            chunks.append(''.join(chunk_parts))
+        chunk_parts.clear()
+
+    while i < n:
+        # Try hundreds block first: [N] hundred [tens [ones]]
+        # This keeps "fourteen hundred" as one group → 1400
+        val = None
+        consumed = 0
+        if (i < n and tokens[i] in ONES and ONES[tokens[i]] > 0
+                and i + 1 < n and tokens[i + 1] == 'hundred'):
+            coeff = ONES[tokens[i]]
+            val = coeff * 100
+            consumed = 2
+            if i + consumed < n and tokens[i + consumed] == 'and':
+                consumed += 1
+            # absorb optional trailing tens+ones
+            sub_val, sub_consumed = _parse_spoken_group(tokens[i + consumed:])
+            if sub_consumed:
+                val += sub_val
+                consumed += sub_consumed
+        elif i < n and tokens[i] == 'hundred':
+            val = 100
+            consumed = 1
+            if i + consumed < n and tokens[i + consumed] == 'and':
+                consumed += 1
+            sub_val, sub_consumed = _parse_spoken_group(tokens[i + consumed:])
+            if sub_consumed:
+                val += sub_val
+                consumed += sub_consumed
+        else:
+            val, consumed = _parse_spoken_group(tokens[i:])
+
+        if consumed == 0 or val is None:
+            return None
+
+        place = _place_value(val)
+
+        if prev_place is not None and place >= prev_place:
+            # ascending place value → start a new concat chunk
+            flush()
+
+        chunk_parts.append(str(val))
+        prev_place = place
+        i += consumed
+
+    flush()
+
+    if len(chunks) < 2:
+        return None
+    return int(''.join(chunks))
+
+
+def words_to_int(phrase: str, concat: bool = True) -> int | None:
+    """Convert a spoken number phrase to an integer.
+
+    Returns None if the phrase is not a valid number expression.
+
+    Accepts optional leading 'negative'/'minus' for {signed_number} use.
+
+    concat=True (default): tries positional concatenation when standard fails,
+      so "nineteen forty one" → 1941, "twenty nineteen" → 2019.
+    concat=False: standard magnitude parse only — use inside the calc tokenizer
+      where operands are already bounded by operators.
+    """
+    if not phrase:
+        return None
+
+    tokens = phrase.lower().split()
+    if not tokens:
+        return None
+
+    negative = False
+    if tokens[0] in SIGN_WORDS:
+        negative = True
+        tokens = tokens[1:]
+    if not tokens:
+        return None
+
+    # Magnitude words → standard first (explicit grouping is unambiguous).
+    # No magnitude words → concat first (natural spoken forms like "twenty
+    # nineteen" → 2019 take priority over arithmetic result 39).
+    # In both cases fall back to the other strategy if the first fails.
+    has_magnitude = any(t in MAGNITUDE_WORDS for t in tokens)
+    if not concat:
+        result = _words_to_int_standard(tokens)
+    elif has_magnitude:
+        result = _words_to_int_standard(tokens)
+        if result is None:
+            result = _words_to_int_concat(tokens)
+    else:
+        result = _words_to_int_concat(tokens)
+        if result is None:
+            result = _words_to_int_standard(tokens)
+    if result is None:
         return None
 
     return -result if negative else result
@@ -445,19 +585,34 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
         r = _POSTFIX_UNARY[tok](val)
         return r  # lambda returns None on domain error
 
-    def parse_number_at(pos, allow_ordinal=False) -> tuple[float | int | None, int]:
+    def parse_number_at(pos, allow_ordinal=False, max_len=20) -> tuple[float | int | None, int]:
         """Parse an integer (+ optional decimal suffix) starting at pos.
         Returns (value, tokens_consumed) or (None, 0) on failure.
 
         allow_ordinal: also accept ordinal words as a number value
         (used after '**' so 'fifth' in 'three to the fifth power' works).
+        max_len: cap on token span to try (used to stop before ordinal+power).
         """
         num_val = None
         consumed = 0
-        for length in range(min(n - pos, 20), 0, -1):
+        for length in range(min(n - pos, max_len), 0, -1):
             sub = ' '.join(tokens[pos:pos + length])
-            val = words_to_int(sub)
+            val = words_to_int(sub, concat=True)
             if val is not None:
+                # When max_len is explicitly capped (caller knows the boundary),
+                # trust it and skip the next-token check. Otherwise reject spans
+                # where the immediately following token is a bare number word —
+                # that signals a separate operand (e.g. "log base two eight").
+                if max_len < n - pos:
+                    num_val = val
+                    consumed = length
+                    break
+                next_pos = pos + length
+                next_tok = tokens[next_pos] if next_pos < n else None
+                if (next_tok is not None
+                        and next_tok in NUMBER_WORDS
+                        and next_tok not in MAGNITUDE_WORDS):
+                    continue
                 num_val = val
                 consumed = length
                 break
@@ -520,8 +675,26 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
                 j += 1
                 if j >= n:
                     return None
-                base_val, base_consumed = parse_number_at(j)
-                if base_val is None or base_val <= 0 or base_val == 1:
+                # Try all splits: for each candidate base span, check that the
+                # remaining tokens form a valid argument. Take the longest valid
+                # base span where both base and argument parse successfully.
+                base_val = None
+                base_consumed = 0
+                for blen in range(n - j, 0, -1):
+                    bsub = ' '.join(tokens[j:j + blen])
+                    bv = words_to_int(bsub, concat=False)
+                    if bv is None or bv <= 0 or bv == 1:
+                        continue
+                    if j + blen >= n:
+                        continue
+                    # Check that remaining tokens start with a valid number
+                    asub = ' '.join(tokens[j + blen:])
+                    av = words_to_int(asub, concat=False)
+                    if av is not None:
+                        base_val = bv
+                        base_consumed = blen
+                        break
+                if base_val is None:
                     return None
                 log_base = base_val
                 j += base_consumed
@@ -792,7 +965,22 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
                 if i >= n:
                     return None
 
-            num_val, consumed = parse_number_at(i)
+            # Lookahead: if an ordinal+power pattern starts at some position
+            # ahead, cap the number parse so it doesn't consume into the ordinal.
+            # Checks multi-word ordinals too ("twenty first", "sixty fourth").
+            num_max_len = n - i
+            for look in range(1, n - i):
+                # Try ordinal spans of increasing length starting at i+look
+                for olen in range(1, n - i - look + 1):
+                    if i + look + olen < n and tokens[i + look + olen] == 'power':
+                        sub = ' '.join(tokens[i + look:i + look + olen])
+                        if ordinal_to_int(sub) is not None:
+                            num_max_len = look
+                            break
+                if num_max_len != n - i:
+                    break
+
+            num_val, consumed = parse_number_at(i, max_len=num_max_len)
             if num_val is None:
                 return None  # unrecognised token
 
