@@ -246,6 +246,15 @@ class MatcherPath:
         # True once slot closed via a post-entity pattern word — INTERIM allowed from here
         self._slot_closed_by_word = False
 
+    def clear_slot_state(self):
+        """Reset open slot buffers so replay re-enters slots cleanly."""
+        self._number_slot_name = None
+        self._number_buf = []
+        self._calc_slot_name = None
+        self._calc_buf = []
+        self._had_slot = False
+        self._slot_closed_by_word = False
+
     def try_add_word(self, word, stream_type="FINAL"):
         """Try to add a word to this path.
 
@@ -277,7 +286,7 @@ class MatcherPath:
             # Everything else is a filler — slot stays open, same as normal realtime.
             phrase = ' '.join(self._number_buf)
             closed = False
-            if phrase and words_to_int(phrase) is not None:
+            if phrase and words_to_int(phrase, concat=True) is not None:
                 post_words = self._get_post_slot_words('__number__:', phrase)
                 if word in post_words:
                     self.matched_words.append(f'__number__:{phrase}')
@@ -307,7 +316,7 @@ class MatcherPath:
             # Everything else is a filler — slot stays open, same as normal realtime.
             phrase = ' '.join(self._calc_buf)
             closed = False
-            if phrase and words_to_calc(phrase) is not None:
+            if phrase and words_to_calc(phrase, concat=True) is not None:
                 post_words = self._get_post_slot_words('__calc__:', phrase)
                 if word in post_words:
                     self.matched_words.append(f'__calc__:{phrase}')
@@ -865,6 +874,11 @@ class StreamingCommandMatcher:
         pruned = before_count - len(self.active_paths)
         if pruned > 0:
             LOG.info(f"  ✂️  Pruned {pruned} path(s) due to Riva correction to valid command word")
+
+    def clear_slot_state_all_paths(self):
+        """Clear open slot buffers on all active paths so transcript-change replay re-enters slots cleanly."""
+        for path in self.active_paths:
+            path.clear_slot_state()
 
     def reset(self):
         """Reset matcher state after command execution.

@@ -1382,8 +1382,12 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             prev_words = prev_transcript.split() if prev_transcript else []
 
             is_refinement = bool(prev_words and words and words[0] == prev_words[0])
+            is_identical = (transcript == prev_transcript)
 
-            if is_refinement:
+            if is_identical:
+                LOG.info(f"[RIVA {stream_name}] Spurious re-delivery (identical transcript) — ignoring")
+                return
+            elif is_refinement:
                 LOG.info(f"[RIVA {stream_name}] Refinement: "
                          f"prev='{str(len(prev_transcript))}' new='{str(len(transcript))}' — resetting matcher")
                 matcher.reset()
@@ -1494,6 +1498,10 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                         changed_positions[_i] = (old, new)
                 if changed_positions:
                     matcher.prune_corrected_paths(changed_positions, curr_words)
+
+                # Slot buffers on surviving paths may contain words from the changed
+                # region — clear them so replay re-enters slots cleanly.
+                matcher.clear_slot_state_all_paths()
 
                 min_replay_pos = (self.final_min_replay_pos if is_final
                                   else self.interim_min_replay_pos)

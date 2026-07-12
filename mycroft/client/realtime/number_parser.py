@@ -204,8 +204,6 @@ def _words_to_int_concat(tokens: list[str]) -> int | None:
 
     Returns None if tokens can't be fully consumed, or only one chunk found.
     """
-    import math as _m
-
     i = 0
     n = len(tokens)
     chunks = []     # list of string digit groups
@@ -549,7 +547,7 @@ CALC_WORDS = (
 
 # ── tokenizer ────────────────────────────────────────────────────────────────
 
-def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
+def _tokenize_calc(tokens: list[str], concat: bool = True) -> tuple[list, str] | None:
     """Convert a spoken token list into a mixed list of numbers and operator symbols.
 
     "forty two plus negative eighteen times three" →
@@ -597,7 +595,7 @@ def _tokenize_calc(tokens: list[str]) -> tuple[list, str] | None:
         consumed = 0
         for length in range(min(n - pos, max_len), 0, -1):
             sub = ' '.join(tokens[pos:pos + length])
-            val = words_to_int(sub, concat=True)
+            val = words_to_int(sub, concat=concat)
             if val is not None:
                 # When max_len is explicitly capped (caller knows the boundary),
                 # trust it and skip the next-token check. Otherwise reject spans
@@ -1068,7 +1066,7 @@ def _evaluate(tokens: list) -> float | None:
 
 # ── public entry point ───────────────────────────────────────────────────────
 
-def words_to_calc(phrase: str) -> dict | None:
+def words_to_calc(phrase: str, concat: bool = True) -> dict | None:
     """Parse and evaluate a spoken arithmetic expression.
 
     Args:
@@ -1097,7 +1095,7 @@ def words_to_calc(phrase: str) -> dict | None:
     # multiple tokens (infix) or a result that required a unary op (postfix/prefix).
     # We defer to post-tokenize check below rather than pre-scanning words, because
     # 'minus' is ambiguous (sign vs subtraction operator).
-    tokenized = _tokenize_calc(tokens)
+    tokenized = _tokenize_calc(tokens, concat=concat)
     if tokenized is None:
         return None
     mixed, operation = tokenized
