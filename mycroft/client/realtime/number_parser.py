@@ -1148,3 +1148,42 @@ def format_calc_result(
     if rounded == int(rounded):
         return int(rounded)
     return rounded
+
+
+_TOKEN_OP_WORDS = {
+    '+':  'plus',
+    '-':  'minus',
+    '*':  'times',
+    '/':  'divided by',
+    '%':  'mod',
+    '**': 'to the power of',
+}
+
+_TOKEN_OP_SYMBOLIC = {
+    '**': '^',
+}
+
+
+def _format_calc_tokens(result_dict: dict, op_map: dict) -> str:
+    tokens = result_dict.get('tokens', [])
+    if len(tokens) <= 1:
+        return result_dict.get('expr', '')
+    parts = []
+    for tok in tokens:
+        if isinstance(tok, str):
+            parts.append(op_map.get(tok, tok))
+        elif isinstance(tok, float) and tok == int(tok):
+            parts.append(str(int(tok)))
+        else:
+            parts.append(str(tok))
+    return ' '.join(parts)
+
+
+def format_calc_expression(result_dict: dict) -> str:
+    """Return a spoken expression string for TTS: [31, '+', 62] → '31 plus 62'."""
+    return _format_calc_tokens(result_dict, _TOKEN_OP_WORDS)
+
+
+def format_calc_expression_symbolic(result_dict: dict) -> str:
+    """Return a symbolic expression string for display: [31, '+', 62] → '31 + 62'."""
+    return _format_calc_tokens(result_dict, _TOKEN_OP_SYMBOLIC)

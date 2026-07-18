@@ -13,6 +13,8 @@ from mycroft.util.log import LOG
 from mycroft.client.realtime.number_parser import (
     NUMBER_WORDS, SIGN_WORDS, CALC_WORDS, words_to_int, words_to_calc,
     format_calc_result,
+    format_calc_expression,
+    format_calc_expression_symbolic,
 )
 
 # Entity names that get greedy multi-word number capture
@@ -556,6 +558,8 @@ class MatcherPath:
                     entities[slot_name] = _apply_calc_rounding(calc, cfg)
                     entities[f'{slot_name}_expr'] = calc['expr']
                     entities[f'{slot_name}_tokens'] = calc['tokens']
+                    entities[f'{slot_name}_expression'] = format_calc_expression(calc)
+                    entities[f'{slot_name}_expression_symbolic'] = format_calc_expression_symbolic(calc)
                 elif 'entity' in seq_item:
                     entities[seq_item['entity']] = word
 

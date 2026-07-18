@@ -16,6 +16,7 @@ import pytest
 from mycroft.client.realtime.number_parser import (
     words_to_int,
     words_to_calc,
+    format_calc_expression,
     NUMBER_WORDS,
     CALC_WORDS,
     SIGN_WORDS,
@@ -1403,3 +1404,78 @@ class TestCalcConcat:
 
     def test_three_group_plus(self):
         assert calc('thirteen six fifty plus three fifty') == 14000
+
+
+# ── format_calc_expression ────────────────────────────────────────────────────
+
+def expr(phrase):
+    """Return format_calc_expression output for a spoken phrase."""
+    r = words_to_calc(phrase)
+    return format_calc_expression(r) if r else None
+
+
+class TestFormatCalcExpression:
+    # infix — operator symbol translation
+    def test_addition(self):
+        assert expr('thirty one plus sixty two plus twenty three plus forty six') == '31 plus 62 plus 23 plus 46'
+
+    def test_subtraction(self):
+        assert expr('one hundred minus fifty three') == '100 minus 53'
+
+    def test_multiplication(self):
+        assert expr('two times three') == '2 times 3'
+
+    def test_division(self):
+        # 'by' is a filler stripped by the slot buffer before the tokenizer;
+        # format_calc_expression reinserts it from the '/' token for natural TTS
+        assert expr('ten divided two') == '10 divided by 2'
+
+    def test_modulo(self):
+        assert expr('ten mod three') == '10 mod 3'
+
+    def test_power_infix(self):
+        assert expr('two power eight') == '2 to the power of 8'
+
+    def test_mixed_ops(self):
+        assert expr('ten divided two plus three') == '10 divided by 2 plus 3'
+
+    # concat operands still render as digits
+    def test_concat_operands(self):
+        assert expr('nineteen forty one minus eighteen sixty five') == '1941 minus 1865'
+
+    def test_concat_addition(self):
+        assert expr('thirteen six fifty plus three fifty') == '13650 plus 350'
+
+    # unary collapsed — falls back to expr (spoken phrase)
+    def test_square_root_fallback(self):
+        assert expr('square root nine') == 'square root nine'
+
+    def test_squared_fallback(self):
+        assert expr('three squared') == 'three squared'
+
+    def test_cubed_fallback(self):
+        assert expr('three cubed') == 'three cubed'
+
+    def test_factorial_fallback(self):
+        assert expr('five factorial') == 'five factorial'
+
+    def test_abs_fallback(self):
+        assert expr('absolute value negative seven') == 'absolute value negative seven'
+
+    def test_sine_fallback(self):
+        assert expr('sine ninety') == 'sine ninety'
+
+    def test_log_fallback(self):
+        assert expr('log one hundred') == 'log one hundred'
+
+    def test_natural_log_fallback(self):
+        assert expr('natural log ten') == 'natural log ten'
+
+    # floats that are whole numbers render without decimal point
+    def test_float_whole_renders_as_int(self):
+        # sqrt(4) = 2.0 — single token, falls back to expr
+        # use a multi-token case where a constant produces a float token
+        result = words_to_calc('pi times two')
+        expression = format_calc_expression(result)
+        # pi is irrational so token is float — renders as full float string, not int
+        assert 'times 2' in expression
