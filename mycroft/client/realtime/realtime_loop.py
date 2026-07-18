@@ -601,6 +601,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 LOG.info("[MANAGE] audio:wake — played ding")
             else:
                 LOG.warning("[MANAGE] audio:wake — start_listening.wav not found")
+            os.system(r"/home/joseph/.local/bin/polybar-flash dunst FFA500 &")
             return
 
         # ── Secondary STT load/unload ─────────────────────────────────────────
