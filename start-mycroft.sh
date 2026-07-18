@@ -156,14 +156,25 @@ launch_background() {
     # Kill all orphaned instances (any PID that doesn't match the lock file).
     # pgrep may return multiple PIDs if prior shutdowns left stacked processes.
     _any_legitimate=false
+    _any_orphan=false
     for _matched_pid in $(pgrep -f "python3 (.*)-m ${_module}") ; do
         if [ -n "${_lock_name}" ] && [ "${_matched_pid}" = "${_locked_pid}" ] ; then
             _any_legitimate=true
         else
             echo "Found orphaned ${1} process (pid ${_matched_pid}, lock file has '${_locked_pid}') - killing it"
             kill -9 "${_matched_pid}" 2>/dev/null
+            _any_orphan=true
         fi
     done
+
+    # Wait for orphan kills to fully take effect before launching
+    if $_any_orphan ; then
+        _wait=0
+        while [ $_wait -lt 30 ] && pgrep -f "python3 (.*)-m ${_module}" > /dev/null 2>&1 ; do
+            sleep 0.1
+            _wait=$((_wait + 1))
+        done
+    fi
 
     if ($_any_legitimate) ; then
         if ($_force_restart) ; then
@@ -274,13 +285,17 @@ case ${_opt} in
         launch_background "${_opt}"
         ;;
     "skills")
-        launch_background "${_opt}"
+        # skills and realtime are coupled — restart both so pattern registration stays in sync
+        launch_background skills
+        launch_background realtime
         ;;
     "voice")
         launch_background "${_opt}"
         ;;
     "realtime")
-        launch_background "${_opt}"
+        # realtime and skills are coupled — restart both so pattern registration stays in sync
+        launch_background skills
+        launch_background realtime
         ;;
 
     "debug")
