@@ -279,6 +279,7 @@ def connect_loop_events(loop):
     loop.on('recognizer_loop:speech.recognition.unknown', handle_unknown)
     loop.on('speak', handle_speak)
     loop.on('mycroft.audio.speech.stop', lambda e: bus.emit(Message('mycroft.audio.speech.stop', e)))
+    loop.on('question-answerer-skill:clear_history', lambda e: bus.emit(Message('question-answerer-skill:clear_history', e)))
     loop.on('recognizer_loop:record_begin', handle_record_begin)
     loop.on('recognizer_loop:awoken', handle_awoken)
     loop.on('recognizer_loop:wakeword', handle_wakeword)

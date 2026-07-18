@@ -43,6 +43,12 @@ _DEFAULT_NON_TERMINAL_WORDS = {
 # Kept intentionally narrow: only articles and conjunctions that essentially never
 # end a natural sentence. Prepositions, possessives, intensifiers etc. are excluded
 # because questions like "what is it about" / "is there more" end with them legitimately.
+QA_DEFAULT_EXIT_WORDS = ['stop', 'done']
+QA_DEFAULT_EXIT_PHRASES = ["that's all"]
+QA_DEFAULT_INTERRUPT_WORDS = ['wait']
+QA_DEFAULT_INTERRUPT_PHRASES = ['hang on']
+QA_DEFAULT_CLEAR_HISTORY_PHRASES = ['clear chat']
+
 _QA_NON_COMMIT_TAIL_WORDS = {
     # articles
     'a', 'an', 'the',
@@ -892,10 +898,12 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             return  # already aborted, don't double-fire
 
         cfg = self.qa_config
-        exit_words = set(cfg.get('exit_words', ['stop', 'done']))
-        exit_phrases = [p.lower() for p in cfg.get('exit_phrases', ["that's all"])]
-        interrupt_words = set(cfg.get('interrupt_words', ['wait']))
-        interrupt_phrases = [p.lower() for p in cfg.get('interrupt_phrases', ['hang on'])]
+        exit_words = set(cfg.get('exit_words', QA_DEFAULT_EXIT_WORDS))
+        exit_phrases = [p.lower() for p in cfg.get('exit_phrases', QA_DEFAULT_EXIT_PHRASES)]
+        interrupt_words = set(cfg.get('interrupt_words', QA_DEFAULT_INTERRUPT_WORDS))
+        interrupt_phrases = [p.lower() for p in cfg.get('interrupt_phrases', QA_DEFAULT_INTERRUPT_PHRASES)]
+        clear_history_words = set(cfg.get('clear_history_words', []))
+        clear_history_phrases = [p.lower() for p in cfg.get('clear_history_phrases', QA_DEFAULT_CLEAR_HISTORY_PHRASES)]
         max_pos = cfg.get('control_word_positions', 3)
 
         transcript = ' '.join(words).lower()
@@ -922,13 +930,37 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 self._qa_tts_event.set()
                 self._qa_committed_event.set()
                 return
+        for w in check_words:
+            if w in clear_history_words:
+                LOG.info(f"QA sentinel: clear_history word '{w}' detected ({'INTERIM' if not is_final else 'FINAL'})")
+                self._qa_abort = True
+                self._qa_abort_reason = 'clear_history'
+                self.emit('mycroft.audio.speech.stop', {})
+                self._qa_tts_event.set()
+                self._qa_committed_event.set()
+                return
 
-        # Phrases: FINAL only for reliability
+        lower_words = [w.lower().rstrip('.,!?') for w in words]
+
+        # Clear history phrases fire on INTERIM — unambiguous control commands
+        for phrase in clear_history_phrases:
+            phrase_words = phrase.lower().split()
+            if lower_words[:len(phrase_words)] == phrase_words:
+                LOG.info(f"QA sentinel: clear_history phrase '{phrase}' detected ({'INTERIM' if not is_final else 'FINAL'})")
+                self._qa_abort = True
+                self._qa_abort_reason = 'clear_history'
+                self.emit('mycroft.audio.speech.stop', {})
+                self._qa_tts_event.set()
+                self._qa_committed_event.set()
+                return
+
+        # Exit/interrupt phrases require FINAL — need full phrase for reliability
         if not is_final:
             return
         for phrase in exit_phrases:
-            if transcript.startswith(phrase):
-                LOG.info(f"QA sentinel: exit phrase '{phrase}' detected by Riva")
+            phrase_words = phrase.lower().split()
+            if lower_words[:len(phrase_words)] == phrase_words:
+                LOG.info(f"QA sentinel: exit phrase '{phrase}' detected (FINAL)")
                 self.emit('mycroft.realtime.qa_debug', {'msg': f"exit phrase: '{phrase}'"})
                 self._qa_abort = True
                 self._qa_abort_reason = 'exit'
@@ -937,8 +969,9 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 self._qa_committed_event.set()
                 return
         for phrase in interrupt_phrases:
-            if transcript.startswith(phrase):
-                LOG.info(f"QA sentinel: interrupt phrase '{phrase}' detected by Riva")
+            phrase_words = phrase.lower().split()
+            if lower_words[:len(phrase_words)] == phrase_words:
+                LOG.info(f"QA sentinel: interrupt phrase '{phrase}' detected (FINAL)")
                 self._qa_abort = True
                 self._qa_abort_reason = 'interrupt'
                 self.emit('mycroft.audio.speech.stop', {})
@@ -994,6 +1027,10 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         LOG.info(f"QA accumulator: phrase='{self._qa_phrase}' ({len(self._qa_phrase.split())} words)")
 
         cfg = self.qa_config
+
+        # If the sentinel already flagged an abort on this FINAL, don't commit
+        if self._qa_abort:
+            return
 
         # Check for override commit phrases — user explicitly signals they're done.
         # Strip the commit phrase from the end before dispatching.
@@ -1122,6 +1159,16 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     break
                 elif reason == 'interrupt':
                     LOG.info("QA: interrupt word detected — reopening follow-up")
+                    continue
+                elif reason == 'clear_history':
+                    LOG.info("QA: clear_history detected — clearing chat history and reopening follow-up")
+                    self._qa_phrase = ""
+                    self._qa_last_final = ""
+                    if self.stt_backend == 'riva' and self.riva_stream_thread:
+                        self.riva_stream_thread.reset()
+                        self.riva_interim_word_count = 0
+                        self.riva_final_word_count = 0
+                    self.emit('question-answerer-skill:clear_history', {})
                     continue
 
             text = self._qa_committed_text
@@ -1348,11 +1395,17 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # During QA mode: check exit/interrupt words AND accumulate FINALs for
         # phrase accumulation and silence-based commit.
         if self.mode == MODE_QA:
-            self._handle_qa_riva_words(words, is_final)
+            current_count = self.riva_final_word_count if is_final else self.riva_interim_word_count
+            new_words = words[current_count:]
+            if is_final:
+                self.riva_final_word_count = len(words)
+            else:
+                self.riva_interim_word_count = len(words)
+            self._handle_qa_riva_words(new_words, is_final)
             grace_active = self._qa_tts_grace_until and time.time() < self._qa_tts_grace_until
             if not self._qa_abort and not self._qa_tts_playing and not grace_active:
                 # INTERIM: keep the silence deadline alive while the user is speaking
-                if not is_final and self._qa_listen_deadline and words:
+                if not is_final and self._qa_listen_deadline and new_words:
                     self._qa_listen_deadline = time.time() + self.qa_config.get('follow_up_timeout_seconds', 15)
                 # FINAL: accumulate and potentially commit
                 if is_final:
