@@ -645,6 +645,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self._rebuild_shared_patterns()
         LOG.info(f"[MANAGE] {action} '{target or 'commands'}' — "
                  f"mute={self.global_mute} disabled={self.manually_disabled}")
+        flash_color = "00AA00" if action == 'enable' else "CC2200"
+        os.system(rf"/home/joseph/.local/bin/polybar-flash dunst {flash_color} &")
         target_label = target or 'commands'
         prefix_to_name = {g['skill_prefix']: g['name'] for g in self.command_groups}
         for g in self.command_groups:
