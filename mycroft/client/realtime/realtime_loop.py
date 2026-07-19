@@ -202,6 +202,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.repeat_window_seconds = _rep_cfg.get('quantifier_only_window_seconds', 5)
         self.repeat_cross_session = _rep_cfg.get('cross_session_repeat', False)
         self.repeat_history_file = _rep_cfg.get('cross_session_history_file')
+        self.repeat_inter_delay = _rep_cfg.get('inter_repeat_delay_ms', 50) / 1000.0
 
         # Session management
         self.session_timeout = self.realtime_config.get('session_timeout_seconds', 15)
@@ -1319,6 +1320,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         now = time.time()
         for i in range(additional):
             LOG.info(f"  🔁 Repeat {i+1}/{additional}: '{str(len(utterance))}'")
+            if i > 0 and self.repeat_inter_delay > 0:
+                time.sleep(self.repeat_inter_delay)
             self.emit('recognizer_loop:utterance', {
                 'utterances': [utterance],
                 'lang': self.lang,
