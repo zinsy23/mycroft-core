@@ -16,11 +16,13 @@ import pytest
 from mycroft.client.realtime.number_parser import (
     words_to_int,
     words_to_calc,
+    words_to_decimal,
     format_calc_expression,
     NUMBER_WORDS,
     CALC_WORDS,
     SIGN_WORDS,
     DECIMAL_WORDS,
+    DECIMAL_SLOT_WORDS,
 )
 
 
@@ -1479,3 +1481,223 @@ class TestFormatCalcExpression:
         expression = format_calc_expression(result)
         # pi is irrational so token is float — renders as full float string, not int
         assert 'times 2' in expression
+
+
+# ── words_to_decimal ──────────────────────────────────────────────────────────
+
+def dec(phrase):
+    """Return words_to_decimal result for a spoken phrase, or None."""
+    return words_to_decimal(phrase)
+
+
+class TestWordsToDecimalBasic:
+    """Standard spoken decimal forms."""
+
+    def test_simple(self):
+        assert dec('three point five') == pytest.approx(3.5)
+
+    def test_dot_alias(self):
+        assert dec('three dot five') == pytest.approx(3.5)
+
+    def test_two_frac_digits(self):
+        # "three point two five" → 3.25
+        assert dec('three point two five') == pytest.approx(3.25)
+
+    def test_frac_twenty_five(self):
+        # "three point twenty five" → same as "three point two five" → 3.25
+        assert dec('three point twenty five') == pytest.approx(3.25)
+
+    def test_frac_twenty(self):
+        # "three point twenty" → digit string "20" → 3.20 = 3.2
+        assert dec('three point twenty') == pytest.approx(3.2)
+
+    def test_frac_two_same_as_twenty(self):
+        # "three point two" and "three point twenty" are the same float
+        assert dec('three point two') == dec('three point twenty')
+
+    def test_frac_five_same_as_fifty(self):
+        assert dec('three point five') == dec('three point fifty')
+
+    def test_large_integer_part(self):
+        assert dec('one hundred point two five') == pytest.approx(100.25)
+
+    def test_magnitude_integer_part(self):
+        assert dec('two thousand point five') == pytest.approx(2000.5)
+
+    def test_zero_integer_part(self):
+        assert dec('zero point seven') == pytest.approx(0.7)
+
+
+class TestWordsToDecimalBarePoint:
+    """No explicit integer part — 'point X' implies integer part 0."""
+
+    def test_point_five(self):
+        assert dec('point five') == pytest.approx(0.5)
+
+    def test_dot_seven(self):
+        assert dec('dot seven') == pytest.approx(0.7)
+
+    def test_point_twenty_five(self):
+        assert dec('point twenty five') == pytest.approx(0.25)
+
+    def test_point_one(self):
+        assert dec('point one') == pytest.approx(0.1)
+
+    def test_point_zero_five(self):
+        # "point zero five" → frac string "05" → 0.05
+        assert dec('point zero five') == pytest.approx(0.05)
+
+
+class TestWordsToDecimalOhAliases:
+    """'o' and 'oh' are zero aliases in the fractional part."""
+
+    def test_oh_as_zero(self):
+        # "three point oh five" → frac string "05" → 3.05
+        assert dec('three point oh five') == pytest.approx(3.05)
+
+    def test_o_as_zero(self):
+        # Riva FINAL often produces bare 'o'
+        assert dec('three point o five') == pytest.approx(3.05)
+
+    def test_zero_as_zero(self):
+        # explicit "zero" should also work
+        assert dec('three point zero five') == pytest.approx(3.05)
+
+    def test_oh_oh_five(self):
+        # "three point oh oh five" → "005" → 3.005
+        assert dec('three point oh oh five') == pytest.approx(3.005)
+
+    def test_o_o_five(self):
+        assert dec('three point o o five') == pytest.approx(3.005)
+
+    def test_bare_point_oh_five(self):
+        assert dec('point oh five') == pytest.approx(0.05)
+
+    def test_bare_point_o_five(self):
+        assert dec('point o five') == pytest.approx(0.05)
+
+    def test_oh_then_number_word(self):
+        # "three point oh twenty" → frac string "020" → 3.020 = 3.02
+        assert dec('three point oh twenty') == pytest.approx(3.02)
+
+
+class TestWordsToDecimalSigned:
+    """Negative decimals via 'negative' or 'minus'."""
+
+    def test_negative(self):
+        assert dec('negative three point five') == pytest.approx(-3.5)
+
+    def test_minus(self):
+        assert dec('minus three point five') == pytest.approx(-3.5)
+
+    def test_negative_bare_point(self):
+        assert dec('negative point five') == pytest.approx(-0.5)
+
+    def test_minus_bare_point(self):
+        assert dec('minus point five') == pytest.approx(-0.5)
+
+    def test_negative_large_integer(self):
+        assert dec('negative one hundred point two five') == pytest.approx(-100.25)
+
+
+class TestWordsToDecimalIncomplete:
+    """Incomplete phrases must return None — slot stays open, FINAL does not act."""
+
+    def test_bare_integer_no_point(self):
+        # No 'point' → not a decimal; use {number} for integers
+        assert dec('three') is None
+
+    def test_trailing_point_no_digits(self):
+        # "three point" — decimal started but nothing follows
+        assert dec('three point') is None
+
+    def test_sign_only(self):
+        assert dec('negative') is None
+
+    def test_sign_then_point_no_digits(self):
+        # "negative three point" — incomplete
+        assert dec('negative three point') is None
+
+    def test_empty(self):
+        assert dec('') is None
+
+    def test_garbage(self):
+        assert dec('blah blah') is None
+
+    def test_bare_point_no_digits(self):
+        # "point" alone — no fractional digits
+        assert dec('point') is None
+
+
+class TestWordsToDecimalSlotWords:
+    """DECIMAL_SLOT_WORDS contains everything needed to keep the slot open."""
+
+    def test_sign_words_included(self):
+        assert 'negative' in DECIMAL_SLOT_WORDS
+        assert 'minus' in DECIMAL_SLOT_WORDS
+
+    def test_number_words_included(self):
+        for w in ('one', 'twenty', 'hundred', 'thousand'):
+            assert w in DECIMAL_SLOT_WORDS
+
+    def test_decimal_separators_included(self):
+        assert 'point' in DECIMAL_SLOT_WORDS
+        assert 'dot' in DECIMAL_SLOT_WORDS
+
+    def test_oh_aliases_included(self):
+        assert 'oh' in DECIMAL_SLOT_WORDS
+        assert 'o' in DECIMAL_SLOT_WORDS
+
+    def test_operator_words_not_included(self):
+        # operators must not bleed into decimal slot
+        for w in ('plus', 'times', 'divided', 'minus'):
+            # 'minus' is in SIGN_WORDS → IS in DECIMAL_SLOT_WORDS (leading sign)
+            if w != 'minus':
+                assert w not in DECIMAL_SLOT_WORDS, f"'{w}' should not be in DECIMAL_SLOT_WORDS"
+
+    def test_filler_words_not_included(self):
+        for w in ('of', 'the', 'by', 'and'):
+            assert w not in DECIMAL_SLOT_WORDS
+
+
+class TestWordsToDecimalEdgeCases:
+    """Edge cases and potential ambiguity traps."""
+
+    def test_frac_nine_nine(self):
+        # "three point nine nine" → "99" → 3.99
+        assert dec('three point nine nine') == pytest.approx(3.99)
+
+    def test_frac_one_hundred(self):
+        # "three point one hundred" → words_to_int("one hundred") = 100
+        # digit string "100" → 3.100 = 3.1
+        assert dec('three point one hundred') == pytest.approx(3.1)
+
+    def test_frac_nineteen(self):
+        # "three point nineteen" → words_to_int("nineteen") = 19
+        # digit string "19" → 3.19
+        assert dec('three point nineteen') == pytest.approx(3.19)
+
+    def test_point_not_consumed_as_number(self):
+        # 'point' is not a valid integer phrase — integer part must be empty or a number
+        assert dec('point') is None
+
+    def test_sign_plus_point_plus_digit(self):
+        assert dec('negative point nine') == pytest.approx(-0.9)
+
+    def test_zero_point_zero(self):
+        assert dec('zero point zero') == pytest.approx(0.0)
+
+    def test_oh_only_in_frac(self):
+        # "oh" before the point is not a valid integer part
+        assert dec('oh point five') is None
+
+    def test_concat_integer_part(self):
+        # "thirteen six fifty" → 13650 via concat; frac "sixty nine" → "69" → .69
+        assert dec('thirteen six fifty point sixty nine') == pytest.approx(13650.69)
+
+    def test_nineteen_forty_one_point_five(self):
+        assert dec('nineteen forty one point five') == pytest.approx(1941.5)
+
+    def test_concat_frac_group(self):
+        # "three point sixty nine" → frac "sixty nine" = 69 → digit str "69" → 3.69
+        assert dec('three point sixty nine') == pytest.approx(3.69)

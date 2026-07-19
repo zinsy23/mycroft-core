@@ -16,12 +16,22 @@ Entry points:
       'result' (float), 'expr' (spoken words), 'tokens' (mixed int/str list).
       Returns None on parse failure.
 
+  words_to_decimal(phrase: str) -> float | None
+      Parse a spoken decimal number. Returns float or None on failure.
+      Requires 'point'/'dot' separator. Fractional part uses word-groups
+      (e.g. "twenty five" → digit string "25" → 0.25).
+      'o'/'oh'/'zero' all map to 0 digit in fractional position.
+
   NUMBER_WORDS: frozenset[str]
       Valid number component words for {number} entity next-word matching.
 
   CALC_WORDS: frozenset[str]
       All words valid inside a {number_calc} expression (NUMBER_WORDS +
       operator words + sign words).
+
+  DECIMAL_SLOT_WORDS: frozenset[str]
+      All words valid inside a {number_decimal} slot (NUMBER_WORDS +
+      SIGN_WORDS + DECIMAL_WORDS + 'o'/'oh' zero aliases).
 """
 
 ONES = {
@@ -58,6 +68,13 @@ SIGNED_NUMBER_WORDS = SIGN_WORDS | NUMBER_WORDS
 
 # Decimal point words — only valid in calc context (words_to_int stays integer-only)
 DECIMAL_WORDS = frozenset({'point', 'dot'})
+
+# Zero aliases valid only in the fractional part of a decimal number.
+# 'o' is common in Riva FINAL; 'oh' in INTERIM; 'zero' handled via ONES.
+_FRAC_ZERO_ALIASES = frozenset({'o', 'oh'})
+
+# All words valid inside a {number_decimal} slot.
+DECIMAL_SLOT_WORDS = NUMBER_WORDS | SIGN_WORDS | DECIMAL_WORDS | _FRAC_ZERO_ALIASES
 
 
 def _parse_below_thousand(tokens: list[str]) -> tuple[int, int]:
@@ -308,6 +325,105 @@ def words_to_int(phrase: str, concat: bool = True) -> int | None:
     if result is None:
         return None
 
+    return -result if negative else result
+
+
+def words_to_decimal(phrase: str) -> float | None:
+    """Convert a spoken decimal phrase to a float.
+
+    Requires a 'point' or 'dot' separator. The integer part (before the
+    separator) uses words_to_int with concat support. The fractional part
+    (after the separator) is parsed as a word-group integer via words_to_int,
+    then used as a digit string placed after the decimal point.
+
+    'o', 'oh', and 'zero' are all treated as the digit 0 in the fractional part.
+
+    Examples:
+        "three point five"         → 3.5
+        "three point twenty five"  → 3.25  (same as "three point two five")
+        "three point oh five"      → 3.05
+        "three point o five"       → 3.05
+        "point seven"              → 0.7   (bare decimal — integer part implied 0)
+        "negative three point five"→ -3.5
+        "thirteen six fifty point sixty nine" → 13650.69
+
+    Returns None if:
+        - No 'point'/'dot' separator found
+        - No fractional digits follow the separator
+        - Integer part (if present) does not parse as a valid number
+    """
+    if not phrase:
+        return None
+    tokens = phrase.lower().split()
+    if not tokens:
+        return None
+
+    negative = False
+    if tokens[0] in SIGN_WORDS:
+        negative = True
+        tokens = tokens[1:]
+    if not tokens:
+        return None
+
+    # Find the decimal separator
+    sep_idx = None
+    for i, t in enumerate(tokens):
+        if t in DECIMAL_WORDS:
+            sep_idx = i
+            break
+    if sep_idx is None:
+        return None  # no separator → not a decimal
+
+    int_tokens = tokens[:sep_idx]
+    frac_tokens = tokens[sep_idx + 1:]
+
+    if not frac_tokens:
+        return None  # trailing separator with no digits
+
+    # Parse integer part
+    if int_tokens:
+        int_val = _words_to_int_standard(int_tokens)
+        if int_val is None:
+            int_val = _words_to_int_concat(int_tokens)
+        if int_val is None:
+            return None
+    else:
+        int_val = 0  # bare "point X" → 0.X
+
+    # Parse fractional part as a sequence of digit groups.
+    # Strategy: consume tokens left to right, trying to extend a word-group
+    # that parses as an integer via words_to_int. 'o'/'oh' are zero digits
+    # and must be handled token-by-token since they aren't in ONES/NUMBER_WORDS.
+    # We build a digit string by consuming one group at a time.
+    frac_digit_str = ''
+    i = 0
+    n = len(frac_tokens)
+    while i < n:
+        tok = frac_tokens[i]
+
+        # Zero aliases — always a single-token '0' digit
+        if tok in _FRAC_ZERO_ALIASES:
+            frac_digit_str += '0'
+            i += 1
+            continue
+
+        # Try greedy word-group match (longest span that parses as int)
+        matched = False
+        for length in range(n - i, 0, -1):
+            sub = ' '.join(frac_tokens[i:i + length])
+            val = words_to_int(sub, concat=False)  # no concat in frac — ambiguous
+            if val is not None and val >= 0:
+                frac_digit_str += str(val)
+                i += length
+                matched = True
+                break
+        if not matched:
+            return None  # unrecognised token in fractional part
+
+    if not frac_digit_str:
+        return None
+
+    result = float(f'{int_val}.{frac_digit_str}')
     return -result if negative else result
 
 
