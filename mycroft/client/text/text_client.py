@@ -1339,10 +1339,13 @@ def handle_realtime_command_matched(event):
     add_log_message(f"[CMD] {utterance}  ({stream})")
 
 
-def handle_realtime_qa_reply(event):
+def handle_realtime_skill_reply(event):
     utterance = event.data.get('utterance', '')
     chat.append(">> " + utterance)
     set_screen_dirty()
+
+
+handle_realtime_qa_reply = handle_realtime_skill_reply
 
 
 def handle_realtime_qa_debug(event):
@@ -1414,6 +1417,7 @@ def gui_main(stdscr):
     bus.on('mycroft.realtime.command_matched', handle_realtime_command_matched)
     bus.on('mycroft.realtime.mode_changed', handle_realtime_mode_changed)
     bus.on('mycroft.realtime.qa_reply', handle_realtime_qa_reply)
+    bus.on('mycroft.realtime.skill_reply', handle_realtime_skill_reply)
     bus.on('mycroft.realtime.qa_debug', handle_realtime_qa_debug)  # TEMP: remove when QA stable
     bus.on('mycroft.realtime.manage', handle_realtime_manage)
 
