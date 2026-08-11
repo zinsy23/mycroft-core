@@ -250,11 +250,12 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.dedup_history_size = 5
 
         # Debug mode
-        self.debug = self.realtime_config.get('debug', True)
+        self.debug = self.realtime_config.get('debug', False)
+        self.verbose = self.realtime_config.get('verbose_logging', False)
 
         # DUAL command matchers for Riva's two streams
-        self.interim_matcher = StreamingCommandMatcher(_filler_cfg)
-        self.final_matcher = StreamingCommandMatcher(_filler_cfg)
+        self.interim_matcher = StreamingCommandMatcher(_filler_cfg, verbose=self.verbose)
+        self.final_matcher = StreamingCommandMatcher(_filler_cfg, verbose=self.verbose)
         self.shared_global_budget = _filler_cfg.get('base_max', 4)
 
         # Pattern list shared between both matchers
@@ -1345,11 +1346,12 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         """Callback when Whisper streaming recognizes a word (legacy path)."""
         now = time.time()
 
-        if self.last_batch_time:
-            latency = now - self.last_batch_time
-            LOG.info(f"[WHISPER] {str(len(word))} (latency: {latency*1000:.0f}ms from last batch)")
-        else:
-            LOG.info(f"[WHISPER] {str(len(word))}")
+        if self.verbose:
+            if self.last_batch_time:
+                latency = now - self.last_batch_time
+                LOG.info(f"[WHISPER] {word} (latency: {latency*1000:.0f}ms from last batch)")
+            else:
+                LOG.info(f"[WHISPER] {word}")
 
         self.last_word_time = now
 
@@ -1432,9 +1434,10 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
         # Detect word count drop (new segment or refinement)
         if current_count > len(words):
-            LOG.info(f"[RIVA {stream_name}] Word count dropped "
-                     f"(had {current_count}, now {len(words)}) | "
-                     f"Active paths: {len(matcher.active_paths)}")
+            if self.verbose:
+                LOG.info(f"[RIVA {stream_name}] Word count dropped "
+                         f"(had {current_count}, now {len(words)}) | "
+                         f"Active paths: {len(matcher.active_paths)}")
 
             prev_transcript = (self.prev_final_transcript if is_final
                                else self.prev_interim_transcript)
@@ -1444,11 +1447,13 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             is_identical = (transcript == prev_transcript)
 
             if is_identical:
-                LOG.info(f"[RIVA {stream_name}] Spurious re-delivery (identical transcript) — ignoring")
+                if self.verbose:
+                    LOG.info(f"[RIVA {stream_name}] Spurious re-delivery (identical transcript) — ignoring")
                 return
             elif is_refinement:
-                LOG.info(f"[RIVA {stream_name}] Refinement: "
-                         f"prev='{str(len(prev_transcript))}' new='{str(len(transcript))}' — resetting matcher")
+                if self.verbose:
+                    LOG.info(f"[RIVA {stream_name}] Refinement: "
+                             f"prev='{prev_transcript}' new='{transcript}' — resetting matcher")
                 # Preserve paths that are mid-slot — their accumulated buffer
                 # represents content that survived prior interim deliveries and
                 # should not be thrown away just because Riva revised a word.
@@ -1465,17 +1470,19 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     # Keep only the fittest open-slot path (highest fitness score)
                     best = max(open_slot_paths, key=lambda p: p.fitness_score)
                     matcher.active_paths = [best]
-                    LOG.info(f"[RIVA {stream_name}] Refinement: preserved mid-slot path "
-                             f"{best.path_id} (fitness={best.fitness_score}, "
-                             f"buf_len={len(best._decimal_list_buf or best._number_buf or best._calc_buf or best._decimal_buf)})")
+                    if self.verbose:
+                        LOG.info(f"[RIVA {stream_name}] Refinement: preserved mid-slot path "
+                                 f"{best.path_id} (fitness={best.fitness_score}, "
+                                 f"buf_len={len(best._decimal_list_buf or best._number_buf or best._calc_buf or best._decimal_buf)})")
                 if is_final:
                     self.final_min_replay_pos = 0
                 else:
                     self.interim_min_replay_pos = 0
             else:
-                LOG.info(f"[RIVA {stream_name}] True segment boundary: "
-                         f"prev='{str(len(prev_transcript))}' new='{str(len(transcript))}' — "
-                         f"preserving {len(matcher.active_paths)} paths")
+                if self.verbose:
+                    LOG.info(f"[RIVA {stream_name}] True segment boundary: "
+                             f"prev='{prev_transcript}' new='{transcript}' — "
+                             f"preserving {len(matcher.active_paths)} paths")
                 if is_final:
                     self.final_min_replay_pos = 0
                 else:
@@ -1497,9 +1504,10 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             curr_words = words[:current_count]
 
             if prev_words != curr_words:
-                LOG.info(f"[RIVA {stream_name}] Transcript changed: "
-                         f"{str(len(prev_words))} → {str(len(curr_words))} | "
-                         f"Active paths: {len(matcher.active_paths)}")
+                if self.verbose:
+                    LOG.info(f"[RIVA {stream_name}] Transcript changed: "
+                             f"{' '.join(prev_words)} → {' '.join(curr_words)} | "
+                             f"Active paths: {len(matcher.active_paths)}")
 
                 # UNDO WINDOW: Only FINAL stream can undo a prior INTERIM execution
                 if is_final and self.executed_utterances_history:
@@ -1525,9 +1533,10 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
                         if last_matched_words is None or last_match_position is None:
                             should_undo = True
-                            LOG.info(f"⚠️  Transcript changed {time_since_last:.1f}s after "
-                                     f"execution — removed stale dedup entry: '{str(len(last_utterance))}' "
-                                     f"(no position tracked)")
+                            if self.verbose:
+                                LOG.info(f"⚠️  Transcript changed {time_since_last:.1f}s after "
+                                         f"execution — removed stale dedup entry: '{last_utterance}' "
+                                         f"(no position tracked)")
                         else:
                             matched_word_count = len(last_matched_words)
                             if last_match_position + matched_word_count <= len(curr_words):
@@ -1553,21 +1562,25 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                                                     valid_at_position.add(seq[pos]['word'])
                                         if replacement_word not in valid_at_position:
                                             replacement_all_valid = False
-                                            LOG.debug(f"Replacement word '{str(len(replacement_word))}' "
-                                                      f"not valid — keeping dedup protection")
+                                            if self.verbose:
+                                                LOG.debug(f"Replacement word '{replacement_word}' "
+                                                          f"not valid — keeping dedup protection")
                                             break
                                     if replacement_all_valid:
                                         should_undo = True
-                                        LOG.info(f"⚠️  Matched words changed {time_since_last:.1f}s "
-                                                 f"after execution at position {last_match_position}: "
-                                                 f"{str(len(last_matched_words))} → {str(len(current_matched_words))} — "
-                                                 f"removed stale dedup entry: '{str(len(last_utterance))}'")
+                                        if self.verbose:
+                                            LOG.info(f"⚠️  Matched words changed {time_since_last:.1f}s "
+                                                     f"after execution at position {last_match_position}: "
+                                                     f"{' '.join(last_matched_words)} → {' '.join(current_matched_words)} — "
+                                                     f"removed stale dedup entry: '{last_utterance}'")
                                 else:
-                                    LOG.debug(f"Transcript changed but matched words unchanged "
-                                              f"— keeping dedup protection")
+                                    if self.verbose:
+                                        LOG.debug(f"Transcript changed but matched words unchanged "
+                                                  f"— keeping dedup protection")
                             else:
-                                LOG.debug(f"Match position no longer in transcript — "
-                                          f"keeping dedup protection")
+                                if self.verbose:
+                                    LOG.debug(f"Match position no longer in transcript — "
+                                              f"keeping dedup protection")
 
                         if should_undo:
                             self.executed_utterances_history.pop()
@@ -1597,8 +1610,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # Extract new words
         new_words = words[current_count:]
 
-        if new_words:
-            LOG.debug(f"[RIVA {stream_name}] New words: {str(len(new_words))} (processed {current_count}/{len(words)})")
+        if new_words and self.verbose:
+            LOG.debug(f"[RIVA {stream_name}] New words: {new_words} (processed {current_count}/{len(words)})")
 
         # Update previous transcript
         if is_final:
@@ -1614,7 +1627,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             else:
                 self.riva_interim_word_count = current_count
 
-            LOG.debug(f"[RIVA {stream_name}] {str(len(word))}")
+            if self.verbose:
+                LOG.debug(f"[RIVA {stream_name}] {word}")
 
             if self.debug:
                 event_name = ('mycroft.debug.riva.final' if is_final
@@ -1754,7 +1768,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
                 # Budget sync
                 self.shared_global_budget = matcher.global_budget
-                LOG.debug(f"Global budget synced: {self.shared_global_budget}")
+                if self.verbose:
+                    LOG.debug(f"Global budget synced: {self.shared_global_budget}")
 
                 # Reset both matchers
                 self.interim_matcher.reset()
@@ -1778,7 +1793,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     self.final_min_replay_pos = max(self.final_min_replay_pos, new_min)
                 else:
                     self.interim_min_replay_pos = max(self.interim_min_replay_pos, new_min)
-                LOG.debug(f"Min replay pos for {stream_name} advanced to {new_min}")
+                if self.verbose:
+                    LOG.debug(f"Min replay pos for {stream_name} advanced to {new_min}")
 
                 # Update last_executed_command for repeat mode (non-repeat commands only)
                 self.last_executed_command = (utterance, intent)
@@ -1788,7 +1804,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 if self.repeat_enabled:
                     self._open_repeat_window(intent=intent)
 
-                LOG.debug(f"Both matchers reset after {stream_name} match")
+                if self.verbose:
+                    LOG.debug(f"Both matchers reset after {stream_name} match")
                 break
 
         # FINAL boundary: close any open number slots and check for completion.
@@ -1812,7 +1829,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 for p in matcher.active_paths
             )
             if interim_has_open_slots and not final_has_open_slots:
-                LOG.info("FINAL boundary: no open-slot paths in final_matcher, falling back to interim_matcher")
+                if self.verbose:
+                    LOG.info("FINAL boundary: no open-slot paths in final_matcher, falling back to interim_matcher")
                 boundary_matcher = self.interim_matcher
             for path in list(boundary_matcher.active_paths):
                 if (path._number_slot_name is not None or path._calc_slot_name is not None
@@ -1885,7 +1903,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             now = time.time()
             if self.last_batch_time:
                 batch_interval = now - self.last_batch_time
-                LOG.debug(f"[TIMING] Batch interval: {batch_interval*1000:.0f}ms (target: 500ms)")
+                if self.verbose:
+                    LOG.debug(f"[TIMING] Batch interval: {batch_interval*1000:.0f}ms (target: 500ms)")
             self.last_batch_time = now
 
             self.whisper_stream_thread.queue.put(batch)
