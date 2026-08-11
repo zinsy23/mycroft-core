@@ -17,12 +17,15 @@ from mycroft.client.realtime.number_parser import (
     words_to_int,
     words_to_calc,
     words_to_decimal,
+    words_to_decimal_list,
     format_calc_expression,
     NUMBER_WORDS,
     CALC_WORDS,
     SIGN_WORDS,
     DECIMAL_WORDS,
     DECIMAL_SLOT_WORDS,
+    DECIMAL_LIST_SLOT_WORDS,
+    DECIMAL_LIST_HOLD_TAIL_WORDS,
 )
 
 
@@ -1701,3 +1704,265 @@ class TestWordsToDecimalEdgeCases:
     def test_concat_frac_group(self):
         # "three point sixty nine" → frac "sixty nine" = 69 → digit str "69" → 3.69
         assert dec('three point sixty nine') == pytest.approx(3.69)
+
+
+# ── words_to_decimal_list ─────────────────────────────────────────────────────
+
+def dl(phrase):
+    """Shorthand: call words_to_decimal_list and return the result dict."""
+    return words_to_decimal_list(phrase)
+
+def dl_values(phrase):
+    """Shorthand: return just the values list."""
+    return words_to_decimal_list(phrase)['values']
+
+def dl_complete(phrase):
+    """True if the phrase parses to a complete (even-count, non-hold-tail) list."""
+    return words_to_decimal_list(phrase)['complete']
+
+def dl_incomplete(phrase):
+    """True if the phrase is incomplete (odd count or hold tail)."""
+    return words_to_decimal_list(phrase)['incomplete']
+
+def dl_error(phrase):
+    """Return the error string, or None."""
+    return words_to_decimal_list(phrase)['error']
+
+
+class TestDecimalListBasic:
+    """Even-count lists that should come back complete."""
+
+    def test_two_then_separated(self):
+        r = dl('point two three then one point five')
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([0.23, 1.5])
+
+    def test_four_then_separated(self):
+        r = dl('point two then one point five then negative point four then two point one')
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([0.2, 1.5, -0.4, 2.1])
+
+    def test_sign_boundary_pair(self):
+        # negative acts as implicit boundary after first number is complete
+        r = dl('one point five negative point four one')
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([1.5, -0.41])
+
+    def test_bare_point_boundary(self):
+        # second 'point' after a complete decimal starts a new number
+        r = dl('one point five point four')
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([1.5, 0.4])
+
+    def test_all_bare_decimals_no_then(self):
+        # point-led numbers — boundaries implicit via second 'point'
+        r = dl('point two three point one five')
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([0.23, 0.15])
+
+    def test_sign_leads_no_then(self):
+        # "negative point four one" = -0.41, "point five" = 0.5 (bare decimal)
+        r = dl('negative point four one point five')
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([-0.41, 0.5])
+
+    def test_whole_number_with_then(self):
+        # whole number (no decimal point) requires 'then' to delimit
+        r = dl('five then point three')
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([5.0, 0.3])
+
+    def test_whole_numbers_both_then(self):
+        r = dl('three then four')
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([3.0, 4.0])
+
+    def test_six_values(self):
+        r = dl('point two three then one point five then negative point four one then two point one then zero point five then three')
+        assert r['complete'] is True
+        assert len(r['values']) == 6
+
+    def test_large_integer_part(self):
+        # 'and' is not a slot word (consistent with NUMBER_WORDS) — use without it
+        r = dl('one hundred twenty five point five then two point one')
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([125.5, 2.1])
+
+
+class TestDecimalListIncomplete:
+    """Odd-count or hold-tail cases — should be incomplete, not error."""
+
+    def test_single_value_odd(self):
+        r = dl('point two three')
+        assert r['incomplete'] is True
+        assert r['complete'] is False
+        assert r['values'] == pytest.approx([0.23])
+
+    def test_three_values_odd(self):
+        r = dl('point two three then one point five then negative point four one')
+        assert r['incomplete'] is True
+        assert r['values'] == pytest.approx([0.23, 1.5, -0.41])
+
+    def test_trailing_point_hold(self):
+        # ends with 'point' — list still in progress
+        r = dl('one point five point')
+        assert r['incomplete'] is True
+        assert r['error'] is None
+
+    def test_trailing_negative_hold(self):
+        r = dl('one point five negative')
+        assert r['incomplete'] is True
+
+    def test_trailing_then_hold(self):
+        r = dl('point two then')
+        assert r['incomplete'] is True
+
+    def test_trailing_oh_hold(self):
+        r = dl('one point five oh')
+        assert r['incomplete'] is True
+
+    def test_empty_phrase(self):
+        r = dl('')
+        assert r['incomplete'] is True
+        assert r['values'] == []
+
+    def test_only_then(self):
+        r = dl('then')
+        assert r['incomplete'] is True
+        assert r['values'] == []
+
+    def test_only_negative(self):
+        r = dl('negative')
+        assert r['incomplete'] is True
+
+    def test_only_point(self):
+        r = dl('point')
+        assert r['incomplete'] is True
+
+
+class TestDecimalListAccumulation:
+    """Simulate accumulating across two FINAL deliveries by concatenating phrases."""
+
+    def test_odd_then_even_on_append(self):
+        # First delivery: odd → incomplete
+        r1 = dl('point two three')
+        assert r1['incomplete'] is True
+        # Second delivery accumulates — concatenate and reparse
+        r2 = dl('point two three then one point five')
+        assert r2['complete'] is True
+        assert r2['values'] == pytest.approx([0.23, 1.5])
+
+    def test_accumulate_three_to_four(self):
+        r1 = dl('point two then one point five then negative point four')
+        assert r1['incomplete'] is True
+        r2 = dl('point two then one point five then negative point four then two point one')
+        assert r2['complete'] is True
+        assert len(r2['values']) == 4
+
+    def test_hold_tail_then_resolved(self):
+        # Ends with 'point' — incomplete
+        r1 = dl('one point five point')
+        assert r1['incomplete'] is True
+        # Next delivery completes the second number
+        r2 = dl('one point five point four')
+        assert r2['complete'] is True
+        assert r2['values'] == pytest.approx([1.5, 0.4])
+
+
+class TestDecimalListErrors:
+    """Unrecognised tokens should produce an error, not a crash."""
+
+    def test_unknown_word(self):
+        r = dl('point two hello point five')
+        assert r['error'] is not None
+        assert 'hello' in r['error']
+
+    def test_operator_word_rejected(self):
+        # 'plus' is not in DECIMAL_LIST_SLOT_WORDS
+        r = dl('one point five plus two point three')
+        assert r['error'] is not None
+
+    def test_bad_segment_fails_gracefully(self):
+        # 'then' separates but second segment is garbage
+        r = dl('point two then hello')
+        assert r['error'] is not None
+
+
+class TestDecimalListSlotWords:
+    """DECIMAL_LIST_SLOT_WORDS and DECIMAL_LIST_HOLD_TAIL_WORDS membership."""
+
+    def test_then_in_slot_words(self):
+        assert 'then' in DECIMAL_LIST_SLOT_WORDS
+
+    def test_decimal_slot_words_subset(self):
+        # Everything in DECIMAL_SLOT_WORDS is also in DECIMAL_LIST_SLOT_WORDS
+        assert DECIMAL_SLOT_WORDS <= DECIMAL_LIST_SLOT_WORDS
+
+    def test_hold_tail_contains_point(self):
+        assert 'point' in DECIMAL_LIST_HOLD_TAIL_WORDS
+        assert 'dot' in DECIMAL_LIST_HOLD_TAIL_WORDS
+
+    def test_hold_tail_contains_signs(self):
+        assert 'negative' in DECIMAL_LIST_HOLD_TAIL_WORDS
+        assert 'minus' in DECIMAL_LIST_HOLD_TAIL_WORDS
+
+    def test_hold_tail_contains_then(self):
+        assert 'then' in DECIMAL_LIST_HOLD_TAIL_WORDS
+
+    def test_hold_tail_contains_oh_aliases(self):
+        assert 'o' in DECIMAL_LIST_HOLD_TAIL_WORDS
+        assert 'oh' in DECIMAL_LIST_HOLD_TAIL_WORDS
+
+    def test_number_words_not_hold_tail(self):
+        # Regular number words are NOT hold-tail — they can end a complete number
+        for w in ['five', 'twenty', 'hundred', 'three']:
+            assert w not in DECIMAL_LIST_HOLD_TAIL_WORDS, f"'{w}' should not be a hold-tail word"
+
+    def test_operators_not_in_slot_words(self):
+        for w in ['plus', 'minus', 'times', 'divided']:
+            if w not in ('minus',):  # minus IS a sign word
+                assert w not in DECIMAL_LIST_SLOT_WORDS, f"'{w}' should not be in DECIMAL_LIST_SLOT_WORDS"
+
+
+class TestDecimalListBoundaryAmbiguity:
+    """Cases where implicit boundaries must be correctly detected."""
+
+    def test_integer_then_decimal_no_separator(self):
+        # "five point three" — 'five' is integer part, not separate number
+        r = dl('five point three')
+        # This is ONE number (5.3), so odd → incomplete
+        assert r['incomplete'] is True
+        assert r['values'] == pytest.approx([5.3])
+
+    def test_integer_then_decimal_with_then(self):
+        # 'then' makes boundary explicit
+        r = dl('five then point three')
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([5.0, 0.3])
+
+    def test_sign_splits_correctly(self):
+        # "one point five negative two point three" — sign is the boundary
+        r = dl('one point five negative two point three')
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([1.5, -2.3])
+
+    def test_two_signs_four_values(self):
+        r = dl('negative one point five negative two point three')
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([-1.5, -2.3])
+
+    def test_bare_point_after_integer_part(self):
+        # "one point five point two" — second 'point' starts new bare decimal
+        r = dl('one point five point two')
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([1.5, 0.2])
+
+    def test_mixed_then_and_sign_boundary(self):
+        r = dl('point two then negative point four')
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([0.2, -0.4])
+
+    def test_oh_alias_in_list(self):
+        r = dl('point oh two then one point oh five')
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([0.02, 1.05])

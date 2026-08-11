@@ -22,6 +22,13 @@ Entry points:
       (e.g. "twenty five" → digit string "25" → 0.25).
       'o'/'oh'/'zero' all map to 0 digit in fractional position.
 
+  words_to_decimal_list(phrase: str) -> list[float] | None
+      Parse a sequence of spoken decimal numbers into a list of floats.
+      Returns None if any segment fails to parse.
+      'then' is an explicit separator; sign words and bare 'point'/'dot'
+      are implicit boundaries. Odd-count results return a partial marker
+      via the 'incomplete' key — callers should accumulate more words.
+
   NUMBER_WORDS: frozenset[str]
       Valid number component words for {number} entity next-word matching.
 
@@ -32,6 +39,14 @@ Entry points:
   DECIMAL_SLOT_WORDS: frozenset[str]
       All words valid inside a {number_decimal} slot (NUMBER_WORDS +
       SIGN_WORDS + DECIMAL_WORDS + 'o'/'oh' zero aliases).
+
+  DECIMAL_LIST_SLOT_WORDS: frozenset[str]
+      All words valid inside a {number_decimal_list} slot — same as
+      DECIMAL_SLOT_WORDS plus 'then' as an explicit separator.
+
+  DECIMAL_LIST_HOLD_TAIL_WORDS: frozenset[str]
+      Words that, when last in a FINAL transcript, indicate the list is
+      still in progress (analogous to QA non-commit tail words).
 """
 
 ONES = {
@@ -75,6 +90,21 @@ _FRAC_ZERO_ALIASES = frozenset({'o', 'oh'})
 
 # All words valid inside a {number_decimal} slot.
 DECIMAL_SLOT_WORDS = NUMBER_WORDS | SIGN_WORDS | DECIMAL_WORDS | _FRAC_ZERO_ALIASES
+
+# 'then' is a list separator — valid inside the slot, not a boundary trigger.
+_DECIMAL_LIST_SEP = frozenset({'then'})
+
+# All words valid inside a {number_decimal_list} slot.
+DECIMAL_LIST_SLOT_WORDS = DECIMAL_SLOT_WORDS | _DECIMAL_LIST_SEP
+
+# Words that, when last in a FINAL transcript, indicate the list isn't done.
+# Analogous to _QA_NON_COMMIT_TAIL_WORDS in realtime_loop.
+# 'point'/'dot': separator just spoken, fractional digits expected next.
+# 'negative'/'minus': sign just spoken, number expected next.
+# 'then': separator just spoken, next number expected.
+# 'and': "one hundred and" — mid-number connector, not a list boundary.
+# 'o'/'oh': zero alias mid-fractional-part.
+DECIMAL_LIST_HOLD_TAIL_WORDS = DECIMAL_WORDS | SIGN_WORDS | _DECIMAL_LIST_SEP | _FRAC_ZERO_ALIASES
 
 
 def _parse_below_thousand(tokens: list[str]) -> tuple[int, int]:
@@ -425,6 +455,138 @@ def words_to_decimal(phrase: str) -> float | None:
 
     result = float(f'{int_val}.{frac_digit_str}')
     return -result if negative else result
+
+
+def words_to_decimal_list(phrase: str) -> dict:
+    """Parse a sequence of spoken decimal numbers into a list of floats.
+
+    Boundary rules (applied left to right):
+      - 'then': explicit separator — ends current number, starts next.
+      - Sign word (negative/minus) after at least one number has started:
+        implicit boundary — starts a new number.
+      - 'point'/'dot' when the current segment already contains a decimal
+        separator: implicit boundary — starts a new number (bare decimal).
+      - All other DECIMAL_LIST_SLOT_WORDS extend the current segment.
+      - Words not in DECIMAL_LIST_SLOT_WORDS return error immediately.
+
+    'and' is treated as a pass-through (absorbed like a filler at parse
+    time — consistent with how words_to_int handles "one hundred and forty").
+    It does NOT split a segment.
+
+    Returns a dict with:
+      'values':     list[float]  — parsed numbers so far (may be empty)
+      'complete':   bool         — True if count is even and tail is not a
+                                   hold word (ready to dispatch)
+      'incomplete': bool         — True if count is odd or tail is a hold
+                                   word (caller should accumulate more)
+      'error':      str | None   — set if an unrecognised word was found or
+                                   a segment failed to parse
+
+    Examples:
+        "point two three then one point five"
+            → {'values': [0.23, 1.5], 'complete': True, ...}
+        "negative point four one point five"  (sign boundary)
+            → {'values': [-0.41, 1.5], 'complete': True, ...}
+        "point two three one point"  (trailing hold word)
+            → {'values': [0.23], 'incomplete': True, ...}
+        "point two three then one point five then negative point four"
+            → {'values': [0.23, 1.5, -0.41], 'incomplete': True, ...}  (odd)
+    """
+    def _make(values, *, complete=False, incomplete=False, error=None):
+        return {'values': values, 'complete': complete, 'incomplete': incomplete, 'error': error}
+
+    if not phrase:
+        return _make([], incomplete=True)
+
+    tokens = phrase.lower().split()
+    if not tokens:
+        return _make([], incomplete=True)
+
+    segments = []   # list of token lists, one per number
+    current = []
+
+    def _flush():
+        if current:
+            segments.append(list(current))
+            current.clear()
+
+    # Track whether the current segment has already seen a decimal separator,
+    # so we can detect an implicit boundary when a second 'point'/'dot' arrives.
+    seg_has_sep = False
+
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+
+        if tok in _DECIMAL_LIST_SEP:
+            # Explicit separator — flush current segment
+            _flush()
+            seg_has_sep = False
+            i += 1
+            continue
+
+        if tok in SIGN_WORDS:
+            if current:
+                # Sign after content → implicit boundary
+                _flush()
+                seg_has_sep = False
+            current.append(tok)
+            i += 1
+            continue
+
+        if tok in DECIMAL_WORDS:
+            if seg_has_sep and current:
+                # Second point in same segment → implicit boundary (bare decimal)
+                _flush()
+                seg_has_sep = False
+            current.append(tok)
+            seg_has_sep = True
+            i += 1
+            continue
+
+        if tok in DECIMAL_LIST_SLOT_WORDS:
+            # Normal slot word (number word, o/oh, 'and')
+            current.append(tok)
+            i += 1
+            continue
+
+        # Unrecognised word
+        return _make([], error=f"unrecognised token: '{tok}'")
+
+    # Strip trailing hold-tail tokens from current segment before parsing.
+    # A hold-tail word (sign, point, then, oh, and) at the end of the utterance
+    # means the list is still in progress — it's a pending signal, not a complete
+    # number token. Pop and discard so the segment parses cleanly.
+    tail_is_hold = False
+    while current and current[-1] in DECIMAL_LIST_HOLD_TAIL_WORDS:
+        tail_is_hold = True
+        current.pop()
+
+    _flush()
+
+    # Parse each segment
+    values = []
+    for seg in segments:
+        seg_phrase = ' '.join(seg)
+        val = words_to_decimal(seg_phrase)
+        if val is None:
+            # Segment didn't parse as decimal — try as plain integer (e.g. "five")
+            # so whole-number entries work without requiring "five point zero"
+            val_int = words_to_int(seg_phrase)
+            if val_int is None:
+                return _make(values, error=f"segment did not parse: '{seg_phrase}'")
+            val = float(val_int)
+        values.append(val)
+
+    if tail_is_hold or not values:
+        return _make(values, incomplete=True)
+
+    if len(values) % 2 != 0:
+        # Odd count — more numbers expected
+        return _make(values, incomplete=True)
+
+    return _make(values, complete=True)
 
 
 # ── ordinal support ──────────────────────────────────────────────────────────

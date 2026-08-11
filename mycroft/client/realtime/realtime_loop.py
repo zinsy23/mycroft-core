@@ -1449,7 +1449,29 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             elif is_refinement:
                 LOG.info(f"[RIVA {stream_name}] Refinement: "
                          f"prev='{str(len(prev_transcript))}' new='{str(len(transcript))}' — resetting matcher")
+                # Preserve paths that are mid-slot — their accumulated buffer
+                # represents content that survived prior interim deliveries and
+                # should not be thrown away just because Riva revised a word.
+                # Non-slot paths reset normally; slot paths replay from their
+                # trigger word position so the pattern prefix re-validates.
+                open_slot_paths = [
+                    p for p in matcher.active_paths
+                    if (p._number_slot_name is not None or p._calc_slot_name is not None
+                        or p._decimal_slot_name is not None
+                        or p._decimal_list_slot_name is not None)
+                ]
                 matcher.reset()
+                if open_slot_paths:
+                    # Keep only the fittest open-slot path (highest fitness score)
+                    best = max(open_slot_paths, key=lambda p: p.fitness_score)
+                    matcher.active_paths = [best]
+                    LOG.info(f"[RIVA {stream_name}] Refinement: preserved mid-slot path "
+                             f"{best.path_id} (fitness={best.fitness_score}, "
+                             f"buf_len={len(best._decimal_list_buf or best._number_buf or best._calc_buf or best._decimal_buf)})")
+                if is_final:
+                    self.final_min_replay_pos = 0
+                else:
+                    self.interim_min_replay_pos = 0
             else:
                 LOG.info(f"[RIVA {stream_name}] True segment boundary: "
                          f"prev='{str(len(prev_transcript))}' new='{str(len(transcript))}' — "
@@ -1773,8 +1795,29 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # Number slots stay open during word processing to accumulate greedily;
         # when the FINAL stream ends we know the user has stopped speaking.
         if is_final:
-            for path in list(matcher.active_paths):
+            # If final_matcher has no open-slot paths but interim_matcher does,
+            # the full utterance only lived in INTERIM (Riva emitted a short final
+            # segment while all real content was interim-only). Use interim paths.
+            boundary_matcher = matcher
+            interim_has_open_slots = any(
+                p._number_slot_name is not None or p._calc_slot_name is not None
+                or p._decimal_slot_name is not None or p._decimal_list_slot_name is not None
+                or (p._had_slot and not p._slot_closed_by_word)
+                for p in self.interim_matcher.active_paths
+            )
+            final_has_open_slots = any(
+                p._number_slot_name is not None or p._calc_slot_name is not None
+                or p._decimal_slot_name is not None or p._decimal_list_slot_name is not None
+                or (p._had_slot and not p._slot_closed_by_word)
+                for p in matcher.active_paths
+            )
+            if interim_has_open_slots and not final_has_open_slots:
+                LOG.info("FINAL boundary: no open-slot paths in final_matcher, falling back to interim_matcher")
+                boundary_matcher = self.interim_matcher
+            for path in list(boundary_matcher.active_paths):
                 if (path._number_slot_name is not None or path._calc_slot_name is not None
+                        or path._decimal_slot_name is not None
+                        or path._decimal_list_slot_name is not None
                         or (path._had_slot and not path._slot_closed_by_word)):
                     match = path.check_completion()
                     if match:
