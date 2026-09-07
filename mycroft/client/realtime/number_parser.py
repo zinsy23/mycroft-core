@@ -457,7 +457,22 @@ def words_to_decimal(phrase: str) -> float | None:
     return -result if negative else result
 
 
-def words_to_decimal_list(phrase: str) -> dict:
+def _decimal_frac_digits(segment_tokens: list) -> int:
+    """Count fractional decimal places in a parseable decimal segment.
+
+    Parses the whole segment as a decimal and counts digits after the point.
+    Returns 0 if the segment doesn't parse as a valid decimal yet.
+    """
+    val = words_to_decimal(' '.join(segment_tokens))
+    if val is None:
+        return 0
+    s = f'{val:.10f}'.rstrip('0')
+    if '.' not in s:
+        return 0
+    return len(s.split('.')[1])
+
+
+def words_to_decimal_list(phrase: str, max_fractional_digits: int | None = None) -> dict:
     """Parse a sequence of spoken decimal numbers into a list of floats.
 
     Boundary rules (applied left to right):
@@ -548,11 +563,19 @@ def words_to_decimal_list(phrase: str) -> dict:
         if tok in DECIMAL_LIST_SLOT_WORDS:
             # Normal slot word (number word, o/oh, 'and')
             current.append(tok)
+            if (seg_has_sep and max_fractional_digits is not None
+                    and _decimal_frac_digits(current) >= max_fractional_digits):
+                # Segment already parses as a valid decimal at/over the cap —
+                # flush now so the next word starts a new number.
+                _flush()
+                seg_has_sep = False
             i += 1
             continue
 
-        # Unrecognised word
-        return _make([], error=f"unrecognised token: '{tok}'")
+        # Unrecognised word — not a valid slot word; flush what we have and stop.
+        # try_add_word filters these out in normal flow so this is a safety net.
+        _flush()
+        break
 
     # Strip trailing hold-tail tokens from current segment before parsing.
     # A hold-tail word (sign, point, then, oh, and) at the end of the utterance

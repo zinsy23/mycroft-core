@@ -392,7 +392,9 @@ class MatcherPath:
             # Only close if the buffer currently holds a complete (even-count) list.
             phrase = ' '.join(self._decimal_list_buf)
             closed = False
-            if phrase and words_to_decimal_list(phrase).get('complete'):
+            _dl_cfg = self.calc_entity_configs.get(self._decimal_list_slot_name, {})
+            _dl_cap = _dl_cfg.get('max_fractional_digits', _dl_cfg.get('decimal_places'))
+            if phrase and words_to_decimal_list(phrase, max_fractional_digits=_dl_cap).get('complete'):
                 post_words = self._get_post_slot_words('__decimal_list__:', phrase)
                 if word in post_words:
                     self.matched_words.append(f'__decimal_list__:{phrase}')
@@ -663,7 +665,9 @@ class MatcherPath:
                 matched = matched + [f'__decimal__:{phrase}']
         elif self._decimal_list_slot_name is not None and self._decimal_list_buf:
             phrase = ' '.join(self._decimal_list_buf)
-            result = words_to_decimal_list(phrase)
+            _dl_cfg = self.calc_entity_configs.get(self._decimal_list_slot_name, {})
+            _dl_cap = _dl_cfg.get('max_fractional_digits', _dl_cfg.get('decimal_places'))
+            result = words_to_decimal_list(phrase, max_fractional_digits=_dl_cap)
             if _verbose:
                 LOG.info(f"check_completion decimal_list: buf_len={len(self._decimal_list_buf)} "
                          f"complete={result.get('complete')} values={result.get('values')} "
@@ -728,7 +732,10 @@ class MatcherPath:
                         ok = False
                         break
                     phrase = word[len('__decimal_list__:'):]
-                    result = words_to_decimal_list(phrase)
+                    _sl_name = seq_item['decimal_list_slot']
+                    _sl_cfg = self.calc_entity_configs.get(_sl_name, {})
+                    _sl_cap = _sl_cfg.get('max_fractional_digits', _sl_cfg.get('decimal_places'))
+                    result = words_to_decimal_list(phrase, max_fractional_digits=_sl_cap)
                     if not result.get('complete'):
                         ok = False
                         break

@@ -1870,22 +1870,28 @@ class TestDecimalListAccumulation:
 
 
 class TestDecimalListErrors:
-    """Unrecognised tokens should produce an error, not a crash."""
+    """Unrecognised tokens should not reach the parser — try_add_word filters them.
+    If they do arrive (e.g. direct parser call), parsing stops at the unknown word
+    and returns whatever values were parsed so far as incomplete."""
 
-    def test_unknown_word(self):
+    def test_unknown_word_stops_parsing(self):
+        # Parser never sees unknown words in normal flow (try_add_word filters them),
+        # but if called directly, stops at unknown word and returns prior values
         r = dl('point two hello point five')
-        assert r['error'] is not None
-        assert 'hello' in r['error']
+        assert r['incomplete'] is True
+        assert r['values'] == pytest.approx([0.2])
 
-    def test_operator_word_rejected(self):
-        # 'plus' is not in DECIMAL_LIST_SLOT_WORDS
+    def test_operator_word_stops_parsing(self):
+        # 'plus' is not in slot words — stops parsing, returns prior value as incomplete
         r = dl('one point five plus two point three')
-        assert r['error'] is not None
+        assert r['incomplete'] is True
+        assert r['values'] == pytest.approx([1.5])
 
-    def test_bad_segment_fails_gracefully(self):
-        # 'then' separates but second segment is garbage
+    def test_garbage_after_then_stops_parsing(self):
+        # garbage after 'then' stops parsing at that point
         r = dl('point two then hello')
-        assert r['error'] is not None
+        assert r['incomplete'] is True
+        assert r['values'] == pytest.approx([0.2])
 
 
 class TestDecimalListSlotWords:
@@ -1966,3 +1972,82 @@ class TestDecimalListBoundaryAmbiguity:
         r = dl('point oh two then one point oh five')
         assert r['complete'] is True
         assert r['values'] == pytest.approx([0.02, 1.05])
+
+
+def dlc(phrase, cap):
+    """Shorthand: words_to_decimal_list with max_fractional_digits cap."""
+    return words_to_decimal_list(phrase, max_fractional_digits=cap)
+
+
+class TestDecimalListFractionalCap:
+    """max_fractional_digits splits numbers when fractional digit count is reached."""
+
+    def test_cap2_basic(self):
+        # "point two five one point six" — without cap absorbs into 0.251
+        # with cap=2, closes after 'five' (2 digits) → [0.25, 1.6]
+        r = dlc('point two five one point six', 2)
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([0.25, 1.6])
+
+    def test_cap2_zero_prefix(self):
+        # "zero point eight one zero point two five" → [0.81, 0.25]
+        r = dlc('zero point eight one zero point two five', 2)
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([0.81, 0.25])
+
+    def test_cap2_four_values(self):
+        # realistic dot product input
+        r = dlc('zero point eight one zero point two five one point six negative point two five', 2)
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([0.81, 0.25, 1.6, -0.25])
+
+    def test_cap2_negative_mid_list(self):
+        r = dlc('one point five negative two point three', 2)
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([1.5, -2.3])
+
+    def test_cap2_with_explicit_then(self):
+        # explicit then still works alongside cap
+        r = dlc('point two five then one point six', 2)
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([0.25, 1.6])
+
+    def test_cap2_word_group_fractional(self):
+        # "twenty five" = 25 → 2 digits → auto-close
+        r = dlc('point twenty five one point three', 2)
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([0.25, 1.3])
+
+    def test_cap_none_no_split(self):
+        # no cap → 'one' absorbed into fractional part of first number
+        # second 'point six' becomes a bare decimal 0.6 via implicit boundary
+        r = dlc('point two five one point six', None)
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([0.251, 0.6])
+
+    def test_cap1_splits_after_one_digit(self):
+        # cap=1 flushes after first fractional digit ('two' → 0.2)
+        # remaining 'five point six' parses as 5.6 (integer + decimal)
+        r = dlc('point two five point six', 1)
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([0.2, 5.6])
+
+    def test_cap2_trailing_hold_still_incomplete(self):
+        # even with cap, trailing hold-tail keeps it incomplete
+        r = dlc('point two five one point', 2)
+        assert r['incomplete'] is True
+        assert r['values'] == pytest.approx([0.25, 1.0])
+
+    def test_default_precision_absorbs_extra_digit(self):
+        # Without cap, 'one' after 'point two five' is absorbed into fractional
+        # part → 0.251. This is the real-world problem cap solves.
+        r = dl('point two five one point six')
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([0.251, 0.6])
+
+    def test_cap2_fixes_absorbed_digit(self):
+        # With cap=2 (as configured in matrix skill), same phrase correctly
+        # gives [0.25, 1.6] — 'one' starts the next number's integer part.
+        r = dlc('point two five one point six', 2)
+        assert r['complete'] is True
+        assert r['values'] == pytest.approx([0.25, 1.6])
