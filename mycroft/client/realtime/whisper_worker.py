@@ -30,7 +30,8 @@ def _transcribe(model, audio, language, beam_size):
         language=language,
         beam_size=beam_size,
         condition_on_previous_text=False,
-        vad_filter=False,
+        vad_filter=True,
+        temperature=0.0,
     )
     text = ''.join(seg.text for seg in segments).strip()
     elapsed = time.monotonic() - t0
