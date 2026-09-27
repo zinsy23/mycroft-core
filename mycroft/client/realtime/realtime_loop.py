@@ -66,6 +66,62 @@ MODE_FREE_TEXT = 'free_text'
 MODE_REPEAT = 'repeat'
 MODE_QA = 'qa'
 
+# Attribute names of every MatcherPath slot buffer, in priority order.
+# Used by _slot_buf_len() below to measure how much slot content a path has
+# accumulated regardless of which slot type is open. Kept as a module-level
+# constant (rather than inline in _slot_buf_len) so tests can assert these
+# names actually exist on MatcherPath without duplicating the list — a typo
+# here silently makes getattr() return None and the FINAL-boundary
+# interim/final richer-buffer fallback always sees that slot type as empty.
+SLOT_BUF_ATTRS = ('_decimal_list_buf', '_number_buf', '_calc_buf', '_decimal_buf')
+
+
+def _slot_buf_len(path):
+    """How many words a MatcherPath has accumulated in whichever slot buffer
+    is open. Used at the FINAL boundary to pick the richer of interim_matcher
+    vs final_matcher when both have an open-slot path (see _process_word).
+    """
+    for attr in SLOT_BUF_ATTRS:
+        buf = getattr(path, attr, None)
+        if buf:
+            return len(buf)
+    return 0
+
+
+def _path_has_open_healthy_slot(path):
+    """True if this MatcherPath has an open slot (any type) with a positive
+    local_budget — the per-path health signal that should defer a session
+    kill from global budget exhaustion (see the session-kill check in
+    _process_word).
+    """
+    return path.has_open_slot() and path.local_budget > 0
+
+
+def _matcher_has_open_healthy_slot(matcher):
+    """True if any active path on this matcher has an open, healthy slot."""
+    return any(_path_has_open_healthy_slot(p) for p in matcher.active_paths)
+
+
+def should_kill_session_on_budget(shared_global_budget, mode, interim_matcher, final_matcher):
+    """The session-kill-on-budget-exhaustion decision, as a pure function of
+    session state, so it can be unit-tested directly without instantiating
+    the full RealtimeRecognizerLoop.
+
+    Budget exhaustion ends the session in DETERMINISTIC mode only — in QA
+    mode Riva runs as sentinel and words accumulating should not kill the
+    session. Same exemption when any open slot path (any slot type) on
+    EITHER matcher still has a healthy local_budget: global drain from
+    garbled FINAL-segment filler words should not kill the session while the
+    user is still actively providing slot content. Checking only one matcher
+    is wrong — the FINAL-boundary richer-buffer fallback can correctly
+    select either matcher's path as the live one, so both must be checked.
+    """
+    if shared_global_budget > 0 or mode == MODE_QA:
+        return False
+    has_open_healthy_slot = (_matcher_has_open_healthy_slot(interim_matcher)
+                              or _matcher_has_open_healthy_slot(final_matcher))
+    return not has_open_healthy_slot
+
 
 class RealtimeResponsiveRecognizer(ResponsiveRecognizer):
     """Extends ResponsiveRecognizer to use streaming instead of recording."""
@@ -1407,7 +1463,14 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 self.riva_final_word_count = len(words)
             else:
                 self.riva_interim_word_count = len(words)
-            self._handle_qa_riva_words(new_words, is_final)
+            # Pass the FULL cumulative transcript, not the new_words diff — exit/
+            # interrupt/clear_history detection only looks at the first few words
+            # of the transcript anyway, and using the diff makes detection fragile
+            # to Riva INTERIM revisions (Riva can rewrite/re-emit earlier words as
+            # more audio arrives, which can desync the current_count-based diff and
+            # cause the control word to be skipped on INTERIM, only ever caught by
+            # the non-revising FINAL stream afterward).
+            self._handle_qa_riva_words(words, is_final)
             grace_active = self._qa_tts_grace_until and time.time() < self._qa_tts_grace_until
             if not self._qa_abort and not self._qa_tts_playing and not grace_active:
                 # INTERIM: keep the silence deadline alive while the user is speaking
@@ -1459,12 +1522,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 # should not be thrown away just because Riva revised a word.
                 # Non-slot paths reset normally; slot paths replay from their
                 # trigger word position so the pattern prefix re-validates.
-                open_slot_paths = [
-                    p for p in matcher.active_paths
-                    if (p._number_slot_name is not None or p._calc_slot_name is not None
-                        or p._decimal_slot_name is not None
-                        or p._decimal_list_slot_name is not None)
-                ]
+                open_slot_paths = [p for p in matcher.active_paths if p.has_open_slot()]
                 matcher.reset()
                 if open_slot_paths:
                     # Keep only the fittest open-slot path (highest fitness score)
@@ -1473,7 +1531,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     if self.verbose:
                         LOG.info(f"[RIVA {stream_name}] Refinement: preserved mid-slot path "
                                  f"{best.path_id} (fitness={best.fitness_score}, "
-                                 f"buf_len={len(best._decimal_list_buf or best._number_buf or best._calc_buf or best._decimal_buf)})")
+                                 f"buf_len={_slot_buf_len(best)})")
                 if is_final:
                     self.final_min_replay_pos = 0
                 else:
@@ -1766,10 +1824,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 if self.debug:
                     self.emit('mycroft.debug.riva.matched', {'utterance': utterance})
 
-                # Budget sync
-                self.shared_global_budget = matcher.global_budget
-                if self.verbose:
-                    LOG.debug(f"Global budget synced: {self.shared_global_budget}")
+                # Budget sync happens unconditionally after this loop (see the
+                # end of this method) — no need to duplicate it here.
 
                 # Reset both matchers
                 self.interim_matcher.reset()
@@ -1812,65 +1868,66 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # Number slots stay open during word processing to accumulate greedily;
         # when the FINAL stream ends we know the user has stopped speaking.
         if is_final:
-            # If final_matcher has no open-slot paths but interim_matcher does,
-            # the full utterance only lived in INTERIM (Riva emitted a short final
-            # segment while all real content was interim-only). Use interim paths.
-            boundary_matcher = matcher
-            interim_has_open_slots = any(
-                p._number_slot_name is not None or p._calc_slot_name is not None
-                or p._decimal_slot_name is not None or p._decimal_list_slot_name is not None
-                or (p._had_slot and not p._slot_closed_by_word)
-                for p in self.interim_matcher.active_paths
-            )
-            final_has_open_slots = any(
-                p._number_slot_name is not None or p._calc_slot_name is not None
-                or p._decimal_slot_name is not None or p._decimal_list_slot_name is not None
-                or (p._had_slot and not p._slot_closed_by_word)
-                for p in matcher.active_paths
-            )
-            if interim_has_open_slots and not final_has_open_slots:
-                if self.verbose:
-                    LOG.info("FINAL boundary: no open-slot paths in final_matcher, falling back to interim_matcher")
-                boundary_matcher = self.interim_matcher
-            for path in list(boundary_matcher.active_paths):
-                if (path._number_slot_name is not None or path._calc_slot_name is not None
-                        or path._decimal_slot_name is not None
-                        or path._decimal_list_slot_name is not None
-                        or (path._had_slot and not path._slot_closed_by_word)):
-                    match = path.check_completion()
-                    if match:
-                        utterance = match['utterance']
-                        intent = match['intent']
-                        LOG.info(f"✓ COMMAND MATCHED (FINAL number close): '{utterance}' (intent: {intent})")
-                        if not self._is_duplicate(utterance, now):
-                            self.emit('recognizer_loop:utterance', {
-                                'utterances': [utterance],
-                                'lang': self.lang,
-                                'intent': intent,
-                                'entities': match.get('entities', {}),
-                            })
-                            self.emit('mycroft.realtime.command_matched', {
-                                'utterance': utterance,
-                                'intent': intent,
-                                'stream': 'FINAL'
-                            })
-                            self._record_execution(utterance, now, 'FINAL',
-                                                   utterance.split(), None, intent)
-                            if self.repeat_enabled:
-                                self._open_repeat_window(intent=intent)
-                        self.shared_global_budget = path.local_budget
-                        matcher.global_budget = path.local_budget
-                        self.interim_matcher.reset()
-                        self.final_matcher.reset()
-                        break
+            # Riva often emits a short/garbled FINAL segment while the real
+            # utterance content only ever lived in INTERIM (long utterances,
+            # phonetic fusion on rapid decimals, etc). A FINAL-side slot path
+            # can exist yet be far less complete than the INTERIM one — e.g.
+            # a "dot product" prefix path re-opened by a garbled tail word.
+            # Pick whichever matcher's best open-slot path has accumulated
+            # more slot content (by buffer length), not just "does one exist".
+            def _open_slot_paths(m):
+                return [p for p in m.active_paths if p.needs_final_boundary_close()]
 
-        # Budget sync after processing all words
+            interim_open = _open_slot_paths(self.interim_matcher)
+            final_open = _open_slot_paths(matcher)
+            interim_best_len = max((_slot_buf_len(p) for p in interim_open), default=-1)
+            final_best_len = max((_slot_buf_len(p) for p in final_open), default=-1)
+
+            boundary_open_paths = final_open
+            if interim_open and interim_best_len > final_best_len:
+                if self.verbose:
+                    LOG.info(f"FINAL boundary: interim_matcher has richer open-slot path "
+                             f"(buf_len={interim_best_len} vs final's {final_best_len}), falling back to it")
+                boundary_open_paths = interim_open
+            for path in list(boundary_open_paths):
+                match = path.check_completion()
+                if not match and path._decimal_list_slot_name is not None:
+                    LOG.info(f"FINAL decimal_list check_completion failed — "
+                             f"path.local_budget={path.local_budget} "
+                             f"matcher.global_budget={matcher.global_budget} "
+                             f"shared={self.shared_global_budget} "
+                             f"buf_len={len(path._decimal_list_buf or [])}")
+                if match:
+                    utterance = match['utterance']
+                    intent = match['intent']
+                    LOG.info(f"✓ COMMAND MATCHED (FINAL number close): '{utterance}' (intent: {intent})")
+                    if not self._is_duplicate(utterance, now):
+                        self.emit('recognizer_loop:utterance', {
+                            'utterances': [utterance],
+                            'lang': self.lang,
+                            'intent': intent,
+                            'entities': match.get('entities', {}),
+                        })
+                        self.emit('mycroft.realtime.command_matched', {
+                            'utterance': utterance,
+                            'intent': intent,
+                            'stream': 'FINAL'
+                        })
+                        self._record_execution(utterance, now, 'FINAL',
+                                               utterance.split(), None, intent)
+                        if self.repeat_enabled:
+                            self._open_repeat_window(intent=intent)
+                    matcher.global_budget = path.local_budget
+                    self.interim_matcher.reset()
+                    self.final_matcher.reset()
+                    break
+
+        # Budget sync after processing all words.
         self.shared_global_budget = matcher.global_budget
 
-        # Budget exhaustion ends the session in DETERMINISTIC mode only —
-        # in QA mode Riva runs as sentinel and words accumulating here should
-        # not kill the session.
-        if self.shared_global_budget <= 0 and self.mode != MODE_QA:
+        # See should_kill_session_on_budget() for the full rule and rationale.
+        if should_kill_session_on_budget(self.shared_global_budget, self.mode,
+                                          self.interim_matcher, self.final_matcher):
             LOG.info(f"Global budget exhausted — ending session")
             self.session_active = False
             if self.stt_backend == 'riva' and self.riva_stream_thread:

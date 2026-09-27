@@ -787,6 +787,24 @@ class MatcherPath:
 
         return True
 
+    def has_open_slot(self):
+        """True if this path is currently mid-accumulation in any slot type
+        (number, calc, decimal, decimal_list). Does not consider whether the
+        slot was closed by a post-slot pattern word — use
+        needs_final_boundary_close() for that.
+        """
+        return (self._number_slot_name is not None or self._calc_slot_name is not None
+                or self._decimal_slot_name is not None or self._decimal_list_slot_name is not None)
+
+    def needs_final_boundary_close(self):
+        """True if this path must be deferred to the FINAL stream boundary
+        before it can be checked for completion — either it has a slot
+        currently open (still accumulating), or it had one that was never
+        closed by an explicit post-slot pattern word (only the FINAL stream
+        ending can signal "the user is done" in that case).
+        """
+        return self.has_open_slot() or (self._had_slot and not self._slot_closed_by_word)
+
 
 class StreamingCommandMatcher:
     """Matches commands incrementally as words arrive.
@@ -998,11 +1016,7 @@ class StreamingCommandMatcher:
         # is defined in the locale after the entity, not a filler).
         # Slot not yet closed by a word → FINAL only.
         for path in sorted(self.active_paths, key=lambda p: p.fitness_score, reverse=True):
-            slot_open = (path._number_slot_name is not None or path._calc_slot_name is not None
-                         or path._decimal_slot_name is not None or path._decimal_list_slot_name is not None)
-            if slot_open:
-                continue
-            if path._had_slot and not path._slot_closed_by_word:
+            if path.needs_final_boundary_close():
                 continue
             match = path.check_completion()
             if match:
@@ -1036,11 +1050,14 @@ class StreamingCommandMatcher:
         Returns the first match found, or None.
         """
         for path in list(self.active_paths):
-            if (path._number_slot_name is not None or path._calc_slot_name is not None
-                    or path._decimal_slot_name is not None or path._decimal_list_slot_name is not None
-                    or (path._had_slot and not path._slot_closed_by_word)):
+            if path.needs_final_boundary_close():
                 match = path.check_completion()
                 if match:
+                    # Winner! Sync local budget to global (mirrors add_word's
+                    # winner-sync at line ~1021) — without this, a caller of
+                    # close_slots_and_check() would silently drop the budget
+                    # sync on dispatch.
+                    self.global_budget = path.local_budget
                     self.active_paths = []
                     return match
         return None
