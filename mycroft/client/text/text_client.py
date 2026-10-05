@@ -1353,6 +1353,11 @@ def handle_realtime_qa_debug(event):
     add_log_message(f"[QA] {msg}")
 
 
+def handle_realtime_secondary_stt(event):
+    msg = event.data.get('msg', '')
+    add_log_message(f"[STT] {msg}")
+
+
 def handle_realtime_mode_changed(event):
     mode = event.data.get('mode', '')
     if mode == 'free_text':
@@ -1419,6 +1424,7 @@ def gui_main(stdscr):
     bus.on('mycroft.realtime.qa_reply', handle_realtime_qa_reply)
     bus.on('mycroft.realtime.skill_reply', handle_realtime_skill_reply)
     bus.on('mycroft.realtime.qa_debug', handle_realtime_qa_debug)  # TEMP: remove when QA stable
+    bus.on('mycroft.realtime.secondary_stt', handle_realtime_secondary_stt)
     bus.on('mycroft.realtime.manage', handle_realtime_manage)
 
     add_log_message("Establishing Mycroft Messagebus connection...")

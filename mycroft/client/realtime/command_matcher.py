@@ -261,13 +261,42 @@ class MatcherPath:
         # Greedy decimal list accumulation
         self._decimal_list_buf = []
         self._decimal_list_slot_name = None
+        # Audio buffer index stamped by realtime_loop when a whisper-backed decimal_list slot opens.
+        self.whisper_audio_start_idx = None
         # True if a slot was active at any point — defers completion to FINAL only
         self._had_slot = False
         # True once slot closed via a post-entity pattern word — INTERIM allowed from here
         self._slot_closed_by_word = False
 
+    def active_secondary_stt_slot(self):
+        """Return slot name if a secondary-STT-configured slot is currently open or
+        is the next expected position. Covers both the imminent case (stamp before
+        first slot word) and the already-open case (stamp if somehow missed earlier).
+
+        Uses the *_slot key naming convention — no hardcoded slot type list.
+        Any slot configured with stt_backend in a skill's ENTITY_EXPANSIONS is
+        picked up automatically.
+        """
+        # Already open — check current open slot directly
+        for slot_name in (self._decimal_list_slot_name, self._decimal_slot_name,
+                          self._number_slot_name, self._calc_slot_name):
+            if slot_name and self.calc_entity_configs.get(slot_name, {}).get('stt_backend'):
+                return slot_name
+        # Not open yet — check next position in matching sequences
+        next_pos = len(self.matched_words)
+        for seq_info in self._get_matching_sequences():
+            sequence = seq_info['sequence']
+            if next_pos >= len(sequence):
+                continue
+            item = sequence[next_pos]
+            slot_name = next((v for k, v in item.items() if k.endswith('_slot')), None)
+            if slot_name and self.calc_entity_configs.get(slot_name, {}).get('stt_backend'):
+                return slot_name
+        return None
+
     def clear_slot_state(self):
-        """Reset open slot buffers so replay re-enters slots cleanly."""
+        """Reset open slot word buffers for replay. Does NOT clear whisper_audio_start_idx
+        (audio keeps flowing regardless of word revision; only reset/reset_session clears it)."""
         self._number_slot_name = None
         self._number_buf = []
         self._calc_slot_name = None
@@ -389,12 +418,14 @@ class MatcherPath:
                     self.local_budget += self.filler_config.get('increment_per_word', 1)
                 return True
             # Not a slot word — check if it's a valid post-entity pattern word.
-            # Only close if the buffer currently holds a complete (even-count) list.
+            # Secondary-STT slots skip parity check — Whisper determines completeness.
             phrase = ' '.join(self._decimal_list_buf)
             closed = False
             _dl_cfg = self.calc_entity_configs.get(self._decimal_list_slot_name, {})
             _dl_cap = _dl_cfg.get('max_fractional_digits', _dl_cfg.get('decimal_places'))
-            if phrase and words_to_decimal_list(phrase, max_fractional_digits=_dl_cap).get('complete'):
+            _uses_secondary_stt = bool(_dl_cfg.get('stt_backend'))
+            parity_ok = _uses_secondary_stt or (phrase and words_to_decimal_list(phrase, max_fractional_digits=_dl_cap).get('complete'))
+            if parity_ok:
                 post_words = self._get_post_slot_words('__decimal_list__:', phrase)
                 if word in post_words:
                     self.matched_words.append(f'__decimal_list__:{phrase}')
@@ -402,6 +433,7 @@ class MatcherPath:
                     self._decimal_list_buf = []
                     self._slot_closed_by_word = True
                     closed = True
+                    LOG.info(f"decimal_list slot closed by '{word}' — secondary STT will process")
             if not closed:
                 self.consecutive_fillers += 1
                 if stream_type == "FINAL":
@@ -739,7 +771,11 @@ class MatcherPath:
                     if not result.get('complete'):
                         ok = False
                         break
-                    entities[seq_item['decimal_list_slot']] = result['values']
+                    if _sl_cfg.get('stt_backend') == 'whisper':
+                        # Sentinel replaced by realtime_loop before dispatch.
+                        entities[seq_item['decimal_list_slot']] = ('__PENDING_SECONDARY_STT__', self.whisper_audio_start_idx)
+                    else:
+                        entities[seq_item['decimal_list_slot']] = result['values']
                 elif 'entity' in seq_item:
                     entities[seq_item['entity']] = word
 
@@ -770,6 +806,57 @@ class MatcherPath:
                     'pattern': seq_info['pattern']
                 }
 
+        return None
+
+    def check_completion_secondary_stt(self, stt_values):
+        """Like check_completion but uses externally-supplied secondary-STT values.
+
+        Bypasses words_to_decimal_list parity — the secondary STT result IS the parser
+        output. Forces a __decimal_list__ marker using the raw word buffer so
+        the sequence length matches, then substitutes stt_values directly.
+        Returns same dict shape as check_completion, or None if no sequence matches.
+        """
+        if self._decimal_list_slot_name is None or not self._decimal_list_buf:
+            return None
+        phrase = ' '.join(self._decimal_list_buf)
+        matched = self.matched_words + [f'__decimal_list__:{phrase}']
+
+        for seq_info in self.all_sequences:
+            sequence = seq_info['sequence']
+            if len(sequence) != len(matched):
+                continue
+            ok = True
+            entities = {}
+            for i, word in enumerate(matched):
+                seq_item = sequence[i]
+                if 'word' in seq_item:
+                    if seq_item['word'] != word:
+                        ok = False
+                        break
+                elif 'decimal_list_slot' in seq_item:
+                    entities[seq_item['decimal_list_slot']] = stt_values
+                elif 'number_slot' in seq_item:
+                    ok = False; break
+                elif 'calc_slot' in seq_item:
+                    ok = False; break
+                elif 'decimal_slot' in seq_item:
+                    ok = False; break
+                elif 'entity' in seq_item:
+                    entities[seq_item['entity']] = word
+            if ok:
+                self.matched_words = matched
+                self._decimal_list_slot_name = None
+                self._decimal_list_buf = []
+                clean_words = [
+                    w[len('__decimal_list__:'):] if w.startswith('__decimal_list__:') else w
+                    for w in self.matched_words
+                ]
+                return {
+                    'intent': seq_info['intent'],
+                    'utterance': ' '.join(clean_words),
+                    'entities': entities,
+                    'pattern': seq_info['pattern'],
+                }
         return None
 
     def is_viable(self):
@@ -936,8 +1023,17 @@ class StreamingCommandMatcher:
         if self.verbose:
             LOG.debug(f"  Valid first words count: {len(valid_first_words)}, word '{word}' valid: {word in valid_first_words}")
 
+        # While an exclusive secondary-STT slot is open, suppress new path creation.
+        # Override with exclusive: false in entity config to allow competing paths.
+        _exclusive_slot_open = any(
+            (slot := p.active_secondary_stt_slot()) is not None
+            and p.calc_entity_configs.get(slot, {}).get('exclusive', True)
+            for p in self.active_paths
+            if p.has_open_slot()
+        )
+
         # If word is valid as first word, create new path with its transcript position
-        if word in valid_first_words or '<ENTITY>' in valid_first_words:
+        if not _exclusive_slot_open and (word in valid_first_words or '<ENTITY>' in valid_first_words):
             pos = transcript_position if transcript_position is not None else 0
             new_path = MatcherPath(self.next_path_id, self.global_budget, self.all_sequences, self.filler_config, start_position=pos, calc_entity_configs=self.calc_entity_configs)
             self.next_path_id += 1

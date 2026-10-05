@@ -612,6 +612,38 @@ def words_to_decimal_list(phrase: str, max_fractional_digits: int | None = None)
     return _make(values, complete=True)
 
 
+import re
+
+_WHISPER_NUMBER_RE = re.compile(r'(negative|minus)?\s*(-)?\s*(\d+(?:\.\d+)?)', re.IGNORECASE)
+
+
+def whisper_text_to_decimal_list(text: str) -> dict:
+    """Parse a Whisper batch transcription of a spoken decimal list.
+
+    Unlike words_to_decimal_list, Whisper renders numbers as real digits.
+    Output is typically space-separated (e.g. "0.81 0.25 1.6 negative 0.25")
+    though commas may also appear; the regex collects all matches regardless
+    of separator. Signs spelled out as 'negative'/'minus'; literal '-' also
+    accepted defensively.
+
+    Returns: {'values': list[float], 'complete': bool, 'error': str|None}
+    """
+    if not text or not text.strip():
+        return {'values': [], 'complete': False, 'error': 'empty text'}
+
+    matches = list(_WHISPER_NUMBER_RE.finditer(text))
+    if not matches:
+        return {'values': [], 'complete': False, 'error': 'no numbers found'}
+
+    values = []
+    for m in matches:
+        negative = bool(m.group(1)) or bool(m.group(2))
+        val = float(m.group(3))
+        values.append(-val if negative else val)
+
+    return {'values': values, 'complete': True, 'error': None}
+
+
 # ── ordinal support ──────────────────────────────────────────────────────────
 
 # Irregular ordinals that can't be derived by suffix stripping

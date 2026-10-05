@@ -24,6 +24,7 @@ from mycroft.client.realtime.mic import ResponsiveRecognizer
 from mycroft.client.realtime.command_matcher import StreamingCommandMatcher
 from mycroft.client.realtime.riva_streaming import RivaStreamingThread, RIVA_AVAILABLE
 from mycroft.client.realtime.free_text_stt import load_free_text_stt
+from mycroft.client.realtime.number_parser import whisper_text_to_decimal_list
 from mycroft.client.realtime.pattern_loader import FREE_TEXT_TAG, REPEAT_TAG, MANAGE_TAG, QA_TAG
 from mycroft.configuration import Configuration
 from mycroft.util.log import LOG
@@ -262,7 +263,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
         # Session management
         self.session_timeout = self.realtime_config.get('session_timeout_seconds', 15)
-        self.audio_buffer = deque(maxlen=16000 * 30)  # 30 seconds of float32
+        self.audio_buffer = deque(maxlen=16000 * 120)  # 120 seconds of float32
+        self._audio_sample_count = 0  # monotonic total samples appended (never resets)
         self.session_active = False
         self.last_word_time = None
         self.session_start_time = None          # Wall time when session started
@@ -304,6 +306,9 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.executed_utterances_history = []
         self.dedup_window_seconds = 3.0
         self.dedup_history_size = 5
+        # True from when a secondary-STT slot opens on INTERIM until dispatch+reset complete.
+        # Keeps FINAL blocked even during the ~2s Whisper inference after slot closes.
+        self._secondary_stt_slot_active = False
 
         # Debug mode
         self.debug = self.realtime_config.get('debug', False)
@@ -513,6 +518,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 chunk_float = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
                 for sample in chunk_float:
                     self.audio_buffer.append(sample)
+                self._audio_sample_count += len(chunk_float)
                 self._process_audio_chunk(chunk)
 
         self.session_start_buffer_len = len(self.audio_buffer)
@@ -554,6 +560,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             chunk_float = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
             for sample in chunk_float:
                 self.audio_buffer.append(sample)
+            self._audio_sample_count += len(chunk_float)
 
             if stream:
                 stream.stream_chunk(chunk)
@@ -680,12 +687,16 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                         'action': 'stt:load', 'target': 'stt',
                         'stt_state': 'loading', 'stt_label': label
                     })
+                    self.emit('speak', {'utterance': f'Loading {label}'})
+                    os.system(rf"/home/joseph/.local/bin/polybar-flash dunst 00AA00 &")
                     self.free_text_stt.load(self._stt_sample_rate)
+                    success = self.free_text_stt.is_loaded
                     self.emit('mycroft.realtime.manage', {
                         'action': 'stt:load', 'target': 'stt',
-                        'stt_state': 'loaded' if self.free_text_stt.is_loaded else 'failed',
+                        'stt_state': 'loaded' if success else 'failed',
                         'stt_label': label
                     })
+                    self.emit('speak', {'utterance': f'{label} {"loaded" if success else "failed to load"}'})
             elif target == 'unload':
                 self.emit('mycroft.realtime.manage', {
                     'action': 'stt:unload', 'target': 'stt',
@@ -696,6 +707,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     'action': 'stt:unload', 'target': 'stt',
                     'stt_state': 'unloaded', 'stt_label': label
                 })
+                os.system(rf"/home/joseph/.local/bin/polybar-flash dunst CC2200 &")
+                self.emit('speak', {'utterance': f'{label} unloaded'})
             return
 
         # ── Enable/disable command groups ─────────────────────────────────────
@@ -898,6 +911,85 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # Reset matchers
         self.interim_matcher.reset()
         self.final_matcher.reset()
+
+    def _secondary_stt_decimal_list_check(self, path):
+        """Run secondary STT on the audio span for a secondary-STT-backed decimal_list slot.
+
+        Returns a match dict (from check_completion_secondary_stt) if the backend parsed
+        a complete result, or None if audio is too short or the parse is
+        incomplete — caller leaves the slot open and retries on the next FINAL.
+        """
+        slot_name = path.active_secondary_stt_slot() or path._decimal_list_slot_name
+        stt_backend = path.calc_entity_configs.get(slot_name, {}).get('stt_backend', 'whisper') if slot_name else 'whisper'
+        start_count = path.whisper_audio_start_idx
+        sample_rate = self.realtime_config.get('sample_rate', 16000)
+        buf = list(self.audio_buffer)
+        if start_count is not None:
+            samples_since_stamp = self._audio_sample_count - start_count
+            start_in_buf = len(buf) - samples_since_stamp
+            audio = np.array(buf[max(0, start_in_buf):], dtype=np.float32)
+        else:
+            audio = np.array(buf, dtype=np.float32)
+        if len(audio) < int(sample_rate * 0.3):
+            LOG.debug(f"secondary_stt decimal_list: audio too short ({len(audio)} samples) — waiting")
+            return None
+        dur = len(audio) / sample_rate
+        LOG.info(f"secondary_stt decimal_list: running {stt_backend} on {dur:.1f}s")
+        self.emit('mycroft.realtime.secondary_stt', {'msg': 'Recording stopped'})
+        self.emit('mycroft.realtime.secondary_stt', {'msg': f'Transcribing {dur:.1f}s…'})
+        text = self.free_text_stt.transcribe(audio, sample_rate) if self.free_text_stt else ''
+        if stt_backend == 'whisper':
+            result = whisper_text_to_decimal_list(text)
+        else:
+            result = whisper_text_to_decimal_list(text)  # fallback: only whisper supported currently
+        if not result.get('complete'):
+            LOG.debug(f"secondary_stt decimal_list: incomplete ('{text}') — waiting for more")
+            return None
+        LOG.info(f"secondary_stt decimal_list: '{text}' -> {result['values']}")
+        return path.check_completion_secondary_stt(result['values'])
+
+    def _resolve_pending_secondary_stt_entities(self, entities):
+        """Fallback resolver for any __PENDING_SECONDARY_STT__ sentinels not already resolved inline."""
+        for slot_name, value in list(entities.items()):
+            if not (isinstance(value, tuple) and len(value) == 2
+                    and value[0] == '__PENDING_SECONDARY_STT__'):
+                continue
+
+            start_count = value[1]
+            if start_count is None or not self.free_text_stt:
+                LOG.warning(f"Whisper decimal_list slot '{slot_name}' has no audio "
+                            f"start marker or no free_text_stt available — dropping")
+                entities[slot_name] = []
+                continue
+
+            sample_rate = self.realtime_config.get('sample_rate', 16000)
+            buf = list(self.audio_buffer)
+            samples_since_stamp = self._audio_sample_count - start_count
+            start_in_buf = len(buf) - samples_since_stamp
+            audio = np.array(buf[max(0, start_in_buf):], dtype=np.float32)
+
+            if len(audio) < int(sample_rate * 0.3):
+                LOG.warning(f"Whisper decimal_list slot '{slot_name}' audio too short "
+                            f"({len(audio)} samples) — dropping")
+                entities[slot_name] = []
+                continue
+
+            dur = len(audio) / sample_rate
+            LOG.info(f"🎵 Running Whisper on {dur:.1f}s of decimal_list audio for slot '{slot_name}'")
+            self.emit('mycroft.realtime.secondary_stt', {'msg': 'Recording stopped'})
+            self.emit('mycroft.realtime.secondary_stt', {'msg': f'Transcribing {dur:.1f}s…'})
+            text = self.free_text_stt.transcribe(audio, sample_rate)
+            result = whisper_text_to_decimal_list(text)
+            if not result.get('complete'):
+                LOG.warning(f"Whisper decimal_list parse failed for slot '{slot_name}': "
+                            f"'{text}' — error: {result.get('error')}")
+                self.emit('mycroft.realtime.secondary_stt', {'msg': f'Parse failed: {text!r}'})
+                entities[slot_name] = []
+                continue
+
+            LOG.info(f"Whisper decimal_list slot '{slot_name}': '{text}' -> {result['values']}")
+            self.emit('mycroft.realtime.secondary_stt', {'msg': f'Got {len(result["values"])} numbers'})
+            entities[slot_name] = result['values']
 
     # ── QA mode ───────────────────────────────────────────────────────────────
 
@@ -1522,7 +1614,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 # should not be thrown away just because Riva revised a word.
                 # Non-slot paths reset normally; slot paths replay from their
                 # trigger word position so the pattern prefix re-validates.
-                open_slot_paths = [p for p in matcher.active_paths if p.has_open_slot()]
+                open_slot_paths = [p for p in matcher.active_paths
+                                   if p.has_open_slot() or p._slot_closed_by_word]
                 matcher.reset()
                 if open_slot_paths:
                     # Keep only the fittest open-slot path (highest fitness score)
@@ -1693,14 +1786,43 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                               else 'mycroft.debug.riva.partial')
                 self.emit(event_name, {'utterance': word})
 
-            match, word_accepted = matcher.add_word(word, stream_type=stream_name,
-                                                    transcript_position=current_count - 1)
+            # While a secondary-STT slot is active (open through dispatch+reset),
+            # Whisper owns that audio — keep FINAL out entirely.
+            if is_final and self._secondary_stt_slot_active:
+                match, word_accepted = None, False
+            else:
+                match, word_accepted = matcher.add_word(word, stream_type=stream_name,
+                                                        transcript_position=current_count - 1)
 
             # Only update last_word_time when the word was genuinely accepted by a
             # matcher path — hallucinated garbage words that no path accepts should
             # not extend the session timeout.
             if word_accepted:
                 self.last_word_time = now
+
+            # Stamp audio start the moment a secondary-STT slot is imminent or open.
+            # Use the earliest existing stamp across all paths so replay-created paths
+            # inherit the original timing rather than being stamped at replay time.
+            all_paths = list(self.interim_matcher.active_paths) + list(self.final_matcher.active_paths)
+            existing_stamp = min(
+                (p.whisper_audio_start_idx for p in all_paths if p.whisper_audio_start_idx is not None),
+                default=None
+            )
+            stamp_value = existing_stamp if existing_stamp is not None else self._audio_sample_count
+            first_stamp = existing_stamp is None
+            spawned = False
+            for path in all_paths:
+                if path.whisper_audio_start_idx is None and path.active_secondary_stt_slot():
+                    path.whisper_audio_start_idx = stamp_value
+                    if not spawned and first_stamp:
+                        self._secondary_stt_slot_active = True
+                        self.emit('mycroft.realtime.secondary_stt', {'msg': 'Recording started'})
+                        snd = resolve_resource_file('snd/start_listening.wav')
+                        if snd:
+                            subprocess.Popen(['paplay', snd])
+                        if self.free_text_stt and hasattr(self.free_text_stt, 'spawn'):
+                            self.free_text_stt.spawn(self._stt_sample_rate)
+                        spawned = True
 
             if match:
                 utterance = match['utterance']
@@ -1807,13 +1929,32 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 if self._is_duplicate(utterance, now):
                     LOG.info(f"⏭️  Skipping duplicate: '{str(len(utterance))}'")
                     continue
+                # Secondary-STT intents: dedup on intent name, not utterance text,
+                # because Riva revisions produce different utterance strings for the
+                # same command and text-based dedup misses the re-dispatch.
+                has_pending_stt = any(
+                    isinstance(v, tuple) and len(v) == 2 and v[0] == '__PENDING_SECONDARY_STT__'
+                    for v in match.get('entities', {}).values()
+                )
+                if has_pending_stt and self._is_duplicate(intent, now):
+                    LOG.info(f"⏭️  Skipping secondary-STT re-dispatch for intent '{intent}'")
+                    continue
 
                 # ── Dispatch ──────────────────────────────────────────────────
+                entities = match.get('entities', {})
+                has_pending_stt = any(
+                    isinstance(v, tuple) and len(v) == 2 and v[0] == '__PENDING_SECONDARY_STT__'
+                    for v in entities.values()
+                )
+                if has_pending_stt and not is_final:
+                    # Record intent name as dedup key so INTERIM revisions can't re-dispatch
+                    self._record_execution(intent, now, stream_name)
+                self._resolve_pending_secondary_stt_entities(entities)
                 self.emit('recognizer_loop:utterance', {
                     'utterances': [utterance],
                     'lang': self.lang,
                     'intent': intent,
-                    'entities': match.get('entities', {}),
+                    'entities': entities,
                 })
                 self.emit('mycroft.realtime.command_matched', {
                     'utterance': utterance,
@@ -1830,6 +1971,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 # Reset both matchers
                 self.interim_matcher.reset()
                 self.final_matcher.reset()
+                self._secondary_stt_slot_active = False
 
                 # Record execution
                 matched_words = utterance.split()
@@ -1890,23 +2032,25 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                              f"(buf_len={interim_best_len} vs final's {final_best_len}), falling back to it")
                 boundary_open_paths = interim_open
             for path in list(boundary_open_paths):
-                match = path.check_completion()
-                if not match and path._decimal_list_slot_name is not None:
-                    LOG.info(f"FINAL decimal_list check_completion failed — "
-                             f"path.local_budget={path.local_budget} "
-                             f"matcher.global_budget={matcher.global_budget} "
-                             f"shared={self.shared_global_budget} "
-                             f"buf_len={len(path._decimal_list_buf or [])}")
+                if path.active_secondary_stt_slot() and path._decimal_list_slot_name is not None:
+                    continue  # secondary-STT slots close via terminal word on INTERIM only
+                else:
+                    match = path.check_completion()
+                    if not match and path._decimal_list_slot_name is not None:
+                        LOG.info(f"FINAL decimal_list check_completion failed — "
+                                 f"buf_len={len(path._decimal_list_buf or [])}")
                 if match:
                     utterance = match['utterance']
                     intent = match['intent']
                     LOG.info(f"✓ COMMAND MATCHED (FINAL number close): '{utterance}' (intent: {intent})")
                     if not self._is_duplicate(utterance, now):
+                        entities = match.get('entities', {})
+                        self._resolve_pending_secondary_stt_entities(entities)
                         self.emit('recognizer_loop:utterance', {
                             'utterances': [utterance],
                             'lang': self.lang,
                             'intent': intent,
-                            'entities': match.get('entities', {}),
+                            'entities': entities,
                         })
                         self.emit('mycroft.realtime.command_matched', {
                             'utterance': utterance,

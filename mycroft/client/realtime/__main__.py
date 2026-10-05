@@ -274,6 +274,10 @@ def handle_realtime_manage(event):
     _emit_async('mycroft.realtime.manage', event)
 
 
+def handle_realtime_secondary_stt(event):
+    _emit_async('mycroft.realtime.secondary_stt', event)
+
+
 def connect_loop_events(loop):
     loop.on('recognizer_loop:utterance', handle_utterance)
     loop.on('recognizer_loop:speech.recognition.unknown', handle_unknown)
@@ -292,6 +296,7 @@ def connect_loop_events(loop):
     loop.on('mycroft.realtime.command_matched', handle_realtime_command_matched)
     loop.on('mycroft.realtime.mode_changed', handle_realtime_mode_changed)
     loop.on('mycroft.realtime.manage', handle_realtime_manage)
+    loop.on('mycroft.realtime.secondary_stt', handle_realtime_secondary_stt)
 
 
 def handle_intents_ready(event):
