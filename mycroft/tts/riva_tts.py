@@ -1,4 +1,3 @@
-import re
 import wave
 import grpc
 import riva.client
@@ -8,78 +7,50 @@ import riva.client.proto.riva_audio_pb2 as raudio
 
 from .tts import TTS, TTSValidator
 from .remote_tts import RemoteTTSException
-
-# Conservative character limit per chunk — stays well under the 400-token
-# preprocessor limit (average English word ~5 tokens including phonemes).
-_CHUNK_CHAR_LIMIT = 200
-
-# Split priority: sentence endings first, then clauses, then words.
-_SENTENCE_RE = re.compile(r'(?<=[.!?])\s+')
-_CLAUSE_RE = re.compile(r'(?<=[,;:])\s+')
-
-
-def split_for_tts(text, limit=_CHUNK_CHAR_LIMIT):
-    """Split text into chunks that fit within RIVA's token limit.
-
-    Splits on sentence boundaries first, then clause boundaries, then
-    words as a last resort. Callers are agnostic to this happening.
-    """
-    if len(text) <= limit:
-        return [text]
-
-    chunks = []
-    for sentence in _SENTENCE_RE.split(text):
-        if len(sentence) <= limit:
-            chunks.append(sentence)
-        else:
-            for clause in _CLAUSE_RE.split(sentence):
-                if len(clause) <= limit:
-                    chunks.append(clause)
-                else:
-                    # Fall back to word-boundary splitting
-                    words = clause.split()
-                    current = ''
-                    for word in words:
-                        candidate = (current + ' ' + word).strip()
-                        if len(candidate) <= limit:
-                            current = candidate
-                        else:
-                            if current:
-                                chunks.append(current)
-                            current = word
-                    if current:
-                        chunks.append(current)
-    return [c for c in chunks if c.strip()]
+from .token_estimator import TokenEstimator
 
 
 class RivaSpeechSynthesisService:
-    """Drop-in wrapper around riva.client.SpeechSynthesisService that
-    transparently splits text and retries when the model's token limit
-    is exceeded. Models that don't have this constraint are unaffected —
-    the split only triggers on the specific RIVA sequence-length error."""
+    """Drop-in wrapper around riva.client.SpeechSynthesisService.
+
+    Pre-splits text using a calibrated token estimator before sending to
+    Riva, avoiding token-limit errors entirely. Falls back to error-driven
+    splitting if no calibration file exists for the voice.
+
+    Run scripts/calibrate_tts_tokens.py once per voice to generate the
+    calibration file (~/.config/mycroft/tts_token_maps/<voice>.json).
+    """
 
     _SEQ_LEN_ERR = "longer than maximum sequence length"
 
-    def __init__(self, auth):
+    def __init__(self, auth, voice_name=None):
         self._service = riva.client.SpeechSynthesisService(auth)
+        self._estimator = TokenEstimator.load(voice_name) if voice_name else TokenEstimator()
 
     def synthesize(self, text, **kwargs):
-        try:
-            return self._service.synthesize(text, **kwargs)
-        except grpc.RpcError as e:
-            if self._SEQ_LEN_ERR not in e.details():
-                raise
-        # Token limit hit — split and merge
-        chunks = split_for_tts(text)
+        chunks = self._estimator.split_to_fit(text)
+        if len(chunks) == 1:
+            # Common case: fits in one chunk — try directly, catch as safety net
+            try:
+                return self._service.synthesize(text, **kwargs)
+            except grpc.RpcError as e:
+                if self._SEQ_LEN_ERR not in e.details():
+                    raise
+                chunks = self._estimator.split_to_fit(text, limit=self._estimator._limit // 2)
         audio = b''
         for chunk in chunks:
-            resp = self._service.synthesize(chunk, **kwargs)
+            try:
+                resp = self._service.synthesize(chunk, **kwargs)
+            except grpc.RpcError as e:
+                if self._SEQ_LEN_ERR not in e.details():
+                    raise
+                # Estimator undershot — halve limit and re-split this chunk
+                for subchunk in self._estimator.split_to_fit(chunk, limit=self._estimator._limit // 2):
+                    resp = self._service.synthesize(subchunk, **kwargs)
+                    audio += resp.audio
+                continue
             audio += resp.audio
-        class _Resp:
-            pass
-        r = _Resp()
-        r.audio = audio
-        return r
+        return type('_Resp', (), {'audio': audio})()
 
 
 class RivaTTS(TTS):
@@ -93,19 +64,15 @@ class RivaTTS(TTS):
     def get_tts(self, sentence, wav_file):
         try:
             auth = riva.client.Auth(uri=self.server_uri)
-            tts_service = riva.client.SpeechSynthesisService(auth)
-
-            chunks = split_for_tts(sentence)
-            audio_data = b''
-            for chunk in chunks:
-                resp = tts_service.synthesize(
-                    chunk,
-                    voice_name=self.voice,
-                    language_code='en-US',
-                    encoding=raudio.AudioEncoding.LINEAR_PCM,
-                    sample_rate_hz=self.sample_rate
-                )
-                audio_data += resp.audio
+            tts_service = RivaSpeechSynthesisService(auth, voice_name=self.voice)
+            resp = tts_service.synthesize(
+                sentence,
+                voice_name=self.voice,
+                language_code='en-US',
+                encoding=raudio.AudioEncoding.LINEAR_PCM,
+                sample_rate_hz=self.sample_rate,
+            )
+            audio_data = resp.audio
         except grpc.RpcError as e:
             raise RemoteTTSException(
                 f'Cannot reach RIVA TTS at {self.server_uri}: {e}'
