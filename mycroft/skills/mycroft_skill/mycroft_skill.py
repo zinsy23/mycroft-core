@@ -1010,6 +1010,11 @@ class MycroftSkill:
         if (isinstance(intent_parser, str) and
                 intent_parser.endswith('.intent')):
             return self.register_intent_file(intent_parser, handler)
+        elif isinstance(intent_parser, str) and ':__group__:' in intent_parser:
+            # Realtime dynamic group intent — dispatched as a bus message by the
+            # realtime service when the group is enabled and a pattern matches.
+            # Register directly on the bus; no Padatious involvement needed.
+            return self.add_event(intent_parser, handler)
         elif not isinstance(intent_parser, Intent):
             raise ValueError('"' + str(intent_parser) + '" is not an Intent')
 

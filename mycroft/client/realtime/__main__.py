@@ -305,6 +305,7 @@ def handle_intents_ready(event):
         load_entity_expansions, load_skill_config, expand_pattern_entities,
         _split_free_text_pattern, _split_qa_pattern, load_quantifier_patterns,
         build_management_patterns, build_audio_wake_patterns,
+        compile_dynamic_patterns,
         FREE_TEXT_TAG, REPEAT_TAG, QA_TAG
     )
     from mycroft.configuration import Configuration
@@ -363,6 +364,20 @@ def handle_intents_ready(event):
                 for alias in aliases:
                     loop._utterance_alias_map[alias] = canonical
                     LOG.info(f"Word alias registered: '{alias}' → '{canonical}'")
+
+            # Load dynamic pattern groups declared in SKILL_CONFIG.pattern_groups.
+            # These are registered as disabled sub-groups; the skill enables them
+            # at runtime via the realtime:skill_patterns bus message.
+            # Use skill directory name directly — works regardless of command_groups.
+            skill_dir_name = os.path.basename(skill_path)
+            for group_name, group_patterns in skill_cfg.get('pattern_groups', {}).items():
+                compiled = compile_dynamic_patterns(
+                    skill_dir_name, group_name, group_patterns,
+                    entity_expansions, loop
+                )
+                if compiled:
+                    loop.register_skill_subgroup(skill_dir_name, group_name, compiled, enabled=False)
+                    LOG.info(f"Dynamic pattern group registered (disabled): {skill_dir_name}/{group_name} ({len(compiled)} patterns)")
 
             with open(file_path, 'r') as f:
                 pattern_lines = [line.strip() for line in f.readlines() if line.strip()]
@@ -441,8 +456,8 @@ def handle_intents_ready(event):
         skill_prefix = _get_skill_prefix(intent_name)
         if skill_prefix:
             if skill_prefix not in loop.skill_pattern_groups:
-                loop.skill_pattern_groups[skill_prefix] = []
-            loop.skill_pattern_groups[skill_prefix].append(pattern)
+                loop.skill_pattern_groups[skill_prefix] = {None: []}
+            loop.skill_pattern_groups[skill_prefix][None].append(pattern)
         else:
             loop.protected_patterns.append(pattern)
 
@@ -459,6 +474,80 @@ def handle_intents_ready(event):
 def _handle_skills_trained(_event):
     if not _intents_received:
         bus.emit(Message('realtime:subscribe_intents'))
+
+
+def handle_skill_patterns(event):
+    """Handle runtime pattern group changes emitted by skills.
+
+    Skills emit 'realtime:skill_patterns' to dynamically enable/disable named
+    pattern sub-groups, or to register entirely new patterns at runtime.
+
+    Message data schema:
+        action      : 'enable' | 'disable' | 'register' | 'unregister'
+        skill_prefix: skill directory name, e.g. 'matrix-calculator-skill'
+        group       : sub-group name, e.g. 'matrix_session'
+        patterns    : list of raw pattern strings (for 'register' only)
+    """
+    from mycroft.client.realtime.pattern_loader import (
+        compile_dynamic_patterns, load_entity_expansions,
+    )
+    if not loop:
+        return
+    data = event.data
+    action = data.get('action')
+    skill_prefix = data.get('skill_prefix')
+    group = data.get('group')
+
+    if not action or not skill_prefix or not group:
+        LOG.warning(f"[SKILL_PATTERNS] Malformed message: {data}")
+        return
+
+    if action == 'enable':
+        loop.enable_skill_subgroup(skill_prefix, group)
+
+    elif action == 'disable':
+        loop.disable_skill_subgroup(skill_prefix, group)
+
+    elif action == 'register':
+        raw_patterns = data.get('patterns', [])
+        if not raw_patterns:
+            LOG.warning(f"[SKILL_PATTERNS] register with no patterns: {data}")
+            return
+        # Try to load entity_expansions from the skill path for expansion
+        skill_path = _find_skill_path(skill_prefix)
+        entity_expansions = load_entity_expansions(skill_path) if skill_path else {}
+        compiled = compile_dynamic_patterns(
+            skill_prefix, group, raw_patterns, entity_expansions, loop
+        )
+        enabled = data.get('enabled', False)
+        loop.register_skill_subgroup(skill_prefix, group, compiled, enabled=enabled)
+
+    elif action == 'unregister':
+        if skill_prefix in loop.skill_pattern_groups:
+            loop.skill_pattern_groups[skill_prefix].pop(group, None)
+            loop.disabled_subgroups.discard((skill_prefix, group))
+            loop._rebuild_shared_patterns()
+            LOG.info(f"[SKILL_PATTERNS] Unregistered sub-group '{skill_prefix}/{group}'")
+
+    else:
+        LOG.warning(f"[SKILL_PATTERNS] Unknown action '{action}'")
+
+
+def _find_skill_path(skill_prefix):
+    """Find a skill's directory from its prefix name."""
+    import os
+    skills_dir = os.environ.get('SKILLS_DIR', '/opt/mycroft/skills')
+    candidate = os.path.join(skills_dir, skill_prefix)
+    if os.path.isdir(candidate):
+        return candidate
+    # Fallback: search for a directory whose name starts with the prefix
+    try:
+        for name in os.listdir(skills_dir):
+            if name.startswith(skill_prefix):
+                return os.path.join(skills_dir, name)
+    except OSError:
+        pass
+    return None
 
 
 def connect_bus_events(bus):
@@ -482,6 +571,7 @@ def connect_bus_events(bus):
     # Only fires if we haven't received patterns yet, so normal retrains/reloads
     # (which also emit mycroft.skills.trained) don't trigger a duplicate send.
     bus.on('mycroft.skills.trained', _handle_skills_trained)
+    bus.on('realtime:skill_patterns', handle_skill_patterns)
 
 
 def main(ready_hook=on_ready, error_hook=on_error, stopping_hook=on_stopping,

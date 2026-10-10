@@ -326,9 +326,12 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
         # Command group management
         self.command_groups = self.realtime_config.get('command_groups', [])
-        self.skill_pattern_groups = {}   # skill_prefix → list of CommandPattern objects
+        # skill_prefix → {None: [base patterns], 'group_name': [dynamic patterns]}
+        # None key holds patterns loaded at startup; named keys are dynamic sub-groups.
+        self.skill_pattern_groups = {}
         self.protected_patterns = []     # always-active: management commands
         self.manually_disabled = set()   # skill_prefixes manually disabled
+        self.disabled_subgroups = set()  # (skill_prefix, group_name) pairs disabled by default
         self.global_mute = False         # True when "disable commands" fired
         self._repeat_exempt_prefixes = set()  # skill prefixes that never open repeat window
         self._utterance_alias_map = {}        # word → canonical, merged across all skills
@@ -639,17 +642,65 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         Called after any enable/disable command. shared_patterns is the same
         list object both matchers reference, so clearing+extending it is enough.
         all_sequences is then rebuilt on both matchers to stay in sync.
+
+        skill_pattern_groups shape: {prefix: {None: [base], 'group': [dynamic]}}
+        disabled_subgroups: set of (prefix, group_name) pairs that are inactive.
+        manually_disabled: set of prefixes whose entire skill is disabled.
         """
         self.shared_patterns.clear()
         self.shared_patterns.extend(self.protected_patterns)
         if not self.global_mute:
-            for prefix, patterns in self.skill_pattern_groups.items():
-                if prefix not in self.manually_disabled:
-                    self.shared_patterns.extend(patterns)
+            for prefix, subgroups in self.skill_pattern_groups.items():
+                if prefix in self.manually_disabled:
+                    continue
+                for group_name, patterns in subgroups.items():
+                    if group_name is None or (prefix, group_name) not in self.disabled_subgroups:
+                        self.shared_patterns.extend(patterns)
         self.interim_matcher._rebuild_all_sequences()
         self.final_matcher._rebuild_all_sequences()
+        active_subgroups = [
+            f"{p}/{g}" for p, sg in self.skill_pattern_groups.items()
+            for g in sg if g is not None and (p, g) not in self.disabled_subgroups
+        ]
         LOG.info(f"[MANAGE] Rebuilt shared_patterns: {len(self.shared_patterns)} patterns "
-                 f"(mute={self.global_mute}, disabled={self.manually_disabled})")
+                 f"(mute={self.global_mute}, disabled={self.manually_disabled}, "
+                 f"active_subgroups={active_subgroups})")
+
+    def register_skill_subgroup(self, skill_prefix, group_name, patterns, enabled=False):
+        """Register a named dynamic sub-group of patterns for a skill.
+
+        Patterns are compiled CommandPattern objects (already registered on matchers
+        via register_intent). This just stores them in the sub-group dict and
+        optionally enables them immediately.
+
+        Args:
+            skill_prefix: e.g. 'matrix-calculator-skill'
+            group_name: e.g. 'matrix_session' — must not be None
+            patterns: list of CommandPattern objects
+            enabled: if False (default), sub-group starts disabled
+        """
+        if skill_prefix not in self.skill_pattern_groups:
+            self.skill_pattern_groups[skill_prefix] = {None: []}
+        self.skill_pattern_groups[skill_prefix][group_name] = patterns
+        key = (skill_prefix, group_name)
+        if enabled:
+            self.disabled_subgroups.discard(key)
+        else:
+            self.disabled_subgroups.add(key)
+        LOG.info(f"[MANAGE] Registered sub-group '{skill_prefix}/{group_name}': "
+                 f"{len(patterns)} patterns, enabled={enabled}")
+
+    def enable_skill_subgroup(self, skill_prefix, group_name):
+        """Enable a previously registered dynamic sub-group."""
+        self.disabled_subgroups.discard((skill_prefix, group_name))
+        self._rebuild_shared_patterns()
+        LOG.info(f"[MANAGE] Enabled sub-group '{skill_prefix}/{group_name}'")
+
+    def disable_skill_subgroup(self, skill_prefix, group_name):
+        """Disable a dynamic sub-group without unregistering it."""
+        self.disabled_subgroups.add((skill_prefix, group_name))
+        self._rebuild_shared_patterns()
+        LOG.info(f"[MANAGE] Disabled sub-group '{skill_prefix}/{group_name}'")
 
     def _handle_manage_command(self, action, target):
         """Handle an enable/disable or STT load/unload voice command.

@@ -15,7 +15,8 @@ Run: .venv/bin/python -m pytest mycroft/client/realtime/tests/test_command_match
 """
 
 import pytest
-from mycroft.client.realtime.command_matcher import StreamingCommandMatcher
+import unittest
+from mycroft.client.realtime.command_matcher import StreamingCommandMatcher, _resolve_entity_type
 
 
 FILLER_CONFIG = {'base_max': 8, 'increment_per_word': 1}
@@ -148,3 +149,40 @@ class TestDecimalListEntityKeys:
         r = feed(m, 'dot product point two then point five'.split())
         assert r is not None
         assert r['intent'] == 'test:dot_product'
+
+
+class TestResolveEntityType(unittest.TestCase):
+    """Tests for _resolve_entity_type — base type resolution and extension matching."""
+
+    def test_exact_base_matches(self):
+        self.assertEqual(_resolve_entity_type('number'), 'number')
+        self.assertEqual(_resolve_entity_type('signed_number'), 'signed_number')
+        self.assertEqual(_resolve_entity_type('number_calc'), 'number_calc')
+        self.assertEqual(_resolve_entity_type('number_decimal'), 'number_decimal')
+        self.assertEqual(_resolve_entity_type('number_decimal_list'), 'number_decimal_list')
+
+    def test_named_extensions(self):
+        self.assertEqual(_resolve_entity_type('number_rows'), 'number')
+        self.assertEqual(_resolve_entity_type('number_cols'), 'number')
+        self.assertEqual(_resolve_entity_type('number_index'), 'number')
+        self.assertEqual(_resolve_entity_type('number_decimal_a'), 'number_decimal')
+        self.assertEqual(_resolve_entity_type('number_decimal_list_b'), 'number_decimal_list')
+
+    def test_plural_and_suffix_variations(self):
+        self.assertEqual(_resolve_entity_type('numbers'), 'number')
+        self.assertEqual(_resolve_entity_type('number1'), 'number')
+
+    def test_longest_base_wins(self):
+        # 'number_decimal_list_x' should resolve to 'number_decimal_list', not 'number_decimal' or 'number'
+        self.assertEqual(_resolve_entity_type('number_decimal_list_x'), 'number_decimal_list')
+        # 'number_decimal_x' should resolve to 'number_decimal', not 'number'
+        self.assertEqual(_resolve_entity_type('number_decimal_x'), 'number_decimal')
+
+    def test_unrecognized_returns_none(self):
+        self.assertIsNone(_resolve_entity_type('color'))
+        self.assertIsNone(_resolve_entity_type('unknown_entity'))
+        self.assertIsNone(_resolve_entity_type(''))
+
+    def test_extension_of_extension_resolves_to_base(self):
+        # 'number_rows_extra' still resolves to 'number', not to 'number_rows'
+        self.assertEqual(_resolve_entity_type('number_rows_extra'), 'number')

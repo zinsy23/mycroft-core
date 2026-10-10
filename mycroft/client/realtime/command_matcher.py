@@ -30,6 +30,36 @@ _DECIMAL_ENTITY_NAMES = frozenset({'number_decimal'})
 # Entity names that get greedy decimal list capture
 _DECIMAL_LIST_ENTITY_NAMES = frozenset({'number_decimal_list'})
 
+# Ordered longest-first so 'number_decimal_list' is tested before 'number_decimal'
+# before 'number', preventing a shorter base from shadowing a longer one.
+_ALL_BASE_ENTITY_NAMES = sorted(
+    _NUMBER_ENTITY_NAMES | _CALC_ENTITY_NAMES | _DECIMAL_ENTITY_NAMES | _DECIMAL_LIST_ENTITY_NAMES,
+    key=len, reverse=True,
+)
+
+
+def _resolve_entity_type(name: str) -> str | None:
+    """Return the base entity type for a given entity name, or None if unrecognized.
+
+    Exact match returns the name itself. Any entity name that starts with a
+    known base name (with at least one additional character) is treated as a
+    named extension of that base type — inheriting its parsing logic while
+    storing results under its own key. The extension suffix can be any
+    characters; no separator is assumed.
+
+    Examples:
+        'number'              -> 'number'       (exact)
+        'number_rows'         -> 'number'       (extension)
+        'numbers'             -> 'number'       (extension — plural)
+        'number_decimal_list' -> 'number_decimal_list'  (exact, longest wins)
+        'number_decimal_a'    -> 'number_decimal'       (extension)
+        'unknown'             -> None
+    """
+    for base in _ALL_BASE_ENTITY_NAMES:
+        if name == base or (name.startswith(base) and len(name) > len(base)):
+            return base
+    return None
+
 
 def _apply_calc_rounding(calc: dict, cfg: dict) -> int | float:
     """Apply rounding config to a words_to_calc result dict for entity dispatch.
@@ -157,13 +187,14 @@ class CommandPattern:
             if '{' in token and '}' in token:
                 # Entity like {value}
                 entity_name = token.strip('{}')
-                if entity_name in _NUMBER_ENTITY_NAMES:
+                base_type = _resolve_entity_type(entity_name)
+                if base_type in _NUMBER_ENTITY_NAMES:
                     all_token_options.append([{'number_slot': entity_name}])
-                elif entity_name in _CALC_ENTITY_NAMES:
+                elif base_type in _CALC_ENTITY_NAMES:
                     all_token_options.append([{'calc_slot': entity_name}])
-                elif entity_name in _DECIMAL_ENTITY_NAMES:
+                elif base_type in _DECIMAL_ENTITY_NAMES:
                     all_token_options.append([{'decimal_slot': entity_name}])
-                elif entity_name in _DECIMAL_LIST_ENTITY_NAMES:
+                elif base_type in _DECIMAL_LIST_ENTITY_NAMES:
                     all_token_options.append([{'decimal_list_slot': entity_name}])
                 else:
                     all_token_options.append([{'entity': entity_name}])

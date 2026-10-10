@@ -238,6 +238,51 @@ def _split_qa_pattern(pattern, entity_expansions):
     return None, None
 
 
+def compile_dynamic_patterns(skill_prefix, group_name, pattern_strings,
+                             entity_expansions, loop):
+    """Compile raw pattern strings into CommandPattern objects for a dynamic sub-group.
+
+    Uses the same entity-expansion pipeline as normal intent loading. The compiled
+    patterns are registered on the matchers under a synthetic intent name
+    '<skill_prefix>:__group__:<group_name>' so they route back to the skill.
+
+    Args:
+        skill_prefix: e.g. 'matrix-calculator-skill'
+        group_name:   e.g. 'matrix_session'
+        pattern_strings: list of raw pattern strings like ['next', 'previous']
+        entity_expansions: ENTITY_EXPANSIONS dict from the skill (may be empty)
+        loop: RealtimeRecognizerLoop instance (provides matchers)
+
+    Returns:
+        list of CommandPattern objects, or [] on error
+    """
+    if not pattern_strings:
+        return []
+
+    intent_name = f"{skill_prefix}:__group__:{group_name}"
+    det_lines = []
+
+    for pattern in pattern_strings:
+        try:
+            expanded = expand_pattern_entities(pattern, entity_expansions)
+            det_lines.extend(expanded)
+        except Exception as e:
+            LOG.warning(f"[compile_dynamic_patterns] Failed to expand '{pattern}': {e}")
+
+    if not det_lines:
+        return []
+
+    try:
+        loop.interim_matcher.register_intent(intent_name, det_lines)
+        loop.final_matcher.register_intent(intent_name, det_lines)
+        # Pull the newly added patterns back out so we can store them in the sub-group
+        compiled = [p for p in loop.shared_patterns if p.intent_name == intent_name]
+        return compiled
+    except Exception as e:
+        LOG.warning(f"[compile_dynamic_patterns] Failed to register '{intent_name}': {e}")
+        return []
+
+
 def load_quantifier_patterns(repeat_config):
     """Build synthetic repeat patterns from the quantifiers file and repeat config.
 
