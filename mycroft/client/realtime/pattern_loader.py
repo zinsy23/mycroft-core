@@ -283,6 +283,79 @@ def compile_dynamic_patterns(skill_prefix, group_name, pattern_strings,
         return []
 
 
+def load_flow_files(skill_path, skill_prefix, entity_expansions, loop):
+    """Load all .flow files from a skill's locale/en-us/ directory.
+
+    State patterns are compiled and registered as disabled sub-groups named
+    '__flow__<flow_name>__<state_name>' — the mixin enables/disables them at
+    runtime via realtime:skill_patterns.
+
+    Entry patterns are returned as a plain dict {intent_name: [pattern_str]}
+    so the caller can register them on the matchers before the partition loop
+    (same as normal .intent file patterns), ensuring they land in the always-
+    active skill group rather than being missed.
+
+    Args:
+        skill_path:        Absolute path to the skill directory.
+        skill_prefix:      Skill directory name, e.g. 'matrix-calculator-skill'.
+        entity_expansions: ENTITY_EXPANSIONS dict already loaded for this skill.
+        loop:              RealtimeRecognizerLoop instance.
+
+    Returns:
+        tuple: (state_groups_registered: int, entry_intents: dict)
+            entry_intents maps intent_name -> [expanded_pattern_str]
+    """
+    from mycroft.skills.voice_flow import _parse_flow_file
+
+    locale_dir = os.path.join(skill_path, 'locale', 'en-us')
+    if not os.path.isdir(locale_dir):
+        return 0, {}
+
+    registered = 0
+    entry_intents = {}  # intent_name -> [pattern_str]
+
+    for fname in os.listdir(locale_dir):
+        if not fname.endswith('.flow'):
+            continue
+        flow_name = fname[:-5]  # strip .flow
+        flow_path = os.path.join(locale_dir, fname)
+        try:
+            states, _order, entry_patterns = _parse_flow_file(flow_path)
+        except Exception as e:
+            LOG.warning(f"[load_flow_files] Failed to parse {flow_path}: {e}")
+            continue
+
+        for state_name, state in states.items():
+            if not state['patterns']:
+                continue
+            group_name = f'__flow__{flow_name}__{state_name}'
+            compiled = compile_dynamic_patterns(
+                skill_prefix, group_name, state['patterns'],
+                entity_expansions, loop
+            )
+            if compiled:
+                loop.register_skill_subgroup(skill_prefix, group_name, compiled, enabled=False)
+                registered += 1
+                LOG.debug(f"[load_flow_files] registered {skill_prefix}/{group_name} "
+                          f"({len(compiled)} patterns, disabled)")
+
+        # Expand entry patterns and return them for the caller to register
+        # before the partition loop — they're always-active like normal intents.
+        if flow_name in entry_patterns and entry_patterns[flow_name]:
+            entry_intent = f'{skill_prefix}:{flow_name}'
+            try:
+                expanded = []
+                for p in entry_patterns[flow_name]:
+                    expanded.extend(expand_pattern_entities(p, entity_expansions))
+                entry_intents[entry_intent] = expanded
+                LOG.info(f"[load_flow_files] entry intent '{entry_intent}' "
+                         f"({len(expanded)} patterns) — caller registers on matchers")
+            except Exception as e:
+                LOG.warning(f"[load_flow_files] Failed to expand entry for {flow_name}: {e}")
+
+    return registered, entry_intents
+
+
 def load_quantifier_patterns(repeat_config):
     """Build synthetic repeat patterns from the quantifiers file and repeat config.
 

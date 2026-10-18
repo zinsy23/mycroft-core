@@ -330,6 +330,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # None key holds patterns loaded at startup; named keys are dynamic sub-groups.
         self.skill_pattern_groups = {}
         self.protected_patterns = []     # always-active: management commands
+        self.protected_intent_names = set()  # intent names in protected_patterns — never undoable
         self.manually_disabled = set()   # skill_prefixes manually disabled
         self.disabled_subgroups = set()  # (skill_prefix, group_name) pairs disabled by default
         self.global_mute = False         # True when "disable commands" fired
@@ -1715,22 +1716,36 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 if is_final and self.executed_utterances_history:
                     last_entry = self.executed_utterances_history[-1]
                     if len(last_entry) == 6:
-                        last_utterance, last_time, last_stream, last_matched_words, last_match_position, _ = last_entry
+                        last_utterance, last_time, last_stream, last_matched_words, last_match_position, last_intent = last_entry
                     elif len(last_entry) == 5:
                         last_utterance, last_time, last_stream, last_matched_words, last_match_position = last_entry
+                        last_intent = last_utterance
                     elif len(last_entry) == 4:
                         last_utterance, last_time, last_stream, last_matched_words = last_entry
                         last_match_position = None
+                        last_intent = last_utterance
                     else:
                         last_utterance, last_time, last_stream = last_entry
                         last_matched_words = None
+                        last_intent = last_utterance
                         last_match_position = None
 
                     time_since_last = now - last_time
 
-                    if (last_stream == "INTERIM" and time_since_last < 1.0
-                            and not last_utterance.startswith(MANAGE_TAG)
-                            and not last_utterance.startswith(REPEAT_TAG)):
+                    # Only allow undo for normal deterministic skill intents —
+                    # not for protected-layer intents (entry intents, management,
+                    # repeat, free-text, QA, flow state groups) where INTERIM is
+                    # authoritative and double-fire is prevented by dedup alone.
+                    _undo_eligible = (
+                        last_match_position is not None
+                        and last_matched_words is not None
+                        and last_intent not in self.protected_intent_names
+                        and not any(last_intent.startswith(t) for t in (
+                            MANAGE_TAG, REPEAT_TAG, FREE_TEXT_TAG, QA_TAG
+                        ))
+                        and '__group__' not in last_intent
+                    )
+                    if (last_stream == "INTERIM" and time_since_last < 1.0 and _undo_eligible):
                         should_undo = False
 
                         if last_matched_words is None or last_match_position is None:

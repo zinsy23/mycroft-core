@@ -305,7 +305,7 @@ def handle_intents_ready(event):
         load_entity_expansions, load_skill_config, expand_pattern_entities,
         _split_free_text_pattern, _split_qa_pattern, load_quantifier_patterns,
         build_management_patterns, build_audio_wake_patterns,
-        compile_dynamic_patterns,
+        compile_dynamic_patterns, load_flow_files,
         FREE_TEXT_TAG, REPEAT_TAG, QA_TAG
     )
     from mycroft.configuration import Configuration
@@ -328,6 +328,7 @@ def handle_intents_ready(event):
     loop.shared_patterns.clear()
     loop.skill_pattern_groups.clear()
     loop.protected_patterns.clear()
+    loop.protected_intent_names.clear()
     loop._qa_config_map.clear()
     loop.interim_matcher.patterns = loop.shared_patterns
     loop.final_matcher.patterns = loop.shared_patterns
@@ -336,6 +337,9 @@ def handle_intents_ready(event):
 
     det_count = 0
     ft_count = 0
+    # Collect per-skill info — deduped by skill_dir_name (multiple .intent files
+    # per skill must not process the same skill twice).
+    _skill_subgroup_work = {}  # skill_dir_name -> (skill_path, entity_expansions, skill_cfg)
 
     # Helper: find skill_prefix for an intent_name
     def _get_skill_prefix(intent_name):
@@ -365,19 +369,10 @@ def handle_intents_ready(event):
                     loop._utterance_alias_map[alias] = canonical
                     LOG.info(f"Word alias registered: '{alias}' → '{canonical}'")
 
-            # Load dynamic pattern groups declared in SKILL_CONFIG.pattern_groups.
-            # These are registered as disabled sub-groups; the skill enables them
-            # at runtime via the realtime:skill_patterns bus message.
-            # Use skill directory name directly — works regardless of command_groups.
+            # Collect per-skill data — deduped so each skill is processed once.
             skill_dir_name = os.path.basename(skill_path)
-            for group_name, group_patterns in skill_cfg.get('pattern_groups', {}).items():
-                compiled = compile_dynamic_patterns(
-                    skill_dir_name, group_name, group_patterns,
-                    entity_expansions, loop
-                )
-                if compiled:
-                    loop.register_skill_subgroup(skill_dir_name, group_name, compiled, enabled=False)
-                    LOG.info(f"Dynamic pattern group registered (disabled): {skill_dir_name}/{group_name} ({len(compiled)} patterns)")
+            if skill_dir_name not in _skill_subgroup_work:
+                _skill_subgroup_work[skill_dir_name] = (skill_path, entity_expansions, skill_cfg)
 
             with open(file_path, 'r') as f:
                 pattern_lines = [line.strip() for line in f.readlines() if line.strip()]
@@ -462,6 +457,36 @@ def handle_intents_ready(event):
             loop.protected_patterns.append(pattern)
 
     # Rebuild shared_patterns from the partitioned groups respecting current mute/disabled state
+    loop._rebuild_shared_patterns()
+
+    # Register dynamic subgroups and flow state groups AFTER partitioning so
+    # skill_pattern_groups is stable and register_skill_subgroup writes are not wiped.
+    # Entry intent patterns from flows are registered on the matchers here too,
+    # then immediately partitioned into skill_pattern_groups before the final rebuild.
+    for skill_dir_name, (skill_path, entity_expansions, skill_cfg) in _skill_subgroup_work.items():
+        for group_name, group_patterns in skill_cfg.get('pattern_groups', {}).items():
+            compiled = compile_dynamic_patterns(
+                skill_dir_name, group_name, group_patterns, entity_expansions, loop
+            )
+            if compiled:
+                loop.register_skill_subgroup(skill_dir_name, group_name, compiled, enabled=False)
+                LOG.info(f"Dynamic pattern group registered (disabled): {skill_dir_name}/{group_name} ({len(compiled)} patterns)")
+
+        state_groups, entry_intents = load_flow_files(skill_path, skill_dir_name, entity_expansions, loop)
+        if state_groups:
+            LOG.info(f"Flow state groups registered (disabled): {skill_dir_name} ({state_groups} states)")
+
+        # Register entry intent patterns as always-active (protected layer).
+        # Entry patterns are flow triggers — always on, not subject to skill group
+        # enable/disable, regardless of command_groups config.
+        for entry_intent, patterns in entry_intents.items():
+            loop.interim_matcher.register_intent(entry_intent, patterns)
+            loop.final_matcher.register_intent(entry_intent, patterns)
+            new_patterns = [p for p in loop.shared_patterns if p.intent_name == entry_intent]
+            loop.protected_patterns.extend(new_patterns)
+            loop.protected_intent_names.add(entry_intent)
+            LOG.info(f"Flow entry intent '{entry_intent}' registered as always-active ({len(new_patterns)} patterns)")
+
     loop._rebuild_shared_patterns()
 
     LOG.info(f"Loaded {det_count} deterministic + {ft_count} free-text trigger patterns; "
