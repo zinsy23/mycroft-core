@@ -104,9 +104,10 @@ class CommandPattern:
       - ["turn", "off", "lights"]
     """
 
-    def __init__(self, intent_name, pattern_str, original_line):
+    def __init__(self, intent_name, pattern_str, original_line, word_slot_values=None):
         self.intent_name = intent_name
         self.original_line = original_line
+        self.word_slot_values = word_slot_values or {}
         self.word_sequences = self._expand_pattern(pattern_str)
 
     def _expand_pattern(self, pattern_str):
@@ -185,7 +186,6 @@ class CommandPattern:
 
         for token in tokens:
             if '{' in token and '}' in token:
-                # Entity like {value}
                 entity_name = token.strip('{}')
                 base_type = _resolve_entity_type(entity_name)
                 if base_type in _NUMBER_ENTITY_NAMES:
@@ -754,6 +754,12 @@ class MatcherPath:
                     if seq_item['word'] != word:
                         ok = False
                         break
+                    # If this literal word came from a word-list entity, capture it
+                    wsv = seq_info.get('word_slot_values', {})
+                    for slot_name, slot_vals in wsv.items():
+                        if word in slot_vals:
+                            entities[slot_name] = word
+                            break
                 elif 'number_slot' in seq_item:
                     if not word.startswith('__number__:'):
                         ok = False
@@ -864,6 +870,11 @@ class MatcherPath:
                     if seq_item['word'] != word:
                         ok = False
                         break
+                    wsv = seq_info.get('word_slot_values', {})
+                    for slot_name, slot_vals in wsv.items():
+                        if word in slot_vals:
+                            entities[slot_name] = word
+                            break
                 elif 'decimal_list_slot' in seq_item:
                     entities[seq_item['decimal_list_slot']] = stt_values
                 elif 'number_slot' in seq_item:
@@ -963,19 +974,22 @@ class StreamingCommandMatcher:
         self.active_paths = []  # List of MatcherPath objects competing
         self.next_path_id = 0  # For generating unique path IDs
 
-    def register_intent(self, intent_name, pattern_lines):
+    def register_intent(self, intent_name, pattern_lines, word_slot_values=None):
         """Register a Padatious intent pattern.
 
         Args:
             intent_name (str): The intent name
             pattern_lines (list): Lines from the .intent file
+            word_slot_values (dict): Optional {entity_name: frozenset(values)} for
+                word-list entities that should be captured (e.g. {'pao_type': frozenset(['person','action','object'])})
         """
+        word_slot_values = word_slot_values or {}
         for line in pattern_lines:
             line = line.strip()
             if not line:
                 continue
 
-            pattern = CommandPattern(intent_name, line, line)
+            pattern = CommandPattern(intent_name, line, line, word_slot_values=word_slot_values)
             self.patterns.append(pattern)
 
             # Add all expanded sequences to cache
@@ -983,7 +997,8 @@ class StreamingCommandMatcher:
                 self.all_sequences.append({
                     'intent': intent_name,
                     'pattern': line,
-                    'sequence': sequence
+                    'sequence': sequence,
+                    'word_slot_values': word_slot_values,
                 })
 
         if self.verbose:
@@ -1000,7 +1015,8 @@ class StreamingCommandMatcher:
                 self.all_sequences.append({
                     'intent': pattern.intent_name,
                     'pattern': pattern.original_line,
-                    'sequence': sequence
+                    'sequence': sequence,
+                    'word_slot_values': pattern.word_slot_values,
                 })
 
     def add_word(self, word, stream_type="FINAL", transcript_position=None):

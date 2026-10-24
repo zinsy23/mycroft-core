@@ -381,9 +381,11 @@ def handle_intents_ready(event):
             ft_lines = []
             qa_lines = []
             qa_config_for_intent = None
+            merged_word_slots = {}
 
             for pattern in pattern_lines:
-                expanded = expand_pattern_entities(pattern, entity_expansions)
+                expanded, word_slots = expand_pattern_entities(pattern, entity_expansions)
+                merged_word_slots.update(word_slots)
                 for exp_pattern in expanded:
                     qa_prefix, qa_config = _split_qa_pattern(exp_pattern, entity_expansions)
                     if qa_prefix is not None:
@@ -401,8 +403,8 @@ def handle_intents_ready(event):
             if det_lines:
                 # Register into a temporary matcher to get CommandPattern objects,
                 # then move them to skill_pattern_groups
-                loop.interim_matcher.register_intent(intent_name, det_lines)
-                loop.final_matcher.register_intent(intent_name, det_lines)
+                loop.interim_matcher.register_intent(intent_name, det_lines, word_slot_values=merged_word_slots)
+                loop.final_matcher.register_intent(intent_name, det_lines, word_slot_values=merged_word_slots)
                 det_count += len(det_lines)
 
             if ft_lines:

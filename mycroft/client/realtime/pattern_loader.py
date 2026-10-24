@@ -126,26 +126,28 @@ def expand_pattern_entities(pattern, entity_expansions):
     {free_text} (or any entity with no expansion defined) is left as-is —
     the caller detects it and handles it separately.
 
+    Word-list entities (values/files, no special type) are still expanded to
+    literals for matching, but also returned as word_slot_values so the matcher
+    can capture which value was matched back into entities.
+
     Args:
         pattern: Pattern string like "color {color}" or "[open|close] {main}"
         entity_expansions: Dict mapping entity names to their config
 
     Returns:
-        list: Multiple pattern lines, one for each entity value combination
-              Example: "[open|close] {main}" with main=[gpt,terminal] returns:
-                - "[open|close] gpt"
-                - "[open|close] terminal"
+        tuple: (patterns, word_slot_values) where patterns is a list of expanded
+               strings and word_slot_values is {entity_name: frozenset(values)}
+               for word-list entities so the matcher can capture them.
     """
     # Find all {entity} placeholders
     entities = re.findall(r'\{(\w+)\}', pattern)
     if not entities:
-        return [pattern]
+        return [pattern], {}
 
-    # For each entity, load values from files
     entity_values = {}
+    word_slot_values = {}
     for entity_name in entities:
         if entity_name not in entity_expansions:
-            # No expansion defined — leave placeholder as-is (e.g. {free_text})
             continue
 
         config = entity_expansions[entity_name]
@@ -161,7 +163,6 @@ def expand_pattern_entities(pattern, entity_expansions):
                         line = line.strip()
                         if not line:
                             continue
-
                         if format_type == 'csv':
                             if ';' in line:
                                 parts = line.split(';')
@@ -176,12 +177,16 @@ def expand_pattern_entities(pattern, entity_expansions):
 
         if values:
             entity_values[entity_name] = values
+            # Track word-list entities for capture (special slot types handle their own capture)
+            from mycroft.client.realtime.command_matcher import _resolve_entity_type, _NUMBER_ENTITY_NAMES, _CALC_ENTITY_NAMES, _DECIMAL_ENTITY_NAMES, _DECIMAL_LIST_ENTITY_NAMES
+            base_type = _resolve_entity_type(entity_name)
+            is_special = base_type in (_NUMBER_ENTITY_NAMES | _CALC_ENTITY_NAMES | _DECIMAL_ENTITY_NAMES | _DECIMAL_LIST_ENTITY_NAMES)
+            if not is_special:
+                word_slot_values[entity_name] = frozenset(v.lower() for v in values)
 
-    # If no entities were expanded, return original (with any {free_text} still in it)
     if not entity_values:
-        return [pattern]
+        return [pattern], word_slot_values
 
-    # Generate Cartesian product of all expanded entity values
     entity_order = entities
     value_lists = [entity_values.get(name, [f'{{{name}}}']) for name in entity_order]
 
@@ -193,7 +198,7 @@ def expand_pattern_entities(pattern, entity_expansions):
             expanded = expanded.replace(placeholder, value)
         expanded_patterns.append(expanded)
 
-    return expanded_patterns
+    return expanded_patterns, word_slot_values
 
 
 def _split_free_text_pattern(pattern, free_text_entity):
@@ -261,11 +266,13 @@ def compile_dynamic_patterns(skill_prefix, group_name, pattern_strings,
 
     intent_name = f"{skill_prefix}:__group__:{group_name}"
     det_lines = []
+    merged_word_slots = {}
 
     for pattern in pattern_strings:
         try:
-            expanded = expand_pattern_entities(pattern, entity_expansions)
+            expanded, word_slots = expand_pattern_entities(pattern, entity_expansions)
             det_lines.extend(expanded)
+            merged_word_slots.update(word_slots)
         except Exception as e:
             LOG.warning(f"[compile_dynamic_patterns] Failed to expand '{pattern}': {e}")
 
@@ -273,8 +280,8 @@ def compile_dynamic_patterns(skill_prefix, group_name, pattern_strings,
         return []
 
     try:
-        loop.interim_matcher.register_intent(intent_name, det_lines)
-        loop.final_matcher.register_intent(intent_name, det_lines)
+        loop.interim_matcher.register_intent(intent_name, det_lines, word_slot_values=merged_word_slots)
+        loop.final_matcher.register_intent(intent_name, det_lines, word_slot_values=merged_word_slots)
         # Pull the newly added patterns back out so we can store them in the sub-group
         compiled = [p for p in loop.shared_patterns if p.intent_name == intent_name]
         return compiled
@@ -510,15 +517,17 @@ def load_all_intent_patterns(skills_dir, verbose=False, realtime_config=None):
 
                 det_lines = []
                 ft_lines = []
+                merged_word_slots = {}
+
+                qa_lines = []
+                qa_config_for_intent = None
 
                 for pattern in pattern_lines:
                     # First expand any normal {entity} placeholders (not {free_text})
-                    expanded = expand_pattern_entities(pattern, entity_expansions)
+                    expanded, word_slots = expand_pattern_entities(pattern, entity_expansions)
+                    merged_word_slots.update(word_slots)
 
-                    qa_lines = []
-                qa_config_for_intent = None
-
-                for exp_pattern in expanded:
+                    for exp_pattern in expanded:
                         # Check for QA entity first
                         qa_prefix, qa_config = _split_qa_pattern(exp_pattern, entity_expansions)
                         if qa_prefix is not None:
