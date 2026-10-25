@@ -23,17 +23,13 @@ Usage in a skill:
 
     class MySkill(RealtimePatternMixin, MycroftSkill):
         def initialize(self):
-            riva_cfg = self.config_core.get('tts', {}).get('riva', {})
-            self._riva_auth = riva.client.Auth(uri=riva_cfg.get('server_uri', 'localhost:50051'))
-            self._riva_voice = riva_cfg.get('voice', 'English-US-RadTTSpp.Female.narrator')
-            self._riva_sample_rate = riva_cfg.get('sample_rate', 44100)
             self._skill_config = SKILL_CONFIG
 
         def handle_something(self, message):
             self._speak_blocking("Two plus two is four.")
 
-Skills MUST set self._riva_auth, self._riva_voice, self._riva_sample_rate, and
-self._skill_config in initialize(). The mixin's _speak_blocking reads these.
+Skills only need to set self._skill_config = SKILL_CONFIG in initialize() (for TTS
+aliases/transforms and repeat_exempt). Riva config is read lazily from self.config_core.
 
 TTS aliases and transforms live in mycroft/client/realtime/tts_aliases.py.
 Global config: mycroft.conf realtime.tts_aliases / realtime.tts_transforms.
@@ -82,6 +78,21 @@ class RealtimePatternMixin:
     # Skills set this in initialize() to wire SKILL_CONFIG into _speak_blocking.
     _skill_config: dict = None
 
+    # Lazily populated from config_core on first _speak_blocking call.
+    _riva_auth = None
+    _riva_voice: str = None
+    _riva_sample_rate: int = None
+
+    def _init_riva(self):
+        """Lazily initialise Riva auth/voice/rate from config_core."""
+        if self._riva_auth is not None:
+            return
+        import riva.client
+        riva_cfg = self.config_core.get('tts', {}).get('riva', {})
+        self._riva_auth = riva.client.Auth(uri=riva_cfg.get('server_uri', 'localhost:50051'))
+        self._riva_voice = riva_cfg.get('voice', 'English-US-RadTTSpp.Female.narrator')
+        self._riva_sample_rate = riva_cfg.get('sample_rate', 44100)
+
     def apply_tts_aliases(self, text: str, skill_config: dict = None) -> str:
         """Apply TTS aliases and transforms before the text goes to Riva TTS.
 
@@ -111,30 +122,30 @@ class RealtimePatternMixin:
         """
         register_tts_transform(name, fn)
 
-    def _speak_blocking(self, text) -> float | None:
+    def _speak_blocking(self, text, on_play=None) -> float | None:
         """Synthesize text via Riva TTS and play it synchronously via paplay.
 
         TTS aliases and transforms are applied automatically before synthesis.
+        Riva config is read lazily from self.config_core — no per-skill init needed.
+        Set self._skill_config = SKILL_CONFIG in initialize() for TTS aliases.
 
-        Requires self._riva_auth, self._riva_voice, self._riva_sample_rate to be
-        set in the skill's initialize(). Set self._skill_config = SKILL_CONFIG
-        there too so skill-level aliases are picked up automatically.
+        Args:
+            text:    Text to speak.
+            on_play: Optional callable(duration_secs) called right before playback
+                     starts — use for notifications that should show while audio plays:
+
+                         self._speak_blocking(text, on_play=lambda d: flash_text(label, d))
 
         Returns:
-            Duration of the audio in seconds, or None on error. Skills can use
-            this for environment-specific side effects (e.g. flash notifications):
+            Duration of the audio in seconds, or None on error.
 
-                duration = self._speak_blocking(text)
-                if duration:
-                    flash_text(label, time=round(duration + 0.5, 1))
-
-        Skills that override this method are responsible for calling
-        apply_tts_aliases() at the top — it is a no-op when nothing is
-        configured, so the call is always safe.
+        Skills that override this method are responsible for calling _init_riva()
+        and apply_tts_aliases() at the top.
         """
         import riva.client.proto.riva_audio_pb2 as raudio
         from mycroft.tts.riva_tts import RivaSpeechSynthesisService
 
+        self._init_riva()
         text = self.apply_tts_aliases(text)
         self.log.info(f"{self.__class__.__name__}: _speak_blocking text={text!r}")
         self.bus.emit(Message('mycroft.realtime.skill_reply', {'utterance': text}))
@@ -156,6 +167,8 @@ class RealtimePatternMixin:
                 wf.setframerate(self._riva_sample_rate)
                 wf.writeframes(resp.audio)
             try:
+                if on_play is not None:
+                    on_play(duration_secs)
                 subprocess.Popen(['paplay', wav_path]).wait()
             finally:
                 os.unlink(wav_path)
