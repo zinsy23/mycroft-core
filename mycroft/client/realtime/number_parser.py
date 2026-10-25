@@ -612,6 +612,51 @@ def words_to_decimal_list(phrase: str, max_fractional_digits: int | None = None)
     return _make(values, complete=True)
 
 
+def words_to_int_str(phrase: str, mode: str = 'mixed') -> str | None:
+    """Convert a spoken number phrase to a digit string.
+
+    mode='mixed' (default): ONES words map digit-by-digit (preserving leading
+        zeros), compound words fall back to int-then-str.
+        "zero eight" → "08", "eight" → "8", "fifty eight" → "58"
+
+    mode='digit': ONES words only, word→digit direct. Compound words like
+        "fifty" are not accepted — slot won't open for them.
+        "zero eight" → "08", "eight" → "8", "fifty eight" → None
+
+    mode='str': int-then-str with no leading zero preservation.
+        "zero eight" → "8", "fifty eight" → "58"
+
+    Returns None if the phrase doesn't parse under the given mode.
+    """
+    if not phrase:
+        return None
+    tokens = phrase.lower().split()
+    if not tokens:
+        return None
+
+    _SINGLE_DIGITS = {k: v for k, v in ONES.items() if v <= 9}
+
+    if mode == 'digit':
+        if not all(t in _SINGLE_DIGITS for t in tokens):
+            return None
+        return ''.join(str(_SINGLE_DIGITS[t]) for t in tokens)
+
+    if mode == 'str':
+        val = words_to_int(phrase)
+        return str(val) if val is not None else None
+
+    # mode == 'mixed' (default)
+    if all(t in _SINGLE_DIGITS for t in tokens):
+        return ''.join(str(_SINGLE_DIGITS[t]) for t in tokens)
+    val = words_to_int(phrase)
+    return str(val) if val is not None else None
+
+
+# Valid slot words for {number_str}: same as {number} — the matcher accepts
+# the same words, only the final parse step differs.
+NUMBER_STR_DIGIT_WORDS = frozenset(k for k, v in ONES.items() if v <= 9)
+
+
 import re
 
 _WHISPER_NUMBER_RE = re.compile(r'(negative|minus)?\s*(-)?\s*(\d+(?:\.\d+)?)', re.IGNORECASE)

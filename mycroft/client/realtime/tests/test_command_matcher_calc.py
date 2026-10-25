@@ -350,3 +350,93 @@ class TestCalcIncompleteNoDispatch:
         r2 = m.close_slots_and_check()
         assert r2 is not None
         assert r2['entities']['number_calc'] == 15
+
+
+# ── {number_str} entity — spoken number as digit string ──────────────────────
+
+def make_str_matcher(pattern='number {number_str}', mode=None):
+    m = StreamingCommandMatcher(FILLER_CONFIG)
+    if mode is not None:
+        m.calc_entity_configs['number_str'] = {'mode': mode}
+    m.register_intent('test:numstr', [pattern])
+    return m
+
+
+class TestNumberStrEntityDispatch:
+    # ── default mode: mixed ───────────────────────────────────────────────────
+
+    def test_single_digit_mixed(self):
+        m = make_str_matcher()
+        r = feed(m, ['number', 'eight'])
+        assert r is not None
+        assert r['entities']['number_str'] == '8'
+
+    def test_leading_zero_preserved_mixed(self):
+        # ONES-only path: "zero eight" → "08"
+        m = make_str_matcher()
+        r = feed(m, ['number', 'zero', 'eight'])
+        assert r is not None
+        assert r['entities']['number_str'] == '08'
+
+    def test_double_zero_mixed(self):
+        m = make_str_matcher()
+        r = feed(m, ['number', 'zero', 'zero'])
+        assert r is not None
+        assert r['entities']['number_str'] == '00'
+
+    def test_compound_fallback_mixed(self):
+        # "fifty eight" not all ONES → int fallback → "58"
+        m = make_str_matcher()
+        r = feed(m, ['number', 'fifty', 'eight'])
+        assert r is not None
+        assert r['entities']['number_str'] == '58'
+
+    def test_result_is_string_not_int(self):
+        m = make_str_matcher()
+        r = feed(m, ['number', 'five'])
+        assert r is not None
+        assert isinstance(r['entities']['number_str'], str)
+
+    # ── digit mode ────────────────────────────────────────────────────────────
+
+    def test_digit_mode_single(self):
+        m = make_str_matcher(mode='digit')
+        r = feed(m, ['number', 'eight'])
+        assert r is not None
+        assert r['entities']['number_str'] == '8'
+
+    def test_digit_mode_leading_zero(self):
+        m = make_str_matcher(mode='digit')
+        r = feed(m, ['number', 'zero', 'eight'])
+        assert r is not None
+        assert r['entities']['number_str'] == '08'
+
+    def test_digit_mode_non_ones_words_not_valid(self):
+        # compound words are not in ONES — not valid slot words in digit mode
+        m = make_str_matcher(mode='digit')
+        r = feed(m, ['number', 'fifty'])
+        assert r is None
+
+    # ── str mode ──────────────────────────────────────────────────────────────
+
+    def test_str_mode_no_leading_zero(self):
+        # Goes through int → "8", not "08"
+        m = make_str_matcher(mode='str')
+        r = feed(m, ['number', 'zero', 'eight'])
+        assert r is not None
+        assert r['entities']['number_str'] == '8'
+
+    def test_str_mode_compound(self):
+        m = make_str_matcher(mode='str')
+        r = feed(m, ['number', 'fifty', 'eight'])
+        assert r is not None
+        assert r['entities']['number_str'] == '58'
+
+    # ── extension entity name ─────────────────────────────────────────────────
+
+    def test_extension_entity_name(self):
+        m = StreamingCommandMatcher(FILLER_CONFIG)
+        m.register_intent('test:ext', ['item {number_str_id}'])
+        r = feed(m, ['item', 'zero', 'three'])
+        assert r is not None
+        assert r['entities']['number_str_id'] == '03'

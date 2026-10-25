@@ -74,7 +74,7 @@ MODE_QA = 'qa'
 # names actually exist on MatcherPath without duplicating the list — a typo
 # here silently makes getattr() return None and the FINAL-boundary
 # interim/final richer-buffer fallback always sees that slot type as empty.
-SLOT_BUF_ATTRS = ('_decimal_list_buf', '_number_buf', '_calc_buf', '_decimal_buf')
+SLOT_BUF_ATTRS = ('_decimal_list_buf', '_number_buf', '_number_str_buf', '_calc_buf', '_decimal_buf')
 
 
 def _slot_buf_len(path):

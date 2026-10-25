@@ -353,9 +353,10 @@ def handle_intents_ready(event):
         try:
             skill_path = os.path.dirname(os.path.dirname(os.path.dirname(file_path)))
             entity_expansions = load_entity_expansions(skill_path)
-            # Register any calc entity configs (decimal_places etc.) on matchers
+            # Register any calc entity configs (decimal_places, mode, etc.) on matchers
+            _CFG_KEYS = {'decimal_places', 'stt_backend', 'mode'}
             for ent_name, ent_cfg in entity_expansions.items():
-                if isinstance(ent_cfg, dict) and 'decimal_places' in ent_cfg:
+                if isinstance(ent_cfg, dict) and _CFG_KEYS & ent_cfg.keys():
                     loop.interim_matcher.calc_entity_configs[ent_name] = ent_cfg
                     loop.final_matcher.calc_entity_configs[ent_name] = ent_cfg
             skill_cfg = load_skill_config(skill_path)

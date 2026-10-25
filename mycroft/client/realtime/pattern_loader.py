@@ -178,9 +178,9 @@ def expand_pattern_entities(pattern, entity_expansions):
         if values:
             entity_values[entity_name] = values
             # Track word-list entities for capture (special slot types handle their own capture)
-            from mycroft.client.realtime.command_matcher import _resolve_entity_type, _NUMBER_ENTITY_NAMES, _CALC_ENTITY_NAMES, _DECIMAL_ENTITY_NAMES, _DECIMAL_LIST_ENTITY_NAMES
+            from mycroft.client.realtime.command_matcher import _resolve_entity_type, _NUMBER_ENTITY_NAMES, _CALC_ENTITY_NAMES, _DECIMAL_ENTITY_NAMES, _DECIMAL_LIST_ENTITY_NAMES, _NUMBER_STR_ENTITY_NAMES
             base_type = _resolve_entity_type(entity_name)
-            is_special = base_type in (_NUMBER_ENTITY_NAMES | _CALC_ENTITY_NAMES | _DECIMAL_ENTITY_NAMES | _DECIMAL_LIST_ENTITY_NAMES)
+            is_special = base_type in (_NUMBER_ENTITY_NAMES | _CALC_ENTITY_NAMES | _DECIMAL_ENTITY_NAMES | _DECIMAL_LIST_ENTITY_NAMES | _NUMBER_STR_ENTITY_NAMES)
             if not is_special:
                 word_slot_values[entity_name] = frozenset(v.lower() for v in values)
 

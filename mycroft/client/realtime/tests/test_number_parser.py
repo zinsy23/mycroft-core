@@ -15,11 +15,13 @@ import math
 import pytest
 from mycroft.client.realtime.number_parser import (
     words_to_int,
+    words_to_int_str,
     words_to_calc,
     words_to_decimal,
     words_to_decimal_list,
     format_calc_expression,
     NUMBER_WORDS,
+    NUMBER_STR_DIGIT_WORDS,
     CALC_WORDS,
     SIGN_WORDS,
     DECIMAL_WORDS,

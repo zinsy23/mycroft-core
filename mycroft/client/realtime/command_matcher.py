@@ -12,7 +12,8 @@ import re
 from mycroft.util.log import LOG
 from mycroft.client.realtime.number_parser import (
     NUMBER_WORDS, SIGN_WORDS, CALC_WORDS, DECIMAL_SLOT_WORDS, DECIMAL_LIST_SLOT_WORDS,
-    words_to_int, words_to_calc, words_to_decimal, words_to_decimal_list,
+    NUMBER_STR_DIGIT_WORDS,
+    words_to_int, words_to_int_str, words_to_calc, words_to_decimal, words_to_decimal_list,
     format_calc_result,
     format_calc_expression,
     format_calc_expression_symbolic,
@@ -29,11 +30,14 @@ _CALC_ENTITY_NAMES = frozenset({'number_calc'})
 _DECIMAL_ENTITY_NAMES = frozenset({'number_decimal'})
 # Entity names that get greedy decimal list capture
 _DECIMAL_LIST_ENTITY_NAMES = frozenset({'number_decimal_list'})
+# Entity names that get greedy number capture, returning a digit string (preserves leading zeros)
+_NUMBER_STR_ENTITY_NAMES = frozenset({'number_str'})
 
 # Ordered longest-first so 'number_decimal_list' is tested before 'number_decimal'
 # before 'number', preventing a shorter base from shadowing a longer one.
 _ALL_BASE_ENTITY_NAMES = sorted(
-    _NUMBER_ENTITY_NAMES | _CALC_ENTITY_NAMES | _DECIMAL_ENTITY_NAMES | _DECIMAL_LIST_ENTITY_NAMES,
+    _NUMBER_ENTITY_NAMES | _CALC_ENTITY_NAMES | _DECIMAL_ENTITY_NAMES
+    | _DECIMAL_LIST_ENTITY_NAMES | _NUMBER_STR_ENTITY_NAMES,
     key=len, reverse=True,
 )
 
@@ -196,6 +200,8 @@ class CommandPattern:
                     all_token_options.append([{'decimal_slot': entity_name}])
                 elif base_type in _DECIMAL_LIST_ENTITY_NAMES:
                     all_token_options.append([{'decimal_list_slot': entity_name}])
+                elif base_type in _NUMBER_STR_ENTITY_NAMES:
+                    all_token_options.append([{'number_str_slot': entity_name}])
                 else:
                     all_token_options.append([{'entity': entity_name}])
 
@@ -283,6 +289,9 @@ class MatcherPath:
         # Greedy number accumulation
         self._number_buf = []
         self._number_slot_name = None
+        # Greedy number_str accumulation (digit-string, preserves leading zeros)
+        self._number_str_buf = []
+        self._number_str_slot_name = None
         # Greedy calc expression accumulation
         self._calc_buf = []
         self._calc_slot_name = None
@@ -310,7 +319,7 @@ class MatcherPath:
         """
         # Already open — check current open slot directly
         for slot_name in (self._decimal_list_slot_name, self._decimal_slot_name,
-                          self._number_slot_name, self._calc_slot_name):
+                          self._number_slot_name, self._number_str_slot_name, self._calc_slot_name):
             if slot_name and self.calc_entity_configs.get(slot_name, {}).get('stt_backend'):
                 return slot_name
         # Not open yet — check next position in matching sequences
@@ -330,6 +339,8 @@ class MatcherPath:
         (audio keeps flowing regardless of word revision; only reset/reset_session clears it)."""
         self._number_slot_name = None
         self._number_buf = []
+        self._number_str_slot_name = None
+        self._number_str_buf = []
         self._calc_slot_name = None
         self._calc_buf = []
         self._decimal_slot_name = None
@@ -376,6 +387,34 @@ class MatcherPath:
                     self.matched_words.append(f'__number__:{phrase}')
                     self._number_slot_name = None
                     self._number_buf = []
+                    self._slot_closed_by_word = True
+                    closed = True
+            if not closed:
+                self.consecutive_fillers += 1
+                if stream_type == "FINAL":
+                    self.local_budget = max(0, self.local_budget - 1)
+                return False
+
+        # ── greedy number_str slot ────────────────────────────────────────────
+        if self._number_str_slot_name is not None:
+            _ns_cfg = self.calc_entity_configs.get(self._number_str_slot_name, {})
+            _ns_mode = _ns_cfg.get('mode', 'mixed')
+            _ns_words = NUMBER_STR_DIGIT_WORDS if _ns_mode == 'digit' else NUMBER_WORDS
+            if word in _ns_words:
+                self._number_str_buf.append(word)
+                self.consecutive_fillers = 0
+                self.fitness_score += 1
+                if len(self._number_str_buf) > 1:
+                    self.local_budget += self.filler_config.get('increment_per_word', 1)
+                return True
+            phrase = ' '.join(self._number_str_buf)
+            closed = False
+            if phrase and words_to_int_str(phrase, mode=_ns_mode) is not None:
+                post_words = self._get_post_slot_words('__number_str__:', phrase)
+                if word in post_words:
+                    self.matched_words.append(f'__number_str__:{phrase}')
+                    self._number_str_slot_name = None
+                    self._number_str_buf = []
                     self._slot_closed_by_word = True
                     closed = True
             if not closed:
@@ -475,6 +514,22 @@ class MatcherPath:
         matching_sequences = self._get_matching_sequences()
         valid_next_words = self._get_valid_next_words(matching_sequences)
 
+        # Check if the next position is a number_str slot
+        if '<NUMBER_STR_SLOT>' in valid_next_words:
+            slot_name = self._get_next_number_str_slot_name(matching_sequences)
+            _ns_open_cfg = self.calc_entity_configs.get(slot_name, {})
+            _ns_open_mode = _ns_open_cfg.get('mode', 'mixed')
+            _ns_open_words = NUMBER_STR_DIGIT_WORDS if _ns_open_mode == 'digit' else NUMBER_WORDS
+            if word in _ns_open_words:
+                self._number_str_slot_name = slot_name
+                self._number_str_buf = [word]
+                self._had_slot = True
+                self.consecutive_fillers = 0
+                self.fitness_score += 1
+                if len(self.matched_words) > 0:
+                    self.local_budget += self.filler_config.get('increment_per_word', 1)
+                return True
+
         # Check if the next position is a number slot
         if '<NUMBER_SLOT>' in valid_next_words:
             slot_name = self._get_next_number_slot_name(matching_sequences)
@@ -571,6 +626,10 @@ class MatcherPath:
                     if not word.startswith('__number__:'):
                         match = False
                         break
+                elif 'number_str_slot' in seq_item:
+                    if not word.startswith('__number_str__:'):
+                        match = False
+                        break
                 elif 'calc_slot' in seq_item:
                     if not word.startswith('__calc__:'):
                         match = False
@@ -618,6 +677,10 @@ class MatcherPath:
                     if not mw.startswith('__number__:'):
                         ok = False
                         break
+                elif 'number_str_slot' in seq_item:
+                    if not mw.startswith('__number_str__:'):
+                        ok = False
+                        break
                 elif 'calc_slot' in seq_item:
                     if not mw.startswith('__calc__:'):
                         ok = False
@@ -657,6 +720,8 @@ class MatcherPath:
                 valid_words.add('<ENTITY>')
             elif 'number_slot' in next_item:
                 valid_words.add('<NUMBER_SLOT>')
+            elif 'number_str_slot' in next_item:
+                valid_words.add('<NUMBER_STR_SLOT>')
             elif 'calc_slot' in next_item:
                 valid_words.add('<CALC_SLOT>')
             elif 'decimal_slot' in next_item:
@@ -675,6 +740,16 @@ class MatcherPath:
                 if 'number_slot' in item:
                     return item['number_slot']
         return 'number'
+
+    def _get_next_number_str_slot_name(self, matching_sequences):
+        next_position = len(self.matched_words)
+        for seq_info in matching_sequences:
+            sequence = seq_info['sequence']
+            if next_position < len(sequence):
+                item = sequence[next_position]
+                if 'number_str_slot' in item:
+                    return item['number_str_slot']
+        return 'number_str'
 
     def _get_next_calc_slot_name(self, matching_sequences):
         next_position = len(self.matched_words)
@@ -718,6 +793,11 @@ class MatcherPath:
             phrase = ' '.join(self._number_buf)
             if words_to_int(phrase) is not None:
                 matched = matched + [f'__number__:{phrase}']
+        elif self._number_str_slot_name is not None and self._number_str_buf:
+            phrase = ' '.join(self._number_str_buf)
+            _ns_cc_mode = self.calc_entity_configs.get(self._number_str_slot_name, {}).get('mode', 'mixed')
+            if words_to_int_str(phrase, mode=_ns_cc_mode) is not None:
+                matched = matched + [f'__number_str__:{phrase}']
         elif self._calc_slot_name is not None and self._calc_buf:
             phrase = ' '.join(self._calc_buf)
             if words_to_calc(phrase) is not None:
@@ -770,6 +850,18 @@ class MatcherPath:
                         ok = False
                         break
                     entities[seq_item['number_slot']] = val
+                elif 'number_str_slot' in seq_item:
+                    if not word.startswith('__number_str__:'):
+                        ok = False
+                        break
+                    phrase = word[len('__number_str__:'):]
+                    _ns_slot = seq_item['number_str_slot']
+                    _ns_mode = self.calc_entity_configs.get(_ns_slot, {}).get('mode', 'mixed')
+                    val = words_to_int_str(phrase, mode=_ns_mode)
+                    if val is None:
+                        ok = False
+                        break
+                    entities[_ns_slot] = val
                 elif 'calc_slot' in seq_item:
                     if not word.startswith('__calc__:'):
                         ok = False
@@ -822,6 +914,8 @@ class MatcherPath:
                     self.matched_words = matched
                     self._number_slot_name = None
                     self._number_buf = []
+                    self._number_str_slot_name = None
+                    self._number_str_buf = []
                     self._calc_slot_name = None
                     self._calc_buf = []
                     self._decimal_slot_name = None
@@ -831,6 +925,7 @@ class MatcherPath:
                 # Build clean utterance: replace internal slot markers with spoken words
                 clean_words = [
                     w[len('__number__:'):] if w.startswith('__number__:') else
+                    w[len('__number_str__:'):] if w.startswith('__number_str__:') else
                     w[len('__calc__:'):] if w.startswith('__calc__:') else
                     w[len('__decimal__:'):] if w.startswith('__decimal__:') else
                     w[len('__decimal_list__:'):] if w.startswith('__decimal_list__:') else w
@@ -922,7 +1017,8 @@ class MatcherPath:
         slot was closed by a post-slot pattern word — use
         needs_final_boundary_close() for that.
         """
-        return (self._number_slot_name is not None or self._calc_slot_name is not None
+        return (self._number_slot_name is not None or self._number_str_slot_name is not None
+                or self._calc_slot_name is not None
                 or self._decimal_slot_name is not None or self._decimal_list_slot_name is not None)
 
     def needs_final_boundary_close(self):
@@ -1132,6 +1228,7 @@ class StreamingCommandMatcher:
                 key = (
                     tuple(path.matched_words),
                     tuple(path._number_buf),
+                    tuple(path._number_str_buf),
                     tuple(path._calc_buf),
                     tuple(path._decimal_buf),
                     tuple(path._decimal_list_buf),
