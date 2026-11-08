@@ -334,6 +334,57 @@ class MatcherPath:
                 return slot_name
         return None
 
+    def clone(self, new_id):
+        """Return a shallow copy of this path with the same state but a new id.
+
+        Used to fork a filler-shadow copy before accepting an ambiguous word —
+        the clone stays at the current matched_words position so sequences that
+        don't require this word can still be pursued.
+        """
+        c = MatcherPath(new_id, self.local_budget, self.all_sequences, self.filler_config,
+                        start_position=self.start_position,
+                        calc_entity_configs=self.calc_entity_configs)
+        c.matched_words = list(self.matched_words)
+        c.consecutive_fillers = self.consecutive_fillers
+        c.fitness_score = self.fitness_score
+        c._number_buf = list(self._number_buf)
+        c._number_slot_name = self._number_slot_name
+        c._number_str_buf = list(self._number_str_buf)
+        c._number_str_slot_name = self._number_str_slot_name
+        c._calc_buf = list(self._calc_buf)
+        c._calc_slot_name = self._calc_slot_name
+        c._decimal_buf = list(self._decimal_buf)
+        c._decimal_slot_name = self._decimal_slot_name
+        c._decimal_list_buf = list(self._decimal_list_buf)
+        c._decimal_list_slot_name = self._decimal_list_slot_name
+        c.whisper_audio_start_idx = self.whisper_audio_start_idx
+        c._had_slot = self._had_slot
+        c._slot_closed_by_word = self._slot_closed_by_word
+        return c
+
+    def _word_required_by_all_matching(self, word):
+        """Return True if every currently-matching sequence requires this exact word
+        at the next position — meaning there is no sequence where this word could
+        be a filler and the path could still complete.  Used to decide whether to
+        fork a filler-shadow on word acceptance.
+        """
+        # Never fork while inside a greedy slot — slot words accumulate, not branch,
+        # and forking here causes exponential path growth on number/calc sequences.
+        if self.has_open_slot():
+            return True
+        matching = self._get_matching_sequences()
+        if not matching:
+            return True  # degenerate: no sequences left, don't fork
+        next_pos = len(self.matched_words)
+        for seq_info in matching:
+            seq = seq_info['sequence']
+            if next_pos >= len(seq):
+                return False  # sequence already complete — word is extra noise, fork needed
+            item = seq[next_pos]
+            if 'word' not in item or item['word'] != word:
+                return False  # at least one sequence doesn't need this word here
+        return True
+
     def clear_slot_state(self):
         """Reset open slot word buffers for replay. Does NOT clear whisper_audio_start_idx
         (audio keeps flowing regardless of word revision; only reset/reset_session clears it)."""
@@ -698,7 +749,10 @@ class MatcherPath:
                 if 'word' in next_item:
                     valid_words.add(next_item['word'])
                 elif 'entity' in next_item:
-                    valid_words.add('<ENTITY>')
+                    entity_name = next_item['entity']
+                    wsv = seq_info.get('word_slot_values', {})
+                    if entity_name in wsv:
+                        valid_words.update(wsv[entity_name])
         return valid_words
 
     def _get_valid_next_words(self, matching_sequences):
@@ -717,7 +771,10 @@ class MatcherPath:
             if 'word' in next_item:
                 valid_words.add(next_item['word'])
             elif 'entity' in next_item:
-                valid_words.add('<ENTITY>')
+                entity_name = next_item['entity']
+                wsv = seq_info.get('word_slot_values', {})
+                if entity_name in wsv:
+                    valid_words.update(wsv[entity_name])
             elif 'number_slot' in next_item:
                 valid_words.add('<NUMBER_SLOT>')
             elif 'number_str_slot' in next_item:
@@ -1143,14 +1200,28 @@ class StreamingCommandMatcher:
         word_accepted = False
 
         # Try adding word to all existing paths.
-        # Skip paths whose start_position is after the current transcript position -
-        # those paths started later in the transcript and must not receive earlier words
-        # during replay (would cause cross-positional matches).
+        # When a path accepts a word that is NOT required by every matching sequence
+        # (i.e. some sequences would treat it as a filler), fork a shadow copy of the
+        # path in its pre-acceptance state so both branches compete: one pursues
+        # patterns that include the word, the other pursues patterns that don't.
+        # Dedup later collapses identical states, bounding the path count.
+        forks_to_add = []
         for path in self.active_paths:
-            if transcript_position is not None and transcript_position < path.start_position:
-                continue
-            if path.try_add_word(word, stream_type=stream_type):
+            should_fork = not path._word_required_by_all_matching(word)
+            if should_fork:
+                # Clone BEFORE advancing so the shadow holds the pre-acceptance state.
+                shadow = path.clone(self.next_path_id)
+                self.next_path_id += 1
+            accepted = path.try_add_word(word, stream_type=stream_type)
+            if accepted:
                 word_accepted = True
+                if should_fork:
+                    # Shadow stays at pre-acceptance state; treat word as filler on it.
+                    shadow.consecutive_fillers += 1
+                    if stream_type == "FINAL":
+                        shadow.local_budget = max(0, shadow.local_budget - 1)
+                    forks_to_add.append(shadow)
+        self.active_paths.extend(forks_to_add)
 
         # Check if word is valid as a first word (start of new path)
         # Get valid next words for an empty path (i.e., valid first words)
@@ -1161,7 +1232,10 @@ class StreamingCommandMatcher:
                 if 'word' in first_item:
                     valid_first_words.add(first_item['word'])
                 elif 'entity' in first_item:
-                    valid_first_words.add('<ENTITY>')
+                    entity_name = first_item['entity']
+                    wsv = seq_info.get('word_slot_values', {})
+                    if entity_name in wsv:
+                        valid_first_words.update(wsv[entity_name])
 
         if self.verbose:
             LOG.debug(f"  Valid first words count: {len(valid_first_words)}, word '{word}' valid: {word in valid_first_words}")
@@ -1176,7 +1250,7 @@ class StreamingCommandMatcher:
         )
 
         # If word is valid as first word, create new path with its transcript position
-        if not _exclusive_slot_open and (word in valid_first_words or '<ENTITY>' in valid_first_words):
+        if not _exclusive_slot_open and word in valid_first_words:
             pos = transcript_position if transcript_position is not None else 0
             new_path = MatcherPath(self.next_path_id, self.global_budget, self.all_sequences, self.filler_config, start_position=pos, calc_entity_configs=self.calc_entity_configs)
             self.next_path_id += 1
@@ -1330,6 +1404,14 @@ class StreamingCommandMatcher:
                 if 'word' in first:
                     valid_first_words.add(first['word'])
 
+        # Build a map: first_word -> set of intent names that start with it
+        first_word_intents = {}
+        for seq_info in self.all_sequences:
+            if seq_info['sequence']:
+                first = seq_info['sequence'][0]
+                if 'word' in first:
+                    first_word_intents.setdefault(first['word'], set()).add(seq_info['intent'])
+
         before_count = len(self.active_paths)
         surviving = []
         for path in self.active_paths:
@@ -1340,9 +1422,15 @@ class StreamingCommandMatcher:
                         path.matched_words[0] == old_word and
                         new_word in valid_first_words and
                         new_word != old_word):
-                    LOG.info(f"  ✂️  Pruning path {path.path_id} ({path.matched_words}): "
-                             f"start word '{old_word}' corrected to valid command word '{new_word}' at position {path.start_position}")
-                    kill = True
+                    # Don't prune if old and new words share intent coverage — they're
+                    # alternatives in the same pattern (e.g. [what|when]); the path is
+                    # still valid regardless of which Riva currently transcribes.
+                    old_intents = first_word_intents.get(old_word, set())
+                    new_intents = first_word_intents.get(new_word, set())
+                    if not old_intents.intersection(new_intents):
+                        LOG.info(f"  ✂️  Pruning path {path.path_id} ({path.matched_words}): "
+                                 f"start word '{old_word}' corrected to valid command word '{new_word}' at position {path.start_position}")
+                        kill = True
             if not kill:
                 surviving.append(path)
 

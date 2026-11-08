@@ -482,9 +482,9 @@ def handle_intents_ready(event):
         # Register entry intent patterns as always-active (protected layer).
         # Entry patterns are flow triggers — always on, not subject to skill group
         # enable/disable, regardless of command_groups config.
-        for entry_intent, patterns in entry_intents.items():
-            loop.interim_matcher.register_intent(entry_intent, patterns)
-            loop.final_matcher.register_intent(entry_intent, patterns)
+        for entry_intent, (patterns, wsv) in entry_intents.items():
+            loop.interim_matcher.register_intent(entry_intent, patterns, word_slot_values=wsv)
+            loop.final_matcher.register_intent(entry_intent, patterns, word_slot_values=wsv)
             new_patterns = [p for p in loop.shared_patterns if p.intent_name == entry_intent]
             loop.protected_patterns.extend(new_patterns)
             loop.protected_intent_names.add(entry_intent)

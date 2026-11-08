@@ -70,24 +70,89 @@ def build_audio_wake_patterns(wake_phrases):
     return {f'{MANAGE_TAG}audio:wake': list(wake_phrases)}
 
 
+def _ast_extract_var(init_path, var_name):
+    """Extract a module-level variable from a skill's __init__.py using AST parsing.
+
+    Avoids executing the module (which fails on relative imports). Resolves simple
+    module-level variable references so ENTITY_EXPANSIONS can reference e.g. _DAYS_OF_WEEK.
+
+    Returns the variable's value, or None if not found or not evaluable.
+    """
+    import ast
+
+    try:
+        source = open(init_path).read()
+        tree = ast.parse(source)
+    except Exception as e:
+        LOG.debug(f"Could not parse {init_path}: {e}")
+        return None
+
+    # First pass: collect all module-level literal assignments as local_vars
+    local_vars = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Name):
+                continue
+            try:
+                local_vars[target.id] = ast.literal_eval(node.value)
+            except Exception:
+                pass
+
+    # Second pass: find var_name and evaluate, substituting Name refs from local_vars
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not (isinstance(target, ast.Name) and target.id == var_name):
+                continue
+            try:
+                return ast.literal_eval(node.value)
+            except Exception:
+                pass
+            try:
+                return _ast_eval_node(node.value, local_vars)
+            except Exception as e:
+                LOG.debug(f"Could not evaluate {var_name} in {init_path}: {e}")
+                return None
+
+    return None
+
+
+def _ast_eval_node(node, local_vars):
+    """Recursively evaluate an AST node, resolving Name references from local_vars."""
+    import ast
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id in local_vars:
+            return local_vars[node.id]
+        raise ValueError(f"Unknown name: {node.id}")
+    if isinstance(node, ast.List):
+        return [_ast_eval_node(e, local_vars) for e in node.elts]
+    if isinstance(node, ast.Dict):
+        return {_ast_eval_node(k, local_vars): _ast_eval_node(v, local_vars)
+                for k, v in zip(node.keys, node.values)}
+    if isinstance(node, ast.Tuple):
+        return tuple(_ast_eval_node(e, local_vars) for e in node.elts)
+    try:
+        return ast.literal_eval(node)
+    except Exception:
+        raise ValueError(f"Cannot evaluate node type {type(node).__name__}")
+
+
 def load_skill_config(skill_path):
     """Load SKILL_CONFIG from a skill's __init__.py if it exists.
 
     Returns:
         dict: Skill config or empty dict if not found
     """
-    import importlib.util
-    try:
-        init_path = os.path.join(skill_path, '__init__.py')
-        if not os.path.exists(init_path):
-            return {}
-        spec = importlib.util.spec_from_file_location("temp_skill_cfg", init_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return getattr(module, 'SKILL_CONFIG', {})
-    except Exception as e:
-        LOG.debug(f"Could not load SKILL_CONFIG from {skill_path}: {e}")
+    init_path = os.path.join(skill_path, '__init__.py')
+    if not os.path.exists(init_path):
         return {}
+    result = _ast_extract_var(init_path, 'SKILL_CONFIG')
+    return result if isinstance(result, dict) else {}
 
 
 def load_entity_expansions(skill_path):
@@ -99,21 +164,11 @@ def load_entity_expansions(skill_path):
     Returns:
         dict: Entity expansions or empty dict if not found
     """
-    import importlib.util
-
-    try:
-        init_path = os.path.join(skill_path, '__init__.py')
-        if not os.path.exists(init_path):
-            return {}
-
-        spec = importlib.util.spec_from_file_location("temp_skill", init_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
-        return getattr(module, 'ENTITY_EXPANSIONS', {})
-    except Exception as e:
-        LOG.debug(f"Could not load ENTITY_EXPANSIONS from {skill_path}: {e}")
+    init_path = os.path.join(skill_path, '__init__.py')
+    if not os.path.exists(init_path):
         return {}
+    result = _ast_extract_var(init_path, 'ENTITY_EXPANSIONS')
+    return result if isinstance(result, dict) else {}
 
 
 def expand_pattern_entities(pattern, entity_expansions):
@@ -352,9 +407,12 @@ def load_flow_files(skill_path, skill_prefix, entity_expansions, loop):
             entry_intent = f'{skill_prefix}:{flow_name}'
             try:
                 expanded = []
+                merged_wsv = {}
                 for p in entry_patterns[flow_name]:
-                    expanded.extend(expand_pattern_entities(p, entity_expansions))
-                entry_intents[entry_intent] = expanded
+                    pats, wsv = expand_pattern_entities(p, entity_expansions)
+                    expanded.extend(pats)
+                    merged_wsv.update(wsv)
+                entry_intents[entry_intent] = (expanded, merged_wsv)
                 LOG.info(f"[load_flow_files] entry intent '{entry_intent}' "
                          f"({len(expanded)} patterns) — caller registers on matchers")
             except Exception as e:

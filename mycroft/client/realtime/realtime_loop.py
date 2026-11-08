@@ -1576,6 +1576,183 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             LOG.info(f"Whisper matcher budget exhausted — ending session")
             self.session_active = False
 
+    def _dispatch_match_result(self, match, matcher, words, current_count,
+                               is_final, stream_name, word_timings, now):
+        """Dispatch a completed match.
+
+        Returns 'dispatched' if the match was sent (caller should break/return),
+        'skip' if the match was rejected and the caller should continue to the
+        next word, or None if no special action is needed.
+        """
+        utterance = match['utterance']
+        intent = match['intent']
+        LOG.info(f"✓ COMMAND MATCHED ({stream_name}): '{utterance}' (intent: {intent})")
+
+        # ── FREE_TEXT trigger ─────────────────────────────────────────
+        if intent.startswith(FREE_TEXT_TAG):
+            original_intent = intent[len(FREE_TEXT_TAG):]
+            trigger_end_time = None
+            if is_final and word_timings and len(word_timings) >= current_count:
+                trigger_end_time = word_timings[current_count - 1][1]
+            self._enter_free_text_mode(original_intent, utterance, trigger_end_time)
+            self.interim_matcher.reset()
+            self.final_matcher.reset()
+            return 'dispatched'
+
+        # ── QA trigger ────────────────────────────────────────────────
+        if intent.startswith(QA_TAG):
+            original_intent = intent[len(QA_TAG):]
+            qa_cfg = self._qa_config_map.get(intent, {})
+            self._enter_qa_mode(original_intent, qa_cfg, utterance)
+            self.interim_matcher.reset()
+            self.final_matcher.reset()
+            return 'dispatched'
+
+        # ── REPEAT trigger ────────────────────────────────────────────
+        if intent.startswith(REPEAT_TAG):
+            tag_body = intent[len(REPEAT_TAG):]
+            is_bare = tag_body.endswith(':bare')
+            n_str = tag_body.replace(':bare', '')
+            try:
+                n = int(n_str)
+            except ValueError:
+                LOG.warning(f"Invalid repeat intent tag: {intent}")
+                return 'skip'
+            if is_bare and not self.repeat_window_open:
+                LOG.info(f"⏩ Bare repeat '{utterance}' outside window — skipping, leaving paths active")
+                return 'skip'
+            if self._is_duplicate(intent, now):
+                return 'skip'
+            self.interim_matcher.reset()
+            self.final_matcher.reset()
+            self._enter_repeat_mode(n, is_bare)
+            self._record_execution(intent, now, stream_name)
+            return 'dispatched'
+
+        # ── MANAGE trigger ────────────────────────────────────────────
+        if intent.startswith(MANAGE_TAG):
+            tag_body = intent[len(MANAGE_TAG):]
+            action, _, target_name = tag_body.partition(':')
+            if action in ('stt', 'audio'):
+                manage_target = target_name
+            elif target_name == 'commands':
+                manage_target = None
+            else:
+                manage_target = None
+                for g in self.command_groups:
+                    if g['name'] == target_name:
+                        manage_target = g['skill_prefix']
+                        break
+            if self._is_duplicate(intent, now):
+                return 'skip'
+            self.interim_matcher.reset()
+            self.final_matcher.reset()
+            self._handle_manage_command(action, manage_target)
+            self._record_execution(intent, now, stream_name)
+            return 'dispatched'
+
+        # ── FINAL cross-command stitch guard ──────────────────────────
+        if is_final:
+            matched_words_list = utterance.split()
+            _match_pos = None
+            for _i in range(len(words) - len(matched_words_list) + 1):
+                if words[_i:_i + len(matched_words_list)] == matched_words_list:
+                    _match_pos = _i
+            if _match_pos is not None:
+                _match_end = _match_pos + len(matched_words_list)
+                _matched_remaining = list(matched_words_list)
+                _skipped = []
+                for _seg_word in words[_match_pos:_match_end]:
+                    if _matched_remaining and _seg_word == _matched_remaining[0]:
+                        _matched_remaining.pop(0)
+                    else:
+                        _skipped.append(_seg_word)
+                _valid_first = set()
+                for _seq in matcher.all_sequences:
+                    if _seq['sequence']:
+                        _first = _seq['sequence'][0]
+                        if 'word' in _first:
+                            _valid_first.add(_first['word'])
+                _stitch_words = [w for w in _skipped if w in _valid_first]
+                if _stitch_words:
+                    LOG.info(f"⛔ FINAL cross-command stitch rejected: '{utterance}' "
+                             f"skipped over command-starting word(s) {_stitch_words}")
+                    return 'skip'
+
+        # ── Deduplication ─────────────────────────────────────────────
+        if self._is_duplicate(utterance, now):
+            LOG.info(f"⏭️  Skipping duplicate: '{utterance}'")
+            return 'skip'
+        has_pending_stt = any(
+            isinstance(v, tuple) and len(v) == 2 and v[0] == '__PENDING_SECONDARY_STT__'
+            for v in match.get('entities', {}).values()
+        )
+        if has_pending_stt and self._is_duplicate(intent, now):
+            LOG.info(f"⏭️  Skipping secondary-STT re-dispatch for intent '{intent}'")
+            return 'skip'
+
+        # ── Dispatch ──────────────────────────────────────────────────
+        entities = match.get('entities', {})
+        has_pending_stt = any(
+            isinstance(v, tuple) and len(v) == 2 and v[0] == '__PENDING_SECONDARY_STT__'
+            for v in entities.values()
+        )
+        if has_pending_stt and not is_final:
+            self._record_execution(intent, now, stream_name)
+        self._resolve_pending_secondary_stt_entities(entities)
+        self.emit('recognizer_loop:utterance', {
+            'utterances': [utterance],
+            'lang': self.lang,
+            'intent': intent,
+            'entities': entities,
+        })
+        self.emit('mycroft.realtime.command_matched', {
+            'utterance': utterance,
+            'intent': intent,
+            'stream': stream_name
+        })
+
+        if self.debug:
+            self.emit('mycroft.debug.riva.matched', {'utterance': utterance})
+
+        self.interim_matcher.reset()
+        self.final_matcher.reset()
+        self._secondary_stt_slot_active = False
+        self.riva_interim_word_count = 0
+        self.riva_final_word_count = 0
+        self.prev_interim_transcript = ""
+        self.prev_final_transcript = ""
+
+        matched_words = utterance.split()
+        match_position = None
+        for i in range(len(words) - len(matched_words) + 1):
+            if words[i:i + len(matched_words)] == matched_words:
+                match_position = i
+        self._record_execution(utterance, now, stream_name, matched_words,
+                               match_position, intent)
+
+        if match_position is not None:
+            new_min = match_position + len(matched_words)
+        else:
+            new_min = current_count
+        if is_final:
+            self.final_min_replay_pos = max(self.final_min_replay_pos, new_min)
+        else:
+            self.interim_min_replay_pos = max(self.interim_min_replay_pos, new_min)
+        if self.verbose:
+            LOG.debug(f"Min replay pos for {stream_name} advanced to {new_min}")
+
+        self.last_executed_command = (utterance, intent)
+        self.last_command_dispatch_time = now
+
+        if self.repeat_enabled:
+            self._open_repeat_window(intent=intent)
+
+        if self.verbose:
+            LOG.debug(f"Both matchers reset after {stream_name} match")
+
+        return 'dispatched'
+
     def _on_words_recognized(self, words, is_final, word_timings=None):
         """Callback when Riva recognizes words (interim or final).
 
@@ -1638,6 +1815,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         matcher.global_budget = self.shared_global_budget
 
         transcript = ' '.join(words)
+        preserved = []  # paths immune to replay; re-added after word loop
 
         # Detect word count drop (new segment or refinement)
         if current_count > len(words):
@@ -1658,29 +1836,20 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     LOG.info(f"[RIVA {stream_name}] Spurious re-delivery (identical transcript) — ignoring")
                 return
             elif is_refinement:
+                # Paths keep what they already caught — just advance past the
+                # revised words so only genuinely new words feed through.
+                current_count = len(words)
+                if is_final:
+                    self.riva_final_word_count = current_count
+                    self.prev_final_transcript = transcript
+                else:
+                    self.riva_interim_word_count = current_count
+                    self.prev_interim_transcript = transcript
                 if self.verbose:
                     LOG.info(f"[RIVA {stream_name}] Refinement: "
-                             f"prev='{prev_transcript}' new='{transcript}' — resetting matcher")
-                # Preserve paths that are mid-slot — their accumulated buffer
-                # represents content that survived prior interim deliveries and
-                # should not be thrown away just because Riva revised a word.
-                # Non-slot paths reset normally; slot paths replay from their
-                # trigger word position so the pattern prefix re-validates.
-                open_slot_paths = [p for p in matcher.active_paths
-                                   if p.has_open_slot() or p._slot_closed_by_word]
-                matcher.reset()
-                if open_slot_paths:
-                    # Keep only the fittest open-slot path (highest fitness score)
-                    best = max(open_slot_paths, key=lambda p: p.fitness_score)
-                    matcher.active_paths = [best]
-                    if self.verbose:
-                        LOG.info(f"[RIVA {stream_name}] Refinement: preserved mid-slot path "
-                                 f"{best.path_id} (fitness={best.fitness_score}, "
-                                 f"buf_len={_slot_buf_len(best)})")
-                if is_final:
-                    self.final_min_replay_pos = 0
-                else:
-                    self.interim_min_replay_pos = 0
+                             f"prev='{prev_transcript}' new='{transcript}' — "
+                             f"keeping {len(matcher.active_paths)} paths, waiting for new words")
+                return
             else:
                 if self.verbose:
                     LOG.info(f"[RIVA {stream_name}] True segment boundary: "
@@ -1714,93 +1883,93 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
                 # UNDO WINDOW: Only FINAL stream can undo a prior INTERIM execution
                 if is_final and self.executed_utterances_history:
-                    last_entry = self.executed_utterances_history[-1]
-                    if len(last_entry) == 6:
-                        last_utterance, last_time, last_stream, last_matched_words, last_match_position, last_intent = last_entry
-                    elif len(last_entry) == 5:
-                        last_utterance, last_time, last_stream, last_matched_words, last_match_position = last_entry
-                        last_intent = last_utterance
-                    elif len(last_entry) == 4:
-                        last_utterance, last_time, last_stream, last_matched_words = last_entry
-                        last_match_position = None
-                        last_intent = last_utterance
-                    else:
-                        last_utterance, last_time, last_stream = last_entry
-                        last_matched_words = None
-                        last_intent = last_utterance
-                        last_match_position = None
-
-                    time_since_last = now - last_time
-
-                    # Only allow undo for normal deterministic skill intents —
-                    # not for protected-layer intents (entry intents, management,
-                    # repeat, free-text, QA, flow state groups) where INTERIM is
-                    # authoritative and double-fire is prevented by dedup alone.
-                    _undo_eligible = (
-                        last_match_position is not None
-                        and last_matched_words is not None
-                        and last_intent not in self.protected_intent_names
-                        and not any(last_intent.startswith(t) for t in (
-                            MANAGE_TAG, REPEAT_TAG, FREE_TEXT_TAG, QA_TAG
-                        ))
-                        and '__group__' not in last_intent
-                    )
-                    if (last_stream == "INTERIM" and time_since_last < 1.0 and _undo_eligible):
-                        should_undo = False
-
-                        if last_matched_words is None or last_match_position is None:
-                            should_undo = True
-                            if self.verbose:
-                                LOG.info(f"⚠️  Transcript changed {time_since_last:.1f}s after "
-                                         f"execution — removed stale dedup entry: '{last_utterance}' "
-                                         f"(no position tracked)")
+                        last_entry = self.executed_utterances_history[-1]
+                        if len(last_entry) == 6:
+                            last_utterance, last_time, last_stream, last_matched_words, last_match_position, last_intent = last_entry
+                        elif len(last_entry) == 5:
+                            last_utterance, last_time, last_stream, last_matched_words, last_match_position = last_entry
+                            last_intent = last_utterance
+                        elif len(last_entry) == 4:
+                            last_utterance, last_time, last_stream, last_matched_words = last_entry
+                            last_match_position = None
+                            last_intent = last_utterance
                         else:
-                            matched_word_count = len(last_matched_words)
-                            if last_match_position + matched_word_count <= len(curr_words):
-                                current_matched_words = curr_words[
-                                    last_match_position:last_match_position + matched_word_count
-                                ]
-                                if current_matched_words != last_matched_words:
-                                    words_before_match = curr_words[:last_match_position]
-                                    replacement_all_valid = True
-                                    for i, replacement_word in enumerate(current_matched_words):
-                                        position_context = words_before_match + current_matched_words[:i]
-                                        valid_at_position = set()
-                                        for seq_info in self.final_matcher.all_sequences:
-                                            seq = seq_info['sequence']
-                                            pos = len(position_context)
-                                            if pos < len(seq):
-                                                context_matches = all(
-                                                    seq[j].get('word') == position_context[j]
-                                                    for j in range(pos)
-                                                    if 'word' in seq[j]
-                                                )
-                                                if context_matches and 'word' in seq[pos]:
-                                                    valid_at_position.add(seq[pos]['word'])
-                                        if replacement_word not in valid_at_position:
-                                            replacement_all_valid = False
+                            last_utterance, last_time, last_stream = last_entry
+                            last_matched_words = None
+                            last_intent = last_utterance
+                            last_match_position = None
+
+                        time_since_last = now - last_time
+
+                        # Only allow undo for normal deterministic skill intents —
+                        # not for protected-layer intents (entry intents, management,
+                        # repeat, free-text, QA, flow state groups) where INTERIM is
+                        # authoritative and double-fire is prevented by dedup alone.
+                        _undo_eligible = (
+                            last_match_position is not None
+                            and last_matched_words is not None
+                            and last_intent not in self.protected_intent_names
+                            and not any(last_intent.startswith(t) for t in (
+                                MANAGE_TAG, REPEAT_TAG, FREE_TEXT_TAG, QA_TAG
+                            ))
+                            and '__group__' not in last_intent
+                        )
+                        if (last_stream == "INTERIM" and time_since_last < 1.0 and _undo_eligible):
+                            should_undo = False
+
+                            if last_matched_words is None or last_match_position is None:
+                                should_undo = True
+                                if self.verbose:
+                                    LOG.info(f"⚠️  Transcript changed {time_since_last:.1f}s after "
+                                             f"execution — removed stale dedup entry: '{last_utterance}' "
+                                             f"(no position tracked)")
+                            else:
+                                matched_word_count = len(last_matched_words)
+                                if last_match_position + matched_word_count <= len(curr_words):
+                                    current_matched_words = curr_words[
+                                        last_match_position:last_match_position + matched_word_count
+                                    ]
+                                    if current_matched_words != last_matched_words:
+                                        words_before_match = curr_words[:last_match_position]
+                                        replacement_all_valid = True
+                                        for i, replacement_word in enumerate(current_matched_words):
+                                            position_context = words_before_match + current_matched_words[:i]
+                                            valid_at_position = set()
+                                            for seq_info in self.final_matcher.all_sequences:
+                                                seq = seq_info['sequence']
+                                                pos = len(position_context)
+                                                if pos < len(seq):
+                                                    context_matches = all(
+                                                        seq[j].get('word') == position_context[j]
+                                                        for j in range(pos)
+                                                        if 'word' in seq[j]
+                                                    )
+                                                    if context_matches and 'word' in seq[pos]:
+                                                        valid_at_position.add(seq[pos]['word'])
+                                            if replacement_word not in valid_at_position:
+                                                replacement_all_valid = False
+                                                if self.verbose:
+                                                    LOG.debug(f"Replacement word '{replacement_word}' "
+                                                              f"not valid — keeping dedup protection")
+                                                break
+                                        if replacement_all_valid:
+                                            should_undo = True
                                             if self.verbose:
-                                                LOG.debug(f"Replacement word '{replacement_word}' "
-                                                          f"not valid — keeping dedup protection")
-                                            break
-                                    if replacement_all_valid:
-                                        should_undo = True
+                                                LOG.info(f"⚠️  Matched words changed {time_since_last:.1f}s "
+                                                         f"after execution at position {last_match_position}: "
+                                                         f"{' '.join(last_matched_words)} → {' '.join(current_matched_words)} — "
+                                                         f"removed stale dedup entry: '{last_utterance}'")
+                                    else:
                                         if self.verbose:
-                                            LOG.info(f"⚠️  Matched words changed {time_since_last:.1f}s "
-                                                     f"after execution at position {last_match_position}: "
-                                                     f"{' '.join(last_matched_words)} → {' '.join(current_matched_words)} — "
-                                                     f"removed stale dedup entry: '{last_utterance}'")
+                                            LOG.debug(f"Transcript changed but matched words unchanged "
+                                                      f"— keeping dedup protection")
                                 else:
                                     if self.verbose:
-                                        LOG.debug(f"Transcript changed but matched words unchanged "
-                                                  f"— keeping dedup protection")
-                            else:
-                                if self.verbose:
-                                    LOG.debug(f"Match position no longer in transcript — "
-                                              f"keeping dedup protection")
+                                        LOG.debug(f"Match position no longer in transcript — "
+                                                  f"keeping dedup protection")
 
-                        if should_undo:
-                            self.executed_utterances_history.pop()
+                            if should_undo:
+                                self.executed_utterances_history.pop()
 
                 # Prune paths corrected to a different valid command-starting word
                 changed_positions = {}
@@ -1809,10 +1978,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                         changed_positions[_i] = (old, new)
                 if changed_positions:
                     matcher.prune_corrected_paths(changed_positions, curr_words)
-
-                # Slot buffers on surviving paths may contain words from the changed
-                # region — clear them so replay re-enters slots cleanly.
-                matcher.clear_slot_state_all_paths()
+                    matcher.clear_slot_state_all_paths()
 
                 min_replay_pos = (self.final_min_replay_pos if is_final
                                   else self.interim_min_replay_pos)
@@ -1823,6 +1989,22 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 else:
                     self.riva_interim_word_count = min_replay_pos
                     self.prev_interim_transcript = ""
+
+                # Check if any surviving path already matched all its words —
+                # a path that completed before Riva mutated the transcript should
+                # fire now rather than being reset and replayed from scratch.
+                already_complete = None
+                for _path in matcher.active_paths:
+                    _result = _path.check_completion()
+                    if _result is not None:
+                        already_complete = _result
+                        break
+
+                if already_complete is not None:
+                    self._dispatch_match_result(
+                        already_complete, matcher, words, current_count,
+                        is_final, stream_name, word_timings, now)
+                    return
 
         # Extract new words
         new_words = words[current_count:]
@@ -1838,12 +2020,6 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
         # Process new words through matcher
         for word in new_words:
-            current_count += 1
-            if is_final:
-                self.riva_final_word_count = current_count
-            else:
-                self.riva_interim_word_count = current_count
-
             if self.verbose:
                 LOG.debug(f"[RIVA {stream_name}] {word}")
 
@@ -1858,7 +2034,13 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 match, word_accepted = None, False
             else:
                 match, word_accepted = matcher.add_word(word, stream_type=stream_name,
-                                                        transcript_position=current_count - 1)
+                                                        transcript_position=current_count)
+
+            current_count += 1
+            if is_final:
+                self.riva_final_word_count = current_count
+            else:
+                self.riva_interim_word_count = current_count
 
             # Only update last_word_time when the word was genuinely accepted by a
             # matcher path — hallucinated garbage words that no path accepts should
@@ -1891,187 +2073,14 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                         spawned = True
 
             if match:
-                utterance = match['utterance']
-                intent = match['intent']
-                LOG.info(f"✓ COMMAND MATCHED ({stream_name}): '{str(len(utterance))}' (intent: {str(len(intent))})")
-
-                # ── FREE_TEXT trigger ─────────────────────────────────────────
-                if intent.startswith(FREE_TEXT_TAG):
-                    original_intent = intent[len(FREE_TEXT_TAG):]
-                    # Get end_time of last deterministic word for precise audio cut
-                    trigger_end_time = None
-                    if is_final and word_timings and len(word_timings) >= current_count:
-                        trigger_end_time = word_timings[current_count - 1][1]
-                    self._enter_free_text_mode(original_intent, utterance, trigger_end_time)
-                    # Reset matchers — deterministic matching pauses
-                    self.interim_matcher.reset()
-                    self.final_matcher.reset()
+                result = self._dispatch_match_result(
+                    match, matcher, words, current_count,
+                    is_final, stream_name, word_timings, now)
+                if result == 'dispatched':
                     break
+                # 'skip' → continue to next word (already_complete falls through)
 
-                # ── QA trigger ────────────────────────────────────────────────
-                if intent.startswith(QA_TAG):
-                    original_intent = intent[len(QA_TAG):]
-                    qa_cfg = self._qa_config_map.get(intent, {})
-                    self._enter_qa_mode(original_intent, qa_cfg, utterance)
-                    self.interim_matcher.reset()
-                    self.final_matcher.reset()
-                    break
-
-                # ── REPEAT trigger ────────────────────────────────────────────
-                if intent.startswith(REPEAT_TAG):
-                    tag_body = intent[len(REPEAT_TAG):]  # e.g. '3' or '3:bare'
-                    is_bare = tag_body.endswith(':bare')
-                    n_str = tag_body.replace(':bare', '')
-                    try:
-                        n = int(n_str)
-                    except ValueError:
-                        LOG.warning(f"Invalid repeat intent tag: {str(len(intent))}")
-                        continue
-                    # Bare quantifier outside window — skip without resetting matchers
-                    # so other active paths (e.g. calc slots containing "times") survive
-                    if is_bare and not self.repeat_window_open:
-                        LOG.info(f"⏩ Bare repeat '{utterance}' outside window — skipping, leaving paths active")
-                        continue
-                    if self._is_duplicate(intent, now):
-                        continue
-                    self.interim_matcher.reset()
-                    self.final_matcher.reset()
-                    self._enter_repeat_mode(n, is_bare)
-                    self._record_execution(intent, now, stream_name)
-                    break
-
-                # ── MANAGE trigger ────────────────────────────────────────────
-                if intent.startswith(MANAGE_TAG):
-                    tag_body = intent[len(MANAGE_TAG):]  # e.g. 'enable:search'
-                    action, _, target_name = tag_body.partition(':')
-                    if action in ('stt', 'audio'):
-                        # STT load/unload and audio:wake — pass target_name directly
-                        manage_target = target_name
-                    elif target_name == 'commands':
-                        manage_target = None  # global mute/unmute
-                    else:
-                        manage_target = None
-                        for g in self.command_groups:
-                            if g['name'] == target_name:
-                                manage_target = g['skill_prefix']
-                                break
-                    if self._is_duplicate(intent, now):
-                        continue
-                    self.interim_matcher.reset()
-                    self.final_matcher.reset()
-                    self._handle_manage_command(action, manage_target)
-                    self._record_execution(intent, now, stream_name)
-                    break
-
-                # ── FINAL cross-command stitch guard ──────────────────────────
-                if is_final:
-                    matched_words_list = utterance.split()
-                    _match_pos = None
-                    for _i in range(len(words) - len(matched_words_list) + 1):
-                        if words[_i:_i + len(matched_words_list)] == matched_words_list:
-                            _match_pos = _i
-                    if _match_pos is not None:
-                        _match_end = _match_pos + len(matched_words_list)
-                        _matched_remaining = list(matched_words_list)
-                        _skipped = []
-                        for _seg_word in words[_match_pos:_match_end]:
-                            if _matched_remaining and _seg_word == _matched_remaining[0]:
-                                _matched_remaining.pop(0)
-                            else:
-                                _skipped.append(_seg_word)
-                        _valid_first = set()
-                        for _seq in matcher.all_sequences:
-                            if _seq['sequence']:
-                                _first = _seq['sequence'][0]
-                                if 'word' in _first:
-                                    _valid_first.add(_first['word'])
-                        _stitch_words = [w for w in _skipped if w in _valid_first]
-                        if _stitch_words:
-                            LOG.info(f"⛔ FINAL cross-command stitch rejected: '{str(len(utterance))}' "
-                                     f"skipped over command-starting word(s) {str(len(_stitch_words))}")
-                            continue
-
-                # ── Deduplication ─────────────────────────────────────────────
-                if self._is_duplicate(utterance, now):
-                    LOG.info(f"⏭️  Skipping duplicate: '{str(len(utterance))}'")
-                    continue
-                # Secondary-STT intents: dedup on intent name, not utterance text,
-                # because Riva revisions produce different utterance strings for the
-                # same command and text-based dedup misses the re-dispatch.
-                has_pending_stt = any(
-                    isinstance(v, tuple) and len(v) == 2 and v[0] == '__PENDING_SECONDARY_STT__'
-                    for v in match.get('entities', {}).values()
-                )
-                if has_pending_stt and self._is_duplicate(intent, now):
-                    LOG.info(f"⏭️  Skipping secondary-STT re-dispatch for intent '{intent}'")
-                    continue
-
-                # ── Dispatch ──────────────────────────────────────────────────
-                entities = match.get('entities', {})
-                has_pending_stt = any(
-                    isinstance(v, tuple) and len(v) == 2 and v[0] == '__PENDING_SECONDARY_STT__'
-                    for v in entities.values()
-                )
-                if has_pending_stt and not is_final:
-                    # Record intent name as dedup key so INTERIM revisions can't re-dispatch
-                    self._record_execution(intent, now, stream_name)
-                self._resolve_pending_secondary_stt_entities(entities)
-                self.emit('recognizer_loop:utterance', {
-                    'utterances': [utterance],
-                    'lang': self.lang,
-                    'intent': intent,
-                    'entities': entities,
-                })
-                self.emit('mycroft.realtime.command_matched', {
-                    'utterance': utterance,
-                    'intent': intent,
-                    'stream': stream_name
-                })
-
-                if self.debug:
-                    self.emit('mycroft.debug.riva.matched', {'utterance': utterance})
-
-                # Budget sync happens unconditionally after this loop (see the
-                # end of this method) — no need to duplicate it here.
-
-                # Reset both matchers
-                self.interim_matcher.reset()
-                self.final_matcher.reset()
-                self._secondary_stt_slot_active = False
-
-                # Record execution
-                matched_words = utterance.split()
-                match_position = None
-                for i in range(len(words) - len(matched_words) + 1):
-                    if words[i:i + len(matched_words)] == matched_words:
-                        match_position = i
-                self._record_execution(utterance, now, stream_name, matched_words,
-                                       match_position, intent)
-
-                # Advance min replay position
-                if match_position is not None:
-                    new_min = match_position + len(matched_words)
-                else:
-                    new_min = current_count
-                if is_final:
-                    self.final_min_replay_pos = max(self.final_min_replay_pos, new_min)
-                else:
-                    self.interim_min_replay_pos = max(self.interim_min_replay_pos, new_min)
-                if self.verbose:
-                    LOG.debug(f"Min replay pos for {stream_name} advanced to {new_min}")
-
-                # Update last_executed_command for repeat mode (non-repeat commands only)
-                self.last_executed_command = (utterance, intent)
-                self.last_command_dispatch_time = now
-
-                # Open repeat window for bare quantifier matching
-                if self.repeat_enabled:
-                    self._open_repeat_window(intent=intent)
-
-                if self.verbose:
-                    LOG.debug(f"Both matchers reset after {stream_name} match")
-                break
-
+        # Re-add preserved paths now that replay is done — they sit out the
         # FINAL boundary: close any open number slots and check for completion.
         # Number slots stay open during word processing to accumulate greedily;
         # when the FINAL stream ends we know the user has stopped speaking.
