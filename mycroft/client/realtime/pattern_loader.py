@@ -230,6 +230,18 @@ def expand_pattern_entities(pattern, entity_expansions):
             except Exception as e:
                 LOG.warning(f"Failed to load entity file {file_path}: {e}")
 
+        db_path = config.get('db')
+        db_query = config.get('db_query')
+        if db_path and db_query:
+            try:
+                import sqlite3
+                conn = sqlite3.connect(db_path)
+                rows = conn.execute(db_query).fetchall()
+                conn.close()
+                values.extend(str(r[0]) for r in rows if r[0])
+            except Exception as e:
+                LOG.warning(f"Failed to load entity from db {db_path}: {e}")
+
         if values:
             entity_values[entity_name] = values
             # Track word-list entities for capture (special slot types handle their own capture)
