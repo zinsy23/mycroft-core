@@ -363,6 +363,14 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self._qa_tts_event = threading.Event()  # set when tts_done fires from skill
         self._qa_stt_loaded_by_mode = False     # True if QA mode called spawn/load (not preloaded)
         self._qa_config_map = {}                # tagged_intent -> qa_config, populated at pattern load
+        self._free_text_config_map = {}         # tagged_intent -> {'stt_backend': ...}, populated at pattern load
+
+        # Riva-text state (free_text slot filled by Riva stream instead of Whisper)
+        self._riva_text_active = False          # True while collecting Riva FINAL words into slot
+        self._riva_text_intent = None           # original intent name
+        self._riva_text_trigger = None          # deterministic prefix utterance
+        self._riva_text_words = []              # accumulated FINAL words
+        self._riva_text_silence_deadline = 0.0  # epoch time for silence commit
         self._qa_abort = False                  # set by Riva callback when exit/interrupt word detected
         self._qa_abort_reason = None            # 'exit' or 'interrupt'
         self._qa_tts_playing = False            # True while TTS is active — sentinel suppressed during this
@@ -476,6 +484,11 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.free_text_intent = None
         self.free_text_final_words_seen = []
         self._pending_free_text = None
+        self._riva_text_active = False
+        self._riva_text_intent = None
+        self._riva_text_trigger = None
+        self._riva_text_words = []
+        self._riva_text_silence_deadline = 0.0
         self.qa_intent = None
         self.qa_config = {}
         self._pending_qa = None
@@ -531,8 +544,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         while self.session_active:
             now = time.time()
 
-            # Check session timeout
-            if now - self.last_word_time > self.session_timeout:
+            # Check session timeout — suppressed while riva-text slot is open
+            if not self._riva_text_active and now - self.last_word_time > self.session_timeout:
                 LOG.info("Session timeout - ending")
                 self.session_active = False
                 break
@@ -541,6 +554,11 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             if self.repeat_window_open and self.last_command_dispatch_time:
                 if now - self.last_command_dispatch_time > self.repeat_window_seconds:
                     self._close_repeat_window()
+
+            # Riva-text silence commit — poll deadline in case no more FINALs arrive.
+            if (self._riva_text_active and self._riva_text_words
+                    and time.time() > self._riva_text_silence_deadline):
+                self._commit_riva_text()
 
             # If Riva callback requested free-text mode, handle it here on the
             # loop thread so we have exclusive access to source (no competing reads).
@@ -879,6 +897,68 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
         LOG.info("Free-text complete — resumed DETERMINISTIC mode, Riva restarted")
 
+    # ── Riva-text mode ────────────────────────────────────────────────────────
+
+    def _enter_riva_text_mode(self, intent_name, trigger_utterance):
+        """Start accumulating Riva FINAL words into a free_text slot.
+
+        Called from the Riva callback thread. Riva keeps running — no mode
+        switch, no VAD, no Whisper. Every new FINAL word is accepted into the
+        slot buffer; _handle_riva_words checks the silence deadline on each
+        FINAL and dispatches when no new words arrive for riva_text_silence_seconds.
+        """
+        if self._riva_text_active:
+            return
+
+        rt_cfg = self.realtime_config.get('free_text', {})
+        silence_timeout = rt_cfg.get('riva_text_silence_seconds', 2.0)
+
+        self._riva_text_active = True
+        self._riva_text_intent = intent_name
+        self._riva_text_trigger = trigger_utterance
+        self._riva_text_words = []
+        self._riva_text_silence_deadline = time.time() + silence_timeout
+
+        LOG.info(f"🎙️  RIVA-TEXT: intent='{intent_name}' prefix='{trigger_utterance}' silence={silence_timeout}s")
+        self.emit('mycroft.realtime.mode_changed', {
+            'mode': 'riva_text',
+            'trigger': trigger_utterance,
+            'intent': intent_name,
+        })
+
+    def _commit_riva_text(self):
+        """Dispatch the accumulated Riva-text slot value and reset state."""
+        slot_text = ' '.join(self._riva_text_words).strip()
+        intent_name = self._riva_text_intent
+        trigger = self._riva_text_trigger
+
+        # Reset before dispatch so any re-entrant callback doesn't double-fire
+        self._riva_text_active = False
+        self._riva_text_intent = None
+        self._riva_text_trigger = None
+        self._riva_text_words = []
+        self._riva_text_silence_deadline = 0.0
+
+        full_utterance = f"{trigger} {slot_text}".strip()
+        LOG.info(f"✓ RIVA-TEXT COMMAND: '{full_utterance}' (intent: {intent_name})")
+
+        self.emit('recognizer_loop:utterance', {
+            'utterances': [full_utterance],
+            'lang': self.lang,
+            'intent': intent_name,
+        })
+        self.emit('mycroft.realtime.command_matched', {
+            'utterance': full_utterance,
+            'intent': intent_name,
+            'stream': 'RIVA_TEXT',
+        })
+        if self.debug:
+            self.emit('mycroft.debug.riva.matched', {'utterance': full_utterance})
+        self._record_execution(full_utterance, time.time(), 'RIVA_TEXT', intent=intent_name)
+
+        self.interim_matcher.reset()
+        self.final_matcher.reset()
+
     def _execute_free_text(self, audio=None, sample_rate=None):
         """Run Whisper batch inference on audio and dispatch intent.
 
@@ -1182,6 +1262,24 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 self._qa_committed_event.set()
                 return
 
+    @staticmethod
+    def _strip_trigger_prefix(words, trigger_words):
+        """Strip trigger phrase from a cumulative FINAL word list.
+
+        Scans words for the first occurrence of trigger_words as a contiguous
+        subsequence and returns everything after it. Returns None if the trigger
+        is not found (caller should discard this FINAL and wait for the next).
+        trigger_words comparison is lowercase/punctuation-stripped.
+        """
+        if not trigger_words:
+            return words
+        trigger_len = len(trigger_words)
+        lower_words = [w.lower().rstrip('.,!?') for w in words]
+        for i in range(len(lower_words) - trigger_len + 1):
+            if lower_words[i:i + trigger_len] == trigger_words:
+                return words[i + trigger_len:]
+        return None  # trigger not found yet
+
     def _qa_accumulate_final(self, transcript):
         """Called from Riva callback on each FINAL during QA listening phase.
 
@@ -1198,18 +1296,13 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # everything before and including them is discarded and accumulation starts
         # from what follows. Only applies once per QA session.
         if self._qa_trigger_words:
-            trigger_len = len(self._qa_trigger_words)
-            lower_words = [w.lower().rstrip('.,!?') for w in new_words]
-            for i in range(len(lower_words) - trigger_len + 1):
-                if lower_words[i:i + trigger_len] == self._qa_trigger_words:
-                    new_words = new_words[i + trigger_len:]
-                    LOG.info(f"QA accumulator: stripped trigger at pos {i}, remaining: {new_words}")
-                    self._qa_trigger_words = []
-                    break
-            else:
-                # Trigger phrase not found yet — discard this FINAL entirely
+            stripped = self._strip_trigger_prefix(new_words, self._qa_trigger_words)
+            if stripped is None:
                 LOG.info(f"QA accumulator: trigger not found yet, discarding: {new_words}")
                 return
+            LOG.info(f"QA accumulator: stripped trigger, remaining: {stripped}")
+            new_words = stripped
+            self._qa_trigger_words = []
 
         # Each FINAL means the user is still talking — reset the silence deadline
         if self._qa_listen_deadline:
@@ -1591,10 +1684,15 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # ── FREE_TEXT trigger ─────────────────────────────────────────
         if intent.startswith(FREE_TEXT_TAG):
             original_intent = intent[len(FREE_TEXT_TAG):]
+            ft_cfg = self._free_text_config_map.get(intent, {})
+            stt_backend = ft_cfg.get('stt_backend', 'faster_whisper')
             trigger_end_time = None
             if is_final and word_timings and len(word_timings) >= current_count:
                 trigger_end_time = word_timings[current_count - 1][1]
-            self._enter_free_text_mode(original_intent, utterance, trigger_end_time)
+            if stt_backend == 'riva':
+                self._enter_riva_text_mode(original_intent, utterance)
+            else:
+                self._enter_free_text_mode(original_intent, utterance, trigger_end_time)
             self.interim_matcher.reset()
             self.final_matcher.reset()
             return 'dispatched'
@@ -1773,6 +1871,39 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
         # During FREE_TEXT mode Riva is stopped — ignore any words that slip through.
         if self.mode == MODE_FREE_TEXT:
+            return
+
+        # During Riva-text: accumulate FINAL words into slot buffer; commit on silence.
+        if self._riva_text_active:
+            if is_final:
+                prev_count = self.riva_final_word_count
+                new_words = words[prev_count:]
+                if new_words:
+                    # On the first FINAL, strip the trigger prefix. Search the full
+                    # cumulative transcript (words) not just the diff (new_words) —
+                    # prev_count may already be past the trigger if it was processed
+                    # on a prior FINAL or the INTERIM word count advanced past it.
+                    if not self._riva_text_words:
+                        trigger_words = self._riva_text_trigger.lower().split()
+                        stripped = self._strip_trigger_prefix(words, trigger_words)
+                        if stripped is None:
+                            # Trigger not in this FINAL yet — don't advance word
+                            # count so the next FINAL re-scans from the same position
+                            if self.verbose:
+                                LOG.info(f"Riva-text: trigger not found yet, words={words}, trigger={trigger_words}")
+                            return
+                        new_words = stripped
+                    if new_words:
+                        self._riva_text_words.extend(new_words)
+                        rt_cfg = self.realtime_config.get('free_text', {})
+                        silence_timeout = rt_cfg.get('riva_text_silence_seconds', 2.0)
+                        self._riva_text_silence_deadline = time.time() + silence_timeout
+                        self.last_word_time = time.time()
+                        if self.verbose:
+                            LOG.info(f"Riva-text: slot='{' '.join(self._riva_text_words)}'")
+                self.riva_final_word_count = len(words)
+            else:
+                self.riva_interim_word_count = len(words)
             return
 
         # During QA mode: check exit/interrupt words AND accumulate FINALs for
@@ -2145,8 +2276,10 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         self.shared_global_budget = matcher.global_budget
 
         # See should_kill_session_on_budget() for the full rule and rationale.
-        if should_kill_session_on_budget(self.shared_global_budget, self.mode,
-                                          self.interim_matcher, self.final_matcher):
+        # Suppress while riva-text slot is open — matchers are reset but we're still collecting.
+        if (not self._riva_text_active
+                and should_kill_session_on_budget(self.shared_global_budget, self.mode,
+                                                  self.interim_matcher, self.final_matcher)):
             LOG.info(f"Global budget exhausted — ending session")
             self.session_active = False
             if self.stt_backend == 'riva' and self.riva_stream_thread:

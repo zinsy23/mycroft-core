@@ -292,6 +292,23 @@ def _split_free_text_pattern(pattern, free_text_entity):
     return prefix if prefix else None
 
 
+def _get_free_text_stt_backend(entity_expansions, free_text_entity, realtime_config):
+    """Return the stt_backend for the free_text entity slot.
+
+    Resolution order (first match wins):
+      1. Per-skill ENTITY_EXPANSIONS config: {'free_text': {'stt_backend': 'riva'}}
+      2. Global default in realtime config: realtime.free_text.default_stt_backend
+      3. Hard default: 'faster_whisper'
+    """
+    skill_cfg = entity_expansions.get(free_text_entity, {})
+    if isinstance(skill_cfg, dict) and 'stt_backend' in skill_cfg:
+        return skill_cfg['stt_backend']
+    global_default = (realtime_config
+                      .get('free_text', {})
+                      .get('default_stt_backend', 'faster_whisper'))
+    return global_default
+
+
 def _split_qa_pattern(pattern, entity_expansions):
     """Split a pattern at its {qa_text} placeholder.
 
@@ -539,9 +556,10 @@ def load_all_intent_patterns(skills_dir, verbose=False, realtime_config=None):
         tuple: (deterministic_patterns, free_text_triggers, repeat_patterns, qa_triggers)
           - deterministic_patterns: dict intent_name -> [pattern_str, ...]
             Normal patterns for StreamingCommandMatcher
-          - free_text_triggers: dict intent_name -> [prefix_pattern_str, ...]
+          - free_text_triggers: dict intent_name -> {'prefixes': [...], 'stt_backend': str}
             Prefix-only patterns tagged __FREE_TEXT__:intent, registered in
-            matcher; when matched, realtime_loop switches to free-text mode
+            matcher; when matched, realtime_loop switches to free-text mode.
+            stt_backend is 'faster_whisper' (default) or 'riva'.
           - repeat_patterns: dict intent_name -> [pattern_str, ...]
             Synthesized repeat patterns tagged __REPEAT__:N, registered in
             matcher with transient first-word handling
@@ -620,7 +638,12 @@ def load_all_intent_patterns(skills_dir, verbose=False, realtime_config=None):
 
                 if ft_lines:
                     tagged = f'{FREE_TEXT_TAG}{intent_name}'
-                    free_text_triggers[tagged] = ft_lines
+                    stt_backend = _get_free_text_stt_backend(
+                        entity_expansions, free_text_entity, realtime_config)
+                    free_text_triggers[tagged] = {
+                        'prefixes': ft_lines,
+                        'stt_backend': stt_backend,
+                    }
                     total_free_text += len(ft_lines)
 
                 if qa_lines:

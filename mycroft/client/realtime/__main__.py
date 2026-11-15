@@ -303,8 +303,8 @@ def handle_intents_ready(event):
     """Receive intent patterns from skills service when available."""
     from mycroft.client.realtime.pattern_loader import (
         load_entity_expansions, load_skill_config, expand_pattern_entities,
-        _split_free_text_pattern, _split_qa_pattern, load_quantifier_patterns,
-        build_management_patterns, build_audio_wake_patterns,
+        _split_free_text_pattern, _split_qa_pattern, _get_free_text_stt_backend,
+        load_quantifier_patterns, build_management_patterns, build_audio_wake_patterns,
         compile_dynamic_patterns, load_flow_files,
         FREE_TEXT_TAG, REPEAT_TAG, QA_TAG
     )
@@ -380,6 +380,7 @@ def handle_intents_ready(event):
 
             det_lines = []
             ft_lines = []
+            ft_stt_backend = None
             qa_lines = []
             qa_config_for_intent = None
             merged_word_slots = {}
@@ -396,6 +397,9 @@ def handle_intents_ready(event):
                     prefix = _split_free_text_pattern(exp_pattern, free_text_entity)
                     if prefix is not None:
                         ft_lines.append(prefix)
+                        if ft_stt_backend is None:
+                            ft_stt_backend = _get_free_text_stt_backend(
+                                entity_expansions, free_text_entity, realtime_config)
                     else:
                         det_lines.append(exp_pattern)
 
@@ -412,8 +416,12 @@ def handle_intents_ready(event):
                 tagged = f'{FREE_TEXT_TAG}{intent_name}'
                 loop.interim_matcher.register_intent(tagged, ft_lines)
                 loop.final_matcher.register_intent(tagged, ft_lines)
+                loop._free_text_config_map[tagged] = {
+                    'stt_backend': ft_stt_backend or 'faster_whisper',
+                }
                 ft_count += len(ft_lines)
-                LOG.info(f"  {intent_name}: {len(ft_lines)} free-text trigger prefix(es)")
+                LOG.info(f"  {intent_name}: {len(ft_lines)} free-text trigger prefix(es) "
+                         f"[stt_backend={ft_stt_backend or 'faster_whisper'}]")
 
             if qa_lines:
                 tagged = f'{QA_TAG}{intent_name}'
