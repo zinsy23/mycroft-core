@@ -268,46 +268,6 @@ def expand_pattern_entities(pattern, entity_expansions):
     return expanded_patterns, word_slot_values
 
 
-def _split_free_text_pattern(pattern, free_text_entity):
-    """Split a pattern at its {free_text} placeholder.
-
-    Returns the prefix portion (everything before {free_text}) as a string,
-    or None if the pattern contains no {free_text} entity.
-
-    The prefix may contain optional groups like [for|] which the matcher
-    will expand normally. Anything after {free_text} is discarded.
-
-    Examples:
-        "search google [for] {free_text}"  -> "search google [for]"
-        "search google {free_text} extra"  -> "search google"  (trailing ignored)
-        "type {free_text}"                 -> "type"
-        "play video"                       -> None
-    """
-    placeholder = f'{{{free_text_entity}}}'
-    if placeholder not in pattern:
-        return None
-
-    idx = pattern.index(placeholder)
-    prefix = pattern[:idx].strip()
-    return prefix if prefix else None
-
-
-def _get_free_text_stt_backend(entity_expansions, free_text_entity, realtime_config):
-    """Return the stt_backend for the free_text entity slot.
-
-    Resolution order (first match wins):
-      1. Per-skill ENTITY_EXPANSIONS config: {'free_text': {'stt_backend': 'riva'}}
-      2. Global default in realtime config: realtime.free_text.default_stt_backend
-      3. Hard default: 'faster_whisper'
-    """
-    skill_cfg = entity_expansions.get(free_text_entity, {})
-    if isinstance(skill_cfg, dict) and 'stt_backend' in skill_cfg:
-        return skill_cfg['stt_backend']
-    global_default = (realtime_config
-                      .get('free_text', {})
-                      .get('default_stt_backend', 'faster_whisper'))
-    return global_default
-
 
 def _split_qa_pattern(pattern, entity_expansions):
     """Split a pattern at its {qa_text} placeholder.
@@ -553,36 +513,24 @@ def load_all_intent_patterns(skills_dir, verbose=False, realtime_config=None):
                          and repeat config). If None, uses defaults.
 
     Returns:
-        tuple: (deterministic_patterns, free_text_triggers, repeat_patterns, qa_triggers)
+        tuple: (deterministic_patterns, repeat_patterns, qa_triggers)
           - deterministic_patterns: dict intent_name -> [pattern_str, ...]
-            Normal patterns for StreamingCommandMatcher
-          - free_text_triggers: dict intent_name -> {'prefixes': [...], 'stt_backend': str}
-            Prefix-only patterns tagged __FREE_TEXT__:intent, registered in
-            matcher; when matched, realtime_loop switches to free-text mode.
-            stt_backend is 'faster_whisper' (default) or 'riva'.
+            Normal patterns for StreamingCommandMatcher; {free_text} entities are
+            handled inline as free_text_slot within MatcherPath (no prefix splitting)
           - repeat_patterns: dict intent_name -> [pattern_str, ...]
-            Synthesized repeat patterns tagged __REPEAT__:N, registered in
-            matcher with transient first-word handling
+            Synthesized repeat patterns tagged __REPEAT__:N
           - qa_triggers: dict intent_name -> {'prefixes': [...], 'config': {...}}
-            Prefix-only patterns tagged __QA__:intent; when matched, realtime_loop
-            switches to QA mode using the bundled qa_config from ENTITY_EXPANSIONS
+            Prefix-only patterns tagged __QA__:intent
     """
     if realtime_config is None:
         realtime_config = {}
 
-    free_text_entity = (realtime_config
-                        .get('free_text', {})
-                        .get('entity_name', 'free_text'))
-
     if verbose:
         print(f"Loading intent patterns from: {skills_dir}")
-        print(f"Free-text entity name: {{{free_text_entity}}}")
 
     deterministic_patterns = {}
-    free_text_triggers = {}
     qa_triggers = {}
     total_deterministic = 0
-    total_free_text = 0
     total_qa = 0
 
     # Walk all .intent files
@@ -604,47 +552,25 @@ def load_all_intent_patterns(skills_dir, verbose=False, realtime_config=None):
                     pattern_lines = [line.strip() for line in f.readlines() if line.strip()]
 
                 det_lines = []
-                ft_lines = []
                 merged_word_slots = {}
-
                 qa_lines = []
                 qa_config_for_intent = None
 
                 for pattern in pattern_lines:
-                    # First expand any normal {entity} placeholders (not {free_text})
                     expanded, word_slots = expand_pattern_entities(pattern, entity_expansions)
                     merged_word_slots.update(word_slots)
 
                     for exp_pattern in expanded:
-                        # Check for QA entity first
                         qa_prefix, qa_config = _split_qa_pattern(exp_pattern, entity_expansions)
                         if qa_prefix is not None:
                             qa_lines.append(qa_prefix)
                             qa_config_for_intent = qa_config
                             continue
-
-                        prefix = _split_free_text_pattern(exp_pattern, free_text_entity)
-
-                        if prefix is not None:
-                            # This pattern has a {free_text} trigger
-                            ft_lines.append(prefix)
-                        else:
-                            # Normal deterministic pattern
-                            det_lines.append(exp_pattern)
+                        det_lines.append(exp_pattern)
 
                 if det_lines:
                     deterministic_patterns[intent_name] = det_lines
                     total_deterministic += len(det_lines)
-
-                if ft_lines:
-                    tagged = f'{FREE_TEXT_TAG}{intent_name}'
-                    stt_backend = _get_free_text_stt_backend(
-                        entity_expansions, free_text_entity, realtime_config)
-                    free_text_triggers[tagged] = {
-                        'prefixes': ft_lines,
-                        'stt_backend': stt_backend,
-                    }
-                    total_free_text += len(ft_lines)
 
                 if qa_lines:
                     tagged = f'{QA_TAG}{intent_name}'
@@ -658,8 +584,6 @@ def load_all_intent_patterns(skills_dir, verbose=False, realtime_config=None):
                     parts = []
                     if det_lines:
                         parts.append(f"{len(det_lines)} deterministic")
-                    if ft_lines:
-                        parts.append(f"{len(ft_lines)} free-text triggers")
                     if qa_lines:
                         parts.append(f"{len(qa_lines)} QA triggers")
                     if parts:
@@ -677,8 +601,6 @@ def load_all_intent_patterns(skills_dir, verbose=False, realtime_config=None):
     if verbose:
         print(f"\nLoaded {total_deterministic} deterministic patterns across "
               f"{len(deterministic_patterns)} intents")
-        print(f"Loaded {total_free_text} free-text trigger prefixes across "
-              f"{len(free_text_triggers)} intents")
         if total_qa:
             print(f"Loaded {total_qa} QA trigger prefixes across "
                   f"{len(qa_triggers)} intents")
@@ -687,4 +609,4 @@ def load_all_intent_patterns(skills_dir, verbose=False, realtime_config=None):
             print(f"Loaded {total_repeat} repeat patterns across "
                   f"{len(repeat_patterns)} quantifier variants")
 
-    return deterministic_patterns, free_text_triggers, repeat_patterns, qa_triggers
+    return deterministic_patterns, repeat_patterns, qa_triggers

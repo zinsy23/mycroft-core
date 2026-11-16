@@ -303,10 +303,10 @@ def handle_intents_ready(event):
     """Receive intent patterns from skills service when available."""
     from mycroft.client.realtime.pattern_loader import (
         load_entity_expansions, load_skill_config, expand_pattern_entities,
-        _split_free_text_pattern, _split_qa_pattern, _get_free_text_stt_backend,
+        _split_qa_pattern,
         load_quantifier_patterns, build_management_patterns, build_audio_wake_patterns,
         compile_dynamic_patterns, load_flow_files,
-        FREE_TEXT_TAG, REPEAT_TAG, QA_TAG
+        REPEAT_TAG, QA_TAG
     )
     from mycroft.configuration import Configuration
 
@@ -320,7 +320,6 @@ def handle_intents_ready(event):
     LOG.info(f"Received {len(intent_files)} intent files from skills service")
 
     realtime_config = Configuration.get().get('realtime', {})
-    free_text_entity = realtime_config.get('free_text', {}).get('entity_name', 'free_text')
     repeat_config = realtime_config.get('repeat', {})
     command_groups = realtime_config.get('command_groups', [])
 
@@ -336,7 +335,6 @@ def handle_intents_ready(event):
     loop.final_matcher.all_sequences = []
 
     det_count = 0
-    ft_count = 0
     # Collect per-skill info — deduped by skill_dir_name (multiple .intent files
     # per skill must not process the same skill twice).
     _skill_subgroup_work = {}  # skill_dir_name -> (skill_path, entity_expansions, skill_cfg)
@@ -379,8 +377,6 @@ def handle_intents_ready(event):
                 pattern_lines = [line.strip() for line in f.readlines() if line.strip()]
 
             det_lines = []
-            ft_lines = []
-            ft_stt_backend = None
             qa_lines = []
             qa_config_for_intent = None
             merged_word_slots = {}
@@ -394,34 +390,14 @@ def handle_intents_ready(event):
                         qa_lines.append(qa_prefix)
                         qa_config_for_intent = qa_config
                         continue
-                    prefix = _split_free_text_pattern(exp_pattern, free_text_entity)
-                    if prefix is not None:
-                        ft_lines.append(prefix)
-                        if ft_stt_backend is None:
-                            ft_stt_backend = _get_free_text_stt_backend(
-                                entity_expansions, free_text_entity, realtime_config)
-                    else:
-                        det_lines.append(exp_pattern)
+                    det_lines.append(exp_pattern)
 
             skill_prefix = _get_skill_prefix(intent_name)
 
             if det_lines:
-                # Register into a temporary matcher to get CommandPattern objects,
-                # then move them to skill_pattern_groups
                 loop.interim_matcher.register_intent(intent_name, det_lines, word_slot_values=merged_word_slots)
                 loop.final_matcher.register_intent(intent_name, det_lines, word_slot_values=merged_word_slots)
                 det_count += len(det_lines)
-
-            if ft_lines:
-                tagged = f'{FREE_TEXT_TAG}{intent_name}'
-                loop.interim_matcher.register_intent(tagged, ft_lines)
-                loop.final_matcher.register_intent(tagged, ft_lines)
-                loop._free_text_config_map[tagged] = {
-                    'stt_backend': ft_stt_backend or 'faster_whisper',
-                }
-                ft_count += len(ft_lines)
-                LOG.info(f"  {intent_name}: {len(ft_lines)} free-text trigger prefix(es) "
-                         f"[stt_backend={ft_stt_backend or 'faster_whisper'}]")
 
             if qa_lines:
                 tagged = f'{QA_TAG}{intent_name}'
@@ -500,7 +476,7 @@ def handle_intents_ready(event):
 
     loop._rebuild_shared_patterns()
 
-    LOG.info(f"Loaded {det_count} deterministic + {ft_count} free-text trigger patterns; "
+    LOG.info(f"Loaded {det_count} deterministic patterns; "
              f"{len(repeat_patterns)} repeat intent variants; "
              f"{len(mgmt_patterns)} management patterns; "
              f"{len(wake_phrases)} audio wake phrases; "

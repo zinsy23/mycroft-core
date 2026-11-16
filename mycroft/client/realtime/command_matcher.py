@@ -32,12 +32,14 @@ _DECIMAL_ENTITY_NAMES = frozenset({'number_decimal'})
 _DECIMAL_LIST_ENTITY_NAMES = frozenset({'number_decimal_list'})
 # Entity names that get greedy number capture, returning a digit string (preserves leading zeros)
 _NUMBER_STR_ENTITY_NAMES = frozenset({'number_str'})
+# Entity names that get greedy open-ended text capture (any word accepted)
+_FREE_TEXT_ENTITY_NAMES = frozenset({'free_text'})
 
 # Ordered longest-first so 'number_decimal_list' is tested before 'number_decimal'
 # before 'number', preventing a shorter base from shadowing a longer one.
 _ALL_BASE_ENTITY_NAMES = sorted(
     _NUMBER_ENTITY_NAMES | _CALC_ENTITY_NAMES | _DECIMAL_ENTITY_NAMES
-    | _DECIMAL_LIST_ENTITY_NAMES | _NUMBER_STR_ENTITY_NAMES,
+    | _DECIMAL_LIST_ENTITY_NAMES | _NUMBER_STR_ENTITY_NAMES | _FREE_TEXT_ENTITY_NAMES,
     key=len, reverse=True,
 )
 
@@ -202,6 +204,8 @@ class CommandPattern:
                     all_token_options.append([{'decimal_list_slot': entity_name}])
                 elif base_type in _NUMBER_STR_ENTITY_NAMES:
                     all_token_options.append([{'number_str_slot': entity_name}])
+                elif base_type in _FREE_TEXT_ENTITY_NAMES:
+                    all_token_options.append([{'free_text_slot': entity_name}])
                 else:
                     all_token_options.append([{'entity': entity_name}])
 
@@ -301,6 +305,10 @@ class MatcherPath:
         # Greedy decimal list accumulation
         self._decimal_list_buf = []
         self._decimal_list_slot_name = None
+        # Greedy free-text accumulation (any word accepted; closed by post-slot pattern word or FINAL boundary)
+        self._free_text_buf = []
+        self._free_text_slot_name = None
+        self._free_text_prefix_skip = 0  # words discarded at slot entry due to Riva prefix re-emission
         # Audio buffer index stamped by realtime_loop when a whisper-backed decimal_list slot opens.
         self.whisper_audio_start_idx = None
         # True if a slot was active at any point — defers completion to FINAL only
@@ -319,8 +327,10 @@ class MatcherPath:
         """
         # Already open — check current open slot directly
         for slot_name in (self._decimal_list_slot_name, self._decimal_slot_name,
-                          self._number_slot_name, self._number_str_slot_name, self._calc_slot_name):
-            if slot_name and self.calc_entity_configs.get(slot_name, {}).get('stt_backend'):
+                          self._number_slot_name, self._number_str_slot_name, self._calc_slot_name,
+                          self._free_text_slot_name):
+            backend = self.calc_entity_configs.get(slot_name or '', {}).get('stt_backend')
+            if slot_name and backend and backend != 'riva':
                 return slot_name
         # Not open yet — check next position in matching sequences
         next_pos = len(self.matched_words)
@@ -330,7 +340,8 @@ class MatcherPath:
                 continue
             item = sequence[next_pos]
             slot_name = next((v for k, v in item.items() if k.endswith('_slot')), None)
-            if slot_name and self.calc_entity_configs.get(slot_name, {}).get('stt_backend'):
+            backend = self.calc_entity_configs.get(slot_name or '', {}).get('stt_backend')
+            if slot_name and backend and backend != 'riva':
                 return slot_name
         return None
 
@@ -357,6 +368,9 @@ class MatcherPath:
         c._decimal_slot_name = self._decimal_slot_name
         c._decimal_list_buf = list(self._decimal_list_buf)
         c._decimal_list_slot_name = self._decimal_list_slot_name
+        c._free_text_buf = list(self._free_text_buf)
+        c._free_text_slot_name = self._free_text_slot_name
+        c._free_text_prefix_skip = self._free_text_prefix_skip
         c.whisper_audio_start_idx = self.whisper_audio_start_idx
         c._had_slot = self._had_slot
         c._slot_closed_by_word = self._slot_closed_by_word
@@ -398,6 +412,9 @@ class MatcherPath:
         self._decimal_buf = []
         self._decimal_list_slot_name = None
         self._decimal_list_buf = []
+        self._free_text_slot_name = None
+        self._free_text_buf = []
+        self._free_text_prefix_skip = 0
         self._had_slot = False
         self._slot_closed_by_word = False
 
@@ -561,6 +578,41 @@ class MatcherPath:
                     self.local_budget = max(0, self.local_budget - 1)
                 return False
 
+        # ── greedy free-text slot ─────────────────────────────────────────────
+        if self._free_text_slot_name is not None:
+            # Accept any word — free_text is open-ended. Check post-slot words to
+            # close early (consistent with number _slot_closed_by_word).
+            phrase = ' '.join(self._free_text_buf)
+            post_words = self._get_post_slot_words('__free_text__:', phrase) if phrase else set()
+            if word in post_words:
+                # Terminal word — commit slot and fall through to normal matching
+                self.matched_words.append(f'__free_text__:{phrase}')
+                self._free_text_slot_name = None
+                self._free_text_buf = []
+                self._free_text_prefix_skip = 0
+                self._slot_closed_by_word = True
+                # fall through to normal matching so the terminal word advances the path
+            else:
+                # Silently discard words that continue re-entering the prefix boundary.
+                skip = self._free_text_prefix_skip
+                if skip > 0 and not self._free_text_buf:
+                    prefix_surface = []
+                    for mw in self.matched_words:
+                        if mw.startswith('__') and ':' in mw:
+                            prefix_surface.append(mw.split(':', 1)[1])
+                        elif not mw.startswith('['):
+                            prefix_surface.append(mw)
+                    if skip < len(prefix_surface) and word == prefix_surface[skip]:
+                        self._free_text_prefix_skip += 1
+                        return True
+                # Still inside slot — accumulate any word
+                self._free_text_buf.append(word)
+                self.consecutive_fillers = 0
+                self.fitness_score += 1
+                if len(self._free_text_buf) > 1:
+                    self.local_budget += self.filler_config.get('increment_per_word', 1)
+                return True
+
         # ── normal matching ───────────────────────────────────────────────────
         matching_sequences = self._get_matching_sequences()
         valid_next_words = self._get_valid_next_words(matching_sequences)
@@ -635,6 +687,30 @@ class MatcherPath:
                 if len(self.matched_words) > 0:
                     self.local_budget += self.filler_config.get('increment_per_word', 1)
                 return True
+
+        # Check if the next position is a free-text slot (any word opens it)
+        if '<FREE_TEXT_SLOT>' in valid_next_words:
+            slot_name = self._get_next_free_text_slot_name(matching_sequences)
+            self._free_text_slot_name = slot_name
+            self._free_text_buf = []
+            self._free_text_prefix_skip = 0
+            self._had_slot = True
+            # Apply prefix boundary check before accepting the first word
+            prefix_surface = []
+            for mw in self.matched_words:
+                if mw.startswith('__') and ':' in mw:
+                    prefix_surface.append(mw.split(':', 1)[1])
+                elif not mw.startswith('['):
+                    prefix_surface.append(mw)
+            if prefix_surface and word == prefix_surface[0]:
+                self._free_text_prefix_skip = 1
+                return True
+            self._free_text_buf = [word]
+            self.consecutive_fillers = 0
+            self.fitness_score += 1
+            if len(self.matched_words) > 0:
+                self.local_budget += self.filler_config.get('increment_per_word', 1)
+            return True
 
         is_valid = word in valid_next_words or '<ENTITY>' in valid_next_words
 
@@ -744,6 +820,10 @@ class MatcherPath:
                     if not mw.startswith('__decimal_list__:'):
                         ok = False
                         break
+                elif 'free_text_slot' in seq_item:
+                    if not mw.startswith('__free_text__:'):
+                        ok = False
+                        break
             if ok:
                 next_item = sequence[next_position]
                 if 'word' in next_item:
@@ -785,6 +865,8 @@ class MatcherPath:
                 valid_words.add('<DECIMAL_SLOT>')
             elif 'decimal_list_slot' in next_item:
                 valid_words.add('<DECIMAL_LIST_SLOT>')
+            elif 'free_text_slot' in next_item:
+                valid_words.add('<FREE_TEXT_SLOT>')
 
         return valid_words
 
@@ -838,6 +920,16 @@ class MatcherPath:
                     return item['decimal_list_slot']
         return 'number_decimal_list'
 
+    def _get_next_free_text_slot_name(self, matching_sequences):
+        next_position = len(self.matched_words)
+        for seq_info in matching_sequences:
+            sequence = seq_info['sequence']
+            if next_position < len(sequence):
+                item = sequence[next_position]
+                if 'free_text_slot' in item:
+                    return item['free_text_slot']
+        return 'free_text'
+
     def check_completion(self):
         """Check if this path has completed a command.
 
@@ -874,6 +966,9 @@ class MatcherPath:
                          f"phrase='{phrase}'")
             if result.get('complete'):
                 matched = matched + [f'__decimal_list__:{phrase}']
+        elif self._free_text_slot_name is not None and self._free_text_buf:
+            phrase = ' '.join(self._free_text_buf)
+            matched = matched + [f'__free_text__:{phrase}']
 
         for seq_info in self.all_sequences:
             sequence = seq_info['sequence']
@@ -962,6 +1057,15 @@ class MatcherPath:
                         entities[seq_item['decimal_list_slot']] = ('__PENDING_SECONDARY_STT__', self.whisper_audio_start_idx)
                     else:
                         entities[seq_item['decimal_list_slot']] = result['values']
+                elif 'free_text_slot' in seq_item:
+                    if not word.startswith('__free_text__:'):
+                        ok = False
+                        break
+                    phrase = word[len('__free_text__:'):]
+                    if not phrase:
+                        ok = False
+                        break
+                    entities[seq_item['free_text_slot']] = phrase
                 elif 'entity' in seq_item:
                     entities[seq_item['entity']] = word
 
@@ -979,13 +1083,16 @@ class MatcherPath:
                     self._decimal_buf = []
                     self._decimal_list_slot_name = None
                     self._decimal_list_buf = []
+                    self._free_text_slot_name = None
+                    self._free_text_buf = []
                 # Build clean utterance: replace internal slot markers with spoken words
                 clean_words = [
                     w[len('__number__:'):] if w.startswith('__number__:') else
                     w[len('__number_str__:'):] if w.startswith('__number_str__:') else
                     w[len('__calc__:'):] if w.startswith('__calc__:') else
                     w[len('__decimal__:'):] if w.startswith('__decimal__:') else
-                    w[len('__decimal_list__:'):] if w.startswith('__decimal_list__:') else w
+                    w[len('__decimal_list__:'):] if w.startswith('__decimal_list__:') else
+                    w[len('__free_text__:'):] if w.startswith('__free_text__:') else w
                     for w in self.matched_words
                 ]
                 return {
@@ -1076,7 +1183,8 @@ class MatcherPath:
         """
         return (self._number_slot_name is not None or self._number_str_slot_name is not None
                 or self._calc_slot_name is not None
-                or self._decimal_slot_name is not None or self._decimal_list_slot_name is not None)
+                or self._decimal_slot_name is not None or self._decimal_list_slot_name is not None
+                or self._free_text_slot_name is not None)
 
     def needs_final_boundary_close(self):
         """True if this path must be deferred to the FINAL stream boundary
@@ -1240,11 +1348,15 @@ class StreamingCommandMatcher:
         if self.verbose:
             LOG.debug(f"  Valid first words count: {len(valid_first_words)}, word '{word}' valid: {word in valid_first_words}")
 
-        # While an exclusive secondary-STT slot is open, suppress new path creation.
+        # While an exclusive slot is open, suppress new path creation.
         # Override with exclusive: false in entity config to allow competing paths.
         _exclusive_slot_open = any(
-            (slot := p.active_secondary_stt_slot()) is not None
-            and p.calc_entity_configs.get(slot, {}).get('exclusive', True)
+            (
+                (slot := p.active_secondary_stt_slot()) is not None
+                and p.calc_entity_configs.get(slot, {}).get('exclusive', True)
+            ) or (
+                p._free_text_slot_name is not None
+            )
             for p in self.active_paths
             if p.has_open_slot()
         )
