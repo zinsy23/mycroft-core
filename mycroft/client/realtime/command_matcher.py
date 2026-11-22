@@ -688,8 +688,12 @@ class MatcherPath:
                     self.local_budget += self.filler_config.get('increment_per_word', 1)
                 return True
 
-        # Check if the next position is a free-text slot (any word opens it)
-        if '<FREE_TEXT_SLOT>' in valid_next_words:
+        # Check if the next position is a free-text slot (any word opens it).
+        # Literal words take priority: if this word also matches a literal at this
+        # position, let it fall through to the normal match below instead of being
+        # swallowed into the free-text buffer (e.g. "respond" should fire audio:wake,
+        # not disappear into a {free_text_show} slot on a competing path).
+        if '<FREE_TEXT_SLOT>' in valid_next_words and word not in valid_next_words:
             slot_name = self._get_next_free_text_slot_name(matching_sequences)
             self._free_text_slot_name = slot_name
             self._free_text_buf = []
@@ -1261,6 +1265,12 @@ class StreamingCommandMatcher:
                     'sequence': sequence,
                     'word_slot_values': word_slot_values,
                 })
+                if sequence and 'free_text_slot' in sequence[0]:
+                    raise ValueError(
+                        f"Intent '{intent_name}' has a free_text slot as the first token in "
+                        f"pattern '{line}'. free_text slots must be preceded by at least one "
+                        f"fixed literal word, otherwise every spoken word opens a new path."
+                    )
 
         if self.verbose:
             LOG.debug(f"Registered {len(pattern_lines)} patterns for {intent_name}")
@@ -1279,6 +1289,12 @@ class StreamingCommandMatcher:
                     'sequence': sequence,
                     'word_slot_values': pattern.word_slot_values,
                 })
+                if sequence and 'free_text_slot' in sequence[0]:
+                    raise ValueError(
+                        f"Intent '{pattern.intent_name}' has a free_text slot as the first token "
+                        f"in pattern '{pattern.original_line}'. free_text slots must be preceded "
+                        f"by at least one fixed literal word."
+                    )
 
     def add_word(self, word, stream_type="FINAL", transcript_position=None):
         """Process a new word from STT using multi-path matching.
@@ -1348,20 +1364,16 @@ class StreamingCommandMatcher:
         if self.verbose:
             LOG.debug(f"  Valid first words count: {len(valid_first_words)}, word '{word}' valid: {word in valid_first_words}")
 
-        # While an exclusive slot is open, suppress new path creation.
+        # While an exclusive secondary-STT slot is open, suppress new path creation.
+        # free_text slots run on Riva (already streaming) — not exclusive.
         # Override with exclusive: false in entity config to allow competing paths.
         _exclusive_slot_open = any(
-            (
-                (slot := p.active_secondary_stt_slot()) is not None
-                and p.calc_entity_configs.get(slot, {}).get('exclusive', True)
-            ) or (
-                p._free_text_slot_name is not None
-            )
+            (slot := p.active_secondary_stt_slot()) is not None
+            and p.calc_entity_configs.get(slot, {}).get('exclusive', True)
             for p in self.active_paths
             if p.has_open_slot()
         )
 
-        # If word is valid as first word, create new path with its transcript position
         if not _exclusive_slot_open and word in valid_first_words:
             pos = transcript_position if transcript_position is not None else 0
             new_path = MatcherPath(self.next_path_id, self.global_budget, self.all_sequences, self.filler_config, start_position=pos, calc_entity_configs=self.calc_entity_configs)

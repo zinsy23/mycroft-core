@@ -1742,6 +1742,12 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             self.final_min_replay_pos = max(self.final_min_replay_pos, new_min)
         else:
             self.interim_min_replay_pos = max(self.interim_min_replay_pos, new_min)
+            # If INTERIM dispatched a slot-based match, also advance final_min_replay_pos
+            # so FINAL doesn't replay and re-dispatch the same utterance. The undo window
+            # still works: if FINAL sees a different transcript it pops the dedup entry,
+            # and final_min_replay_pos is reset to 0 at that point (prev_final_transcript cleared).
+            if match.get('entities'):
+                self.final_min_replay_pos = max(self.final_min_replay_pos, new_min)
         if self.verbose:
             LOG.debug(f"Min replay pos for {stream_name} advanced to {new_min}")
 
@@ -1750,13 +1756,6 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
         if self.repeat_enabled:
             self._open_repeat_window(intent=intent)
-
-        # A free_text slot closed by a terminal word on INTERIM means we have
-        # a complete utterance — end the session so Riva's subsequent INTERIM
-        # results don't re-match the same slot content.
-        if not is_final and match.get('entities') and any(
-                k for k in match['entities'] if 'free_text' in k):
-            self.session_active = False
 
         if self.verbose:
             LOG.debug(f"Both matchers reset after {stream_name} match")
@@ -1783,9 +1782,6 @@ class RealtimeRecognizerLoop(RecognizerLoop):
 
         # During FREE_TEXT mode Riva is stopped — ignore any words that slip through.
         if self.mode == MODE_FREE_TEXT:
-            return
-
-        if not self.session_active:
             return
 
         # During QA mode: check exit/interrupt words AND accumulate FINALs for
