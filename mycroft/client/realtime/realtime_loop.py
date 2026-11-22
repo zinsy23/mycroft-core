@@ -1654,13 +1654,32 @@ class RealtimeRecognizerLoop(RecognizerLoop):
             self._record_execution(intent, now, stream_name)
             return 'dispatched'
 
-        # ── FINAL cross-command stitch guard ──────────────────────────
-        if is_final:
+        # ── Cross-command stitch guard ────────────────────────────────
+        if True:
             matched_words_list = utterance.split()
+            _start_pos = match.get('start_position')
+
+            # Find where the matched utterance sits in the transcript
             _match_pos = None
             for _i in range(len(words) - len(matched_words_list) + 1):
                 if words[_i:_i + len(matched_words_list)] == matched_words_list:
                     _match_pos = _i
+
+            # Reject if the match starts before the path's own start_position —
+            # this catches Riva phonetic blending where the utterance string isn't
+            # found verbatim but the path consumed words from earlier in the transcript.
+            if _match_pos is None and _start_pos is not None:
+                # Utterance not found verbatim — check if first matched word appears
+                # earlier in the transcript than where the path started.
+                _first_word = matched_words_list[0] if matched_words_list else None
+                if _first_word and _first_word in words:
+                    _first_word_pos = words.index(_first_word)
+                    if _first_word_pos < _start_pos:
+                        LOG.info(f"⛔ Stitch rejected (blended transcript): '{utterance}' "
+                                 f"first word '{_first_word}' at pos {_first_word_pos} "
+                                 f"precedes path start {_start_pos}")
+                        return 'skip'
+
             if _match_pos is not None:
                 _match_end = _match_pos + len(matched_words_list)
                 _matched_remaining = list(matched_words_list)
@@ -1678,7 +1697,7 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                             _valid_first.add(_first['word'])
                 _stitch_words = [w for w in _skipped if w in _valid_first]
                 if _stitch_words:
-                    LOG.info(f"⛔ FINAL cross-command stitch rejected: '{utterance}' "
+                    LOG.info(f"⛔ Cross-command stitch rejected: '{utterance}' "
                              f"skipped over command-starting word(s) {_stitch_words}")
                     return 'skip'
 
@@ -2004,6 +2023,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                 # fire now rather than being reset and replayed from scratch.
                 already_complete = None
                 for _path in matcher.active_paths:
+                    if not is_final and _path.needs_final_boundary_close():
+                        continue
                     _result = _path.check_completion()
                     if _result is not None:
                         already_complete = _result

@@ -401,7 +401,9 @@ class MatcherPath:
 
     def clear_slot_state(self):
         """Reset open slot word buffers for replay. Does NOT clear whisper_audio_start_idx
-        (audio keeps flowing regardless of word revision; only reset/reset_session clears it)."""
+        (audio keeps flowing regardless of word revision; only reset/reset_session clears it).
+        Preserves _had_slot and _slot_closed_by_word — those flags govern FINAL-boundary
+        deferral and must survive transcript corrections."""
         self._number_slot_name = None
         self._number_buf = []
         self._number_str_slot_name = None
@@ -415,8 +417,6 @@ class MatcherPath:
         self._free_text_slot_name = None
         self._free_text_buf = []
         self._free_text_prefix_skip = 0
-        self._had_slot = False
-        self._slot_closed_by_word = False
 
     def try_add_word(self, word, stream_type="FINAL"):
         """Try to add a word to this path.
@@ -1103,7 +1103,8 @@ class MatcherPath:
                     'intent': seq_info['intent'],
                     'utterance': ' '.join(clean_words),
                     'entities': entities,
-                    'pattern': seq_info['pattern']
+                    'pattern': seq_info['pattern'],
+                    'start_position': self.start_position,
                 }
 
         return None
@@ -1161,6 +1162,7 @@ class MatcherPath:
                     'utterance': ' '.join(clean_words),
                     'entities': entities,
                     'pattern': seq_info['pattern'],
+                    'start_position': self.start_position,
                 }
         return None
 
@@ -1365,17 +1367,22 @@ class StreamingCommandMatcher:
             LOG.debug(f"  Valid first words count: {len(valid_first_words)}, word '{word}' valid: {word in valid_first_words}")
 
         # While an exclusive secondary-STT slot is open, suppress new path creation.
-        # free_text slots run on Riva (already streaming) — not exclusive.
-        # Override with exclusive: false in entity config to allow competing paths.
+        # Riva free_text slots are also treated as exclusive: once a path enters a
+        # free_text slot, mid-segment words should not spawn independent new paths.
         _exclusive_slot_open = any(
-            (slot := p.active_secondary_stt_slot()) is not None
-            and p.calc_entity_configs.get(slot, {}).get('exclusive', True)
+            (
+                p._free_text_slot_name is not None
+                or (
+                    (slot := p.active_secondary_stt_slot()) is not None
+                    and p.calc_entity_configs.get(slot, {}).get('exclusive', True)
+                )
+            )
             for p in self.active_paths
             if p.has_open_slot()
         )
 
+        pos = transcript_position if transcript_position is not None else 0
         if not _exclusive_slot_open and word in valid_first_words:
-            pos = transcript_position if transcript_position is not None else 0
             new_path = MatcherPath(self.next_path_id, self.global_budget, self.all_sequences, self.filler_config, start_position=pos, calc_entity_configs=self.calc_entity_configs)
             self.next_path_id += 1
             new_path.try_add_word(word, stream_type=stream_type)
@@ -1564,7 +1571,12 @@ class StreamingCommandMatcher:
             LOG.info(f"  ✂️  Pruned {pruned} path(s) due to Riva correction to valid command word")
 
     def clear_slot_state_all_paths(self):
-        """Clear open slot buffers on all active paths so transcript-change replay re-enters slots cleanly."""
+        """Clear open slot buffers on all active paths before transcript-correction replay.
+
+        Clears slot name and buffer state so replay re-enters slots cleanly.
+        Does NOT clear _had_slot or _slot_closed_by_word — those flags govern
+        FINAL-boundary deferral and must survive transcript corrections.
+        """
         for path in self.active_paths:
             path.clear_slot_state()
 
