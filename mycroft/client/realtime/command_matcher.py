@@ -1588,9 +1588,12 @@ class StreamingCommandMatcher:
         Clears slot name and buffer state so replay re-enters slots cleanly.
         Does NOT clear _had_slot or _slot_closed_by_word — those flags govern
         FINAL-boundary deferral and must survive transcript corrections.
+        Paths where _slot_closed_by_word is True have already committed past
+        their slot — their state is locked and must not be cleared.
         """
         for path in self.active_paths:
-            path.clear_slot_state()
+            if not path._slot_closed_by_word:
+                path.clear_slot_state()
 
     def reset(self):
         """Reset matcher state after command execution.

@@ -2025,21 +2025,25 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     if old != new:
                         changed_positions[_i] = (old, new)
                 if changed_positions:
-                    # Only clear+replay if a changed position falls outside every
-                    # path's committed range. Changes inside committed words are
-                    # irrelevant — those words are locked in matched_words already.
-                    _needs_replay = not matcher.active_paths or any(
-                        _pos >= p.start_position + len(p.matched_words)
-                        for _pos in changed_positions
-                        for p in matcher.active_paths
-                    )
+                    # Replay only if a changed position is outside the committed
+                    # range of ALL active paths. If at least one path has already
+                    # committed past that position, the correction is irrelevant to
+                    # it — don't blow up paths that are further along just because
+                    # a less-advanced path hasn't reached that position yet.
+                    def _committed_up_to(p, pos):
+                        return pos < p.start_position + len(p.matched_words)
+
+                    _uncovered = {
+                        _pos for _pos in changed_positions
+                        if not any(_committed_up_to(p, _pos) for p in matcher.active_paths)
+                    }
+                    _needs_replay = not matcher.active_paths or bool(_uncovered)
                     if _needs_replay:
                         if self.verbose:
-                            for _pos, (old, new) in changed_positions.items():
-                                _outside = [p.path_id for p in matcher.active_paths
-                                            if _pos >= p.start_position + len(p.matched_words)]
+                            for _pos in _uncovered:
+                                old, new = changed_positions[_pos]
                                 LOG.info(f"  replay triggered: pos {_pos} '{old}'→'{new}' "
-                                         f"outside committed range of paths {_outside}")
+                                         f"not covered by any active path")
                         matcher.prune_corrected_paths(changed_positions, curr_words)
                         matcher.clear_slot_state_all_paths()
                     elif self.verbose:
