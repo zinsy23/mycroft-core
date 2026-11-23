@@ -234,6 +234,10 @@ class CommandPattern:
                         else:
                             variants.append(None)  # None = skip this position
                     all_token_options.append(variants)
+            elif token.startswith('__wsv:'):
+                # Word-list entity tagged word: __wsv:<entity_name>:<word>
+                _, entity_name, word = token.split(':', 2)
+                all_token_options.append([{'word': word.lower(), 'entity_source': entity_name}])
             else:
                 # Plain required word
                 all_token_options.append([{'word': token.lower()}])
@@ -990,12 +994,14 @@ class MatcherPath:
                     if seq_item['word'] != word:
                         ok = False
                         break
-                    # If this literal word came from a word-list entity, capture it
-                    wsv = seq_info.get('word_slot_values', {})
-                    for slot_name, slot_vals in wsv.items():
-                        if word in slot_vals:
+                    # Capture word-list entity words by position (entity_source tag),
+                    # accumulating consecutive words of the same slot.
+                    slot_name = seq_item.get('entity_source')
+                    if slot_name:
+                        if slot_name in entities:
+                            entities[slot_name] = entities[slot_name] + ' ' + word
+                        else:
                             entities[slot_name] = word
-                            break
                 elif 'number_slot' in seq_item:
                     if not word.startswith('__number__:'):
                         ok = False
@@ -1134,11 +1140,12 @@ class MatcherPath:
                     if seq_item['word'] != word:
                         ok = False
                         break
-                    wsv = seq_info.get('word_slot_values', {})
-                    for slot_name, slot_vals in wsv.items():
-                        if word in slot_vals:
+                    slot_name = seq_item.get('entity_source')
+                    if slot_name:
+                        if slot_name in entities:
+                            entities[slot_name] = entities[slot_name] + ' ' + word
+                        else:
                             entities[slot_name] = word
-                            break
                 elif 'decimal_list_slot' in seq_item:
                     entities[seq_item['decimal_list_slot']] = stt_values
                 elif 'number_slot' in seq_item:
@@ -1333,6 +1340,11 @@ class StreamingCommandMatcher:
         # Dedup later collapses identical states, bounding the path count.
         forks_to_add = []
         for path in self.active_paths:
+            # Skip words at transcript positions already committed in matched_words.
+            # During replay a path only needs words beyond its current committed length.
+            if (transcript_position is not None and
+                    transcript_position < path.start_position + len(path.matched_words)):
+                continue
             should_fork = not path._word_required_by_all_matching(word)
             if should_fork:
                 # Clone BEFORE advancing so the shadow holds the pre-acceptance state.

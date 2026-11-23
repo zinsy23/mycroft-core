@@ -611,10 +611,24 @@ class RealtimeRecognizerLoop(RecognizerLoop):
     # ── Command group management ──────────────────────────────────────────────
 
     def _normalize_utterance(self, key):
-        """Rewrite any skill-declared alias words to their canonical form."""
+        """Rewrite any skill-declared alias words/phrases to their canonical form.
+
+        Multi-word aliases are replaced as substrings (longest match first) before
+        per-word aliases run on what remains.
+        """
         if not self._utterance_alias_map:
             return key
-        return ' '.join(self._utterance_alias_map.get(w, w) for w in key.split())
+        # Phrase aliases first (any alias containing a space), longest first.
+        result = key
+        phrase_aliases = sorted(
+            ((a, c) for a, c in self._utterance_alias_map.items() if ' ' in a),
+            key=lambda x: len(x[0]),
+            reverse=True,
+        )
+        for alias, canonical in phrase_aliases:
+            result = result.replace(alias, canonical)
+        # Per-word aliases on whatever remains.
+        return ' '.join(self._utterance_alias_map.get(w, w) for w in result.split())
 
     def _is_duplicate(self, key, now):
         """Check executed_utterances_history for a recent exact or alias match."""
@@ -1842,7 +1856,8 @@ class RealtimeRecognizerLoop(RecognizerLoop):
         # Budget coordination
         matcher.global_budget = self.shared_global_budget
 
-        transcript = ' '.join(words)
+        transcript = self._normalize_utterance(' '.join(words))
+        words = transcript.split()
         preserved = []  # paths immune to replay; re-added after word loop
 
         # Detect word count drop (new segment or refinement)
@@ -1883,6 +1898,11 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     LOG.info(f"[RIVA {stream_name}] True segment boundary: "
                              f"prev='{prev_transcript}' new='{transcript}' — "
                              f"preserving {len(matcher.active_paths)} paths")
+                    for _p in matcher.active_paths:
+                        LOG.info(f"  preserved path {_p.path_id}: matched={_p.matched_words} "
+                                 f"start={_p.start_position} buf_n={_p._number_buf} "
+                                 f"buf_ft={_p._free_text_buf}")
+                matcher.clear_slot_state_all_paths()
                 if is_final:
                     self.final_min_replay_pos = 0
                 else:
@@ -2005,8 +2025,25 @@ class RealtimeRecognizerLoop(RecognizerLoop):
                     if old != new:
                         changed_positions[_i] = (old, new)
                 if changed_positions:
-                    matcher.prune_corrected_paths(changed_positions, curr_words)
-                    matcher.clear_slot_state_all_paths()
+                    # Only clear+replay if a changed position falls outside every
+                    # path's committed range. Changes inside committed words are
+                    # irrelevant — those words are locked in matched_words already.
+                    _needs_replay = not matcher.active_paths or any(
+                        _pos >= p.start_position + len(p.matched_words)
+                        for _pos in changed_positions
+                        for p in matcher.active_paths
+                    )
+                    if _needs_replay:
+                        if self.verbose:
+                            for _pos, (old, new) in changed_positions.items():
+                                _outside = [p.path_id for p in matcher.active_paths
+                                            if _pos >= p.start_position + len(p.matched_words)]
+                                LOG.info(f"  replay triggered: pos {_pos} '{old}'→'{new}' "
+                                         f"outside committed range of paths {_outside}")
+                        matcher.prune_corrected_paths(changed_positions, curr_words)
+                        matcher.clear_slot_state_all_paths()
+                    elif self.verbose:
+                        LOG.info(f"[RIVA {stream_name}] Correction inside committed range — paths unchanged")
 
                 min_replay_pos = (self.final_min_replay_pos if is_final
                                   else self.interim_min_replay_pos)

@@ -327,3 +327,82 @@ class TestDedupAndUndo:
         loop.prev_interim_transcript = ""
         process(loop, 'lights on')
         assert len(loop._dispatched) == 2
+
+
+# ── Utterance alias normalization ──────────────────────────────────────────────
+
+def make_alias_loop(patterns, alias_map):
+    """make_loop variant with real _normalize_utterance and a populated alias map."""
+    loop = make_loop(patterns)
+    loop._utterance_alias_map = alias_map
+    loop._normalize_utterance = lambda u: (
+        RealtimeRecognizerLoop._normalize_utterance(loop, u)
+    )
+    loop._is_duplicate = lambda *a, **kw: (
+        RealtimeRecognizerLoop._is_duplicate(loop, *a, **kw)
+    )
+    return loop
+
+
+class TestUtteranceAliases:
+    def test_single_word_alias_fires(self):
+        loop = make_alias_loop(['show dexter'], {'dex': 'dexter'})
+        process(loop, 'show dex')
+        assert len(loop._dispatched) == 1
+
+    def test_multi_word_alias_collapses_to_canonical(self):
+        loop = make_alias_loop(['show siliconvalley'], {'silicon valley': 'siliconvalley'})
+        process(loop, 'show silicon valley')
+        assert len(loop._dispatched) == 1
+
+    def test_multi_word_alias_with_symbol_variation(self):
+        # Riva drops punctuation — "mr robot" and "mr. robot" both map to canonical
+        loop = make_alias_loop(['show mrrobot'], {'mr robot': 'mrrobot'})
+        process(loop, 'show mr robot')
+        assert len(loop._dispatched) == 1
+
+    def test_no_alias_single_word_passthrough(self):
+        loop = make_alias_loop(['show dexter'], {})
+        process(loop, 'show dexter')
+        assert len(loop._dispatched) == 1
+
+    def test_multi_word_alias_dedup_works(self):
+        loop = make_alias_loop(['show siliconvalley'], {'silicon valley': 'siliconvalley'})
+        process(loop, 'show silicon valley')
+        process(loop, 'show silicon valley', is_final=True)
+        assert len(loop._dispatched) == 1
+
+
+# ── Committed-range correction stability (net behavior) ───────────────────────
+
+class TestCommittedRangeStability:
+    def test_noise_correction_inside_committed_range_does_not_reset(self):
+        # Path commits 'lights on'; Riva then corrects position 0 to noise.
+        # The path should survive and not be reset.
+        loop = make_loop(['lights on'])
+        process(loop, 'lights on')
+        dispatched_after_first = len(loop._dispatched)
+        # Simulate Riva correcting position 0 to noise — path already committed
+        process(loop, 'lits on')
+        assert len(loop._dispatched) == dispatched_after_first
+
+    def test_correction_outside_committed_range_still_replays(self):
+        # Path commits 'lights'; Riva corrects the uncommitted next word.
+        # Path should stay alive and pick up the corrected word.
+        loop = make_loop(['lights on'])
+        process(loop, 'lights off')   # 'off' is not valid — path holds at 'lights'
+        process(loop, 'lights on')    # correction brings valid next word
+        assert len(loop._dispatched) == 1
+
+    def test_correction_to_committed_word_does_not_redispatch(self):
+        # Path dispatches 'lights on'; Riva then sends a correction to position 0.
+        # The already-dispatched command should not fire again.
+        loop = make_loop(['lights on'])
+        process(loop, 'lights on')
+        assert len(loop._dispatched) == 1
+        # Riva corrects first word after dispatch — should be ignored
+        loop.interim_matcher.reset()
+        loop.riva_interim_word_count = 0
+        loop.prev_interim_transcript = 'lights on'
+        process(loop, 'lits on')
+        assert len(loop._dispatched) == 1

@@ -214,3 +214,86 @@ class TestWordListEntityCapture:
         assert last is not None
         # The pattern stored on CommandPattern is the original unexpanded line
         assert '{temp_extreme}' in last['pattern'] or 'high' in last['pattern']
+
+
+class TestWordListTwoSlotCapture:
+    """Two adjacent word-list slots separated by a literal must each capture independently."""
+
+    SHOWS = {
+        'show_a': {'values': ['dexter', 'silicon valley', 'mr robot']},
+        'show_b': {'values': ['dexter', 'silicon valley', 'mr robot']},
+    }
+
+    def _make(self, pattern):
+        m = StreamingCommandMatcher(FILLER_CONFIG)
+        pats, wsv = expand_pattern_entities(pattern, self.SHOWS)
+        m.register_intent('w:shared', pats, word_slot_values=wsv)
+        return m
+
+    def test_single_word_slots_separated_by_literal(self):
+        m = self._make('what actors are in both {show_a} and {show_b}')
+        last, _ = feed(m, 'what actors are in both dexter and mr robot'.split())
+        assert last is not None
+        assert last['entities']['show_a'] == 'dexter'
+        assert last['entities']['show_b'] == 'mr robot'
+
+    def test_multi_word_first_slot(self):
+        m = self._make('what actors are in both {show_a} and {show_b}')
+        last, _ = feed(m, 'what actors are in both silicon valley and dexter'.split())
+        assert last is not None
+        assert last['entities']['show_a'] == 'silicon valley'
+        assert last['entities']['show_b'] == 'dexter'
+
+    def test_multi_word_second_slot(self):
+        m = self._make('what actors are in both {show_a} and {show_b}')
+        last, _ = feed(m, 'what actors are in both dexter and silicon valley'.split())
+        assert last is not None
+        assert last['entities']['show_a'] == 'dexter'
+        assert last['entities']['show_b'] == 'silicon valley'
+
+    def test_both_multi_word_slots(self):
+        m = self._make('what actors are in both {show_a} and {show_b}')
+        last, _ = feed(m, 'what actors are in both silicon valley and mr robot'.split())
+        assert last is not None
+        assert last['entities']['show_a'] == 'silicon valley'
+        assert last['entities']['show_b'] == 'mr robot'
+
+    def test_slots_do_not_bleed_into_each_other(self):
+        m = self._make('what actors are in both {show_a} and {show_b}')
+        last, _ = feed(m, 'what actors are in both dexter and silicon valley'.split())
+        assert last is not None
+        # show_a must NOT contain "silicon" or "valley"
+        assert 'silicon' not in last['entities'].get('show_a', '')
+        assert 'valley' not in last['entities'].get('show_a', '')
+
+    def test_long_name_in_both_slots(self):
+        # e.g. "silicon valley and star trek the next generation"
+        shows = {
+            'show_a': {'values': ['silicon valley', 'star trek the next generation']},
+            'show_b': {'values': ['silicon valley', 'star trek the next generation']},
+        }
+        m = StreamingCommandMatcher(FILLER_CONFIG)
+        pats, wsv = expand_pattern_entities(
+            'what actors are in both {show_a} and {show_b}', shows
+        )
+        m.register_intent('w:shared', pats, word_slot_values=wsv)
+        last, _ = feed(m, 'what actors are in both silicon valley and star trek the next generation'.split())
+        assert last is not None
+        assert last['entities']['show_a'] == 'silicon valley'
+        assert last['entities']['show_b'] == 'star trek the next generation'
+
+    def test_long_first_slot_and_multi_word_second_slot(self):
+        # Hardest case: 5-word first slot, 2-word second slot
+        shows = {
+            'show_a': {'values': ['silicon valley', 'star trek the next generation']},
+            'show_b': {'values': ['silicon valley', 'star trek the next generation']},
+        }
+        m = StreamingCommandMatcher(FILLER_CONFIG)
+        pats, wsv = expand_pattern_entities(
+            'what actors are in both {show_a} and {show_b}', shows
+        )
+        m.register_intent('w:shared', pats, word_slot_values=wsv)
+        last, _ = feed(m, 'what actors are in both star trek the next generation and silicon valley'.split())
+        assert last is not None
+        assert last['entities']['show_a'] == 'star trek the next generation'
+        assert last['entities']['show_b'] == 'silicon valley'

@@ -238,9 +238,15 @@ def expand_pattern_entities(pattern, entity_expansions):
                 conn = sqlite3.connect(db_path)
                 rows = conn.execute(db_query).fetchall()
                 conn.close()
-                values.extend(str(r[0]) for r in rows if r[0])
+                # Strip punctuation Riva never emits so DB values match spoken words.
+                _punct = str.maketrans('', '', '.:\'"!?,')
+                values.extend(str(r[0]).translate(_punct) for r in rows if r[0])
             except Exception as e:
                 LOG.warning(f"Failed to load entity from db {db_path}: {e}")
+
+        extra = config.get('extra_values', [])
+        if extra:
+            values.extend(str(v) for v in extra if v)
 
         if values:
             entity_values[entity_name] = values
@@ -249,7 +255,13 @@ def expand_pattern_entities(pattern, entity_expansions):
             base_type = _resolve_entity_type(entity_name)
             is_special = base_type in (_NUMBER_ENTITY_NAMES | _CALC_ENTITY_NAMES | _DECIMAL_ENTITY_NAMES | _DECIMAL_LIST_ENTITY_NAMES | _NUMBER_STR_ENTITY_NAMES)
             if not is_special:
-                word_slot_values[entity_name] = frozenset(v.lower() for v in values)
+                # Split multi-word values into individual words so per-word
+                # matching works; check_completion accumulates them back.
+                all_words = set()
+                for v in values:
+                    for w in v.lower().split():
+                        all_words.add(w)
+                word_slot_values[entity_name] = frozenset(all_words)
 
     if not entity_values:
         return [pattern], word_slot_values
@@ -262,7 +274,13 @@ def expand_pattern_entities(pattern, entity_expansions):
         expanded = pattern
         for entity_name, value in zip(entity_order, combination):
             placeholder = f'{{{entity_name}}}'
-            expanded = expanded.replace(placeholder, value)
+            if entity_name in word_slot_values:
+                # Tag each word with its source entity so check_completion can
+                # assign by position rather than by global frozenset lookup.
+                tagged = ' '.join(f'__wsv:{entity_name}:{w}' for w in value.lower().split())
+                expanded = expanded.replace(placeholder, tagged)
+            else:
+                expanded = expanded.replace(placeholder, value)
         expanded_patterns.append(expanded)
 
     return expanded_patterns, word_slot_values
